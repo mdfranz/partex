@@ -143,6 +143,11 @@ Condensed from `SOURCE_SKILL_SYNTHESIS.md`; the full fork inventory stays in `SK
   as the Chinese localization reference. `playwright-cli`'s 9 companion docs are byte-identical
   across forks — port once, as agent guidance, without the Bash tool gate. Treat `scopesentry`
   as an integration-dependency reference (platform management, outside assessment coverage).
+  **License gate:** the forks are AGPL-3.0. Never cite a fork file as `derived_from` for an
+  Apache-2.0 skill — fork-original text cannot be relicensed. When a fork skill is itself
+  adapted from a permissive upstream (e.g. BaaRai `api-security` ← `zhaoxuya520/reverse-skill`,
+  MIT), cite the upstream directly and condense from its concepts; otherwise the resulting
+  skill must carry `license: AGPL-3.0`.
 - **strix** — 9 single-file skills, Apache-2.0. Best source for intake, result review, and
   handoff *structure* (`application-security-testing`'s asset→test mapping). They are
   product-CLI-specific: port the method, rewrite every command reference to the `partex` CLI.

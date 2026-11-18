@@ -33,6 +33,11 @@ on API payloads or redirects do not generate false positives.
 - **Secret redaction.** Never echo raw `Set-Cookie` values, session tokens, or
   `Authorization` headers in finding descriptions. Cite cookie names and attribute flags
   only; rely on `secret_fields` redaction (`<redacted>`).
+- **Boundary with `auth-session-controls` (`session-cookie-config`):** pure cookie
+  attribute gaps belong to this check; session semantics (session-cookie
+  classification, tokens in URLs and `Referer`, token lifecycle probes) belong to
+  `session-cookie-config` / `token-weakness`. When both checks run, attribute-only gaps
+  must not be double-reported.
 
 ## Check Mapping (`header-security`)
 

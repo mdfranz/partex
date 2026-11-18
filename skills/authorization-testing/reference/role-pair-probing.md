@@ -1,6 +1,7 @@
 # Role-Pair Probing Reference
 
-> Provenance: condensed from `BaaRai/ARTEX/skills/api-security/SKILL.md` (Phase 3
+> Provenance: condensed from the `api-security` playbook of
+> [zhaoxuya520/reverse-skill](https://github.com/zhaoxuya520/reverse-skill) (MIT; Phase 3
 > BOLA/BFLA and second-account rule), `communitytools/skills/api-security/SKILL.md`
 > (per-role replay matrix), and `communitytools/skills/web-app-logic/SKILL.md`
 > (multi-step workflow boundaries).
@@ -29,9 +30,18 @@
   standard or read-only role token.
 - Test implied sibling methods on resource paths (e.g. `DELETE /api/users/{id}` when
   only `GET` is intended for non-admins) and legacy version prefixes (`/v1/admin/...`).
+- **Mass assignment:** Append privilege-bearing properties (`"is_admin": true`,
+  `"role": "admin"`) to request bodies the lower-privilege role is allowed to send;
+  flag if the property sticks in the response or changes the account's effective role.
+- **Batch-operation injection:** Append another account's object id to bulk-body
+  arrays (`{"ids": [<own_id>, <role_a_id>]}`) the lower-privilege role can call.
 
 ## 4. Guardrails
 
+- Do not exfiltrate real user data to prove a boundary. One record the engagement is
+  authorized to touch, or the second engagement role's own object, is sufficient
+  evidence; stop at the `2xx` and record the boundary — do not page through or dump
+  other users' data.
 - Restrict state-mutating probes (`POST`/`PUT`/`PATCH`/`DELETE`) to test-owned records
   created within the engagement; never delete or corrupt real user data.
 - Respect `scope.exclusions` (such as `/admin/shutdown` or `/logout`) enforced by

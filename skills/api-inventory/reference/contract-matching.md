@@ -1,9 +1,10 @@
 # OpenAPI Contract Matching and Inventory Rules
 
-> Provenance: condensed from `BaaRai/ARTEX/skills/api-recon/SKILL.md` (declared vs.
-> observed surface), `strix/strix/skills/custom/api_spec_testing.md` (OpenAPI `$ref`/
-> `allOf` traversal and implied-method checks), and
-> `communitytools/skills/api-security/SKILL.md` (normalized operation templates).
+> Provenance: condensed from `strix/strix/skills/custom/api_spec_testing.md` (OpenAPI
+> `$ref`/`allOf` traversal and implied-method checks) and
+> `communitytools/skills/api-security/SKILL.md` (normalized operation templates). The
+> declared-vs.-observed split originates in `PARTX_SKILL_PLAN.md` §4 (P1.1), not in
+> third-party skill text.
 
 ## 1. Contract Ingestion (`ConfigExcerpt`)
 
@@ -32,7 +33,7 @@
   such as `/api/v1/` when only `/api/v3/` is declared).
 - **Undeclared or sensitive response fields:** When the contract specifies
   `additionalProperties: false` or an explicit `properties` list on a `2xx` JSON
-  response, flag extra response keys—especially credential, secret, or internal-flag names
+  response, flag extra response keys — especially credential, secret, or internal-flag names
   (`password_hash`, `secret`, `token`, `is_admin`, `role`, `ssn`).
 - **Sensitive-value exclusion:** Report only the schema path and property name; never
   embed observed field values in findings or exports.

@@ -12,7 +12,7 @@ license: Apache-2.0
 metadata:
   author: partex
   derived_from:
-    - BaaRai/ARTEX/skills/api-security/SKILL.md (AGPL-3.0)
+    - zhaoxuya520/reverse-skill api-security playbook (MIT)
     - communitytools/skills/api-security/SKILL.md (MIT)
     - communitytools/skills/web-app-logic/SKILL.md (MIT)
 ---

@@ -15,7 +15,7 @@ metadata:
   derived_from:
     - communitytools/skills/authentication/SKILL.md (MIT)
     - communitytools/skills/client-side/SKILL.md (MIT)
-    - BaaRai/ARTEX/skills/api-security/SKILL.md (AGPL-3.0)
+    - zhaoxuya520/reverse-skill api-security playbook (MIT)
 ---
 
 # Authentication and Session Controls
@@ -36,10 +36,15 @@ captured or bundled responses:
 - **Flag:** Bearer tokens or session identifiers appearing in URL query parameters or
   `Referer`-exposed redirects.
 - **Insufficient evidence:** Exchanges with no `Set-Cookie` or auth headers on public
-  unauthenticated routes—mark `not_applicable` or insufficient evidence rather than
+  unauthenticated routes — mark `not_applicable` or insufficient evidence rather than
   flagging.
 - **Redaction:** Cite cookie names and attribute flags only; never emit token or cookie
   values.
+- **Boundary with `header-review` (`header-security`):** Pure cookie-attribute gaps
+  (missing `HttpOnly`/`Secure`/`SameSite`) are the `header-security` finding class; when
+  both checks run, attribute-only gaps must not be double-reported. This check's distinct
+  value is session semantics: classifying session-bearing cookies, tokens in URLs and
+  `Referer`-exposed redirects, and probe-verified lifecycle controls.
 
 ### 2. `token-weakness` (`active`, with `verify_recipe`)
 
@@ -53,6 +58,12 @@ depth (minimal confirmation, no brute-force cracking):
   token; flag if still accepted (`2xx`).
 - **Signature / algorithm confusion:** Test `alg: none` (header rewritten, signature
   stripped) on JWT-authenticated endpoints; flag if accepted (`2xx`).
+- **Key confusion (RS256 → HS256):** Where the contract or captured tokens show an
+  asymmetric signature algorithm, re-sign a token using the endpoint's public key as
+  an HMAC secret; flag if accepted (`2xx`). Same depth class as `alg: none`.
+- **Out of v1 scope:** OAuth flow flaws (`redirect_uri` manipulation, missing `state`,
+  missing PKCE, token leakage via `Referer`/logs) and brute-forcing of HMAC secrets are
+  **not** part of `token-weakness`; do not drift into them during token probing.
 - **Missing evidence:** If no protected endpoint or token fixture is available in the
   engagement, record `needs_follow_up` in `CoverageEntry` rather than claiming pass.
 

@@ -876,6 +876,13 @@ class ActiveCheck(Protocol):
    pages; `verify_recipe` replays the single banner-bearing request.
 3. `banner-leak` skill + check (fixture only, §13 experiment 2): passive equivalent for the
    registry-separation test.
+4. Staged (drafted in `skills/`, not yet enabled): `api-inventory` +
+   `api-contract-conformance`, `authorization-testing` + `authz-boundary`,
+   `auth-session-controls` + `session-cookie-config` / `token-weakness` — the P1.1–P1.3
+   slices from `PARTX_SKILL_PLAN.md` §4. Each activates only when its check registers
+   (warning, not error, at `partex checks` time until then) and its fixture triad lands
+   (clean case, one per finding class, insufficient-evidence case), one slice at a time
+   post-M6.
 
 The header-review fixture exercises the whole passive contract; the version-disclosure fixture
 exercises capture → active probe → verify → replay → export against the local fixture app.
@@ -1117,6 +1124,9 @@ network door with scope enforced inside it. `--no-summary` is the only model-fre
 default for CI; summary, agent, and chat require an explicit `--model`. Passive review of
 offline bundles is a first-class mode with full determinism; live runs trade byte-determinism
 for evidence-backed auditability and replayable verification. The shipped skill set is the
-header-review and version-disclosure fixtures until the experiments pass end to end; broader
-skill content — including offensive playbooks from the BaaRai inventory — is integrated only
-after M6, one skill at a time, each with its own fixture.
+header-review and version-disclosure fixtures until the experiments pass end to end. The
+P1.1–P1.3 skills (`api-inventory`, `authorization-testing`, `auth-session-controls`) are
+**drafted and staged** in `skills/` per `PARTX_SKILL_PLAN.md` §4; they stay unenabled until
+their checks register and their fixture triads land, integrated one slice at a time
+post-M6, each with its own fixture. Further skill content — including offensive playbooks
+from the BaaRai inventory — follows the same gate.

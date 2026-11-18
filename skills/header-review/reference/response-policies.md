@@ -42,6 +42,11 @@ redirect `HttpExchange` records.
 - **Redaction rule:** Record only the cookie **name** and missing/weak attribute flags in
   finding output. Never include the cookie value in `title`, `description`, or
   `remediation`.
+- **Boundary:** Attribute gaps are this check's finding class. Session semantics —
+  classifying session-bearing cookies, tokens in URLs or `Referer`-exposed redirects,
+  and probe-verified token lifecycle — belong to `auth-session-controls`
+  (`session-cookie-config` / `token-weakness`); do not double-report attribute-only
+  gaps when both checks run.
 
 ## 5. Cross-Origin Resource Sharing (CORS)
 
