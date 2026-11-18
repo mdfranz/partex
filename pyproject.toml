@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "partex"
+version = "0.1.0"
+description = "Offline web application security evidence review"
+requires-python = ">=3.14"
+dependencies = [
+    "pydantic-ai-slim",
+    "pydantic-ai-harness[repair-tool-arguments]",
+    "pydantic-clai2",
+    # Direct on purpose: uv applies `[tool.uv.sources]` to direct dependencies only, and clai2's
+    # `pydantic-monty>=1.5.0,<2` is transitive. The metapackage's exact client/runtime pins then
+    # resolve the whole trio from the audited Monty checkout (PLAN §3.1, RUNTIME.md M0).
+    "pydantic-monty",
+]
+
+[project.scripts]
+partex = "partex.__main__:main"
+
+[project.entry-points."partex.checks"]
+
+# PLAN §3.1: every `pydantic-*` and `pydantic-monty*` resolves from the audited sibling
+# checkouts, never from PyPI. The Monty trio is reached transitively (`pydantic-clai2`
+# pins `pydantic-monty`, whose exact `==1.6.0` pins bring in client and runtime).
+# `editable = true` matches how the checkouts' own uv workspaces resolve their members;
+# non-editable path sources conflict with the `workspace = true` refs inside them.
+[tool.uv.sources]
+pydantic-ai-slim = { path = "../pydantic-ai/pydantic_ai_slim", editable = true }
+pydantic-ai-harness = { path = "../pydantic-ai/src/pydantic_ai_harness", editable = true }
+pydantic-clai2 = { path = "../pydantic-ai/src/pydantic_clai2", editable = true }
+pydantic-monty = { path = "../monty/packages/pydantic-monty", editable = true }
+pydantic-monty-client = { path = "../monty/crates/monty-python", editable = true }
+pydantic-monty-runtime = { path = "../monty/crates/monty-runtime", editable = true }
+
+[dependency-groups]
+dev = ["anyio", "inline-snapshot", "pyright", "pytest", "pytest-cov", "ruff"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/partex"]
+
+# Built-in skills ship as package data (`partex/skills/`); `skills/` itself stays a
+# plain repo directory — never imported or executed (CLAUDE.md).
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "partex/skills"
+
+[tool.ruff]
+include = ["*.py", "*.pyi", "pyproject.toml"]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+include = ["src", "scripts"]
+
+[tool.pytest.ini_options]
+anyio_mode = "auto"
+testpaths = ["scripts/check_greenfield.py", "scripts/check_httpx2_gate.py", "tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["partex"]
