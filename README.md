@@ -18,6 +18,7 @@ It draws workflow patterns—engagement lifecycle, evidence-linked findings, rep
 | [`SOURCES.md`](SOURCES.md) | **ARTEX ecosystem overview**: survey of the four ARTEX codebases (`ARTEX/` Python scanner, `artex-global/`, `BaaRai/ARTEX/`, `failsafe/artex/`), lineage tree, quick-start commands, and the November 2026 prebuilt-image supply-chain backdoor incident. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | **ARTEX architectural comparison**: deep comparison of the Python prototype and the three Go multi-agent forks—system diagrams, planner/worker/retester run loop, asset + exploration dual-graph data model, tool gate (`intercept/`), `llmpool/`, MITM traffic capture, and fork philosophies (*breadth* vs. *depth* vs. *integrity*). |
 | [`SKILLS.md`](SKILLS.md) | **ARTEX skill inventory**: breakdown of the 10 agent skills shipped across the three Go forks (`api-recon`, `playwright-cli`, `scopesentry`, plus BaaRai's 7 offensive/RE playbooks) and the server-side skill management API. |
+| [`DEPS.md`](DEPS.md) | **Dependency & browser automation decisions (review draft)**: what the pinned local checkouts already provide (httpx, anyio, PyYAML, rich, logfire), per-module library decisions for the staged checks (minimal OpenAPI resolver, stdlib-only JWT, RFC 6265 cookie parsing, URL canonicalization contingency), the `httpx`/`httpx2` M0 conflict, and the three **required** capture/probe paths (scoped Python client, browser automation harness, HAR import — mirroring the original frameworks), with the browser engine comparison (Playwright-over-CDP primary, raw CDP fallback) and explicit questions for review. |
 
 ---
 
@@ -100,11 +101,13 @@ From [`PLAN.md` §8](PLAN.md#8-cli-surface):
 | `partex test <engagement>` | Active | Run live baseline capture, passive + active checks, and PoC verification (requires `--authorized`). |
 | `partex verify <run-id> <finding-id>` | Active | (Re-)execute the minimal verification recipe for a finding against the live target (requires `--authorized`). |
 | `partex export-bundle <run-id>` | Export | Export a live run's captured exchanges as a passive-reviewable bundle (secrets redacted by default). |
+| `partex import-har <file.har>` | Import | Build a passive-reviewable bundle from an operator-exported HAR file — the MITM-free browser-capture path. |
 | `partex runs` | Query | List recorded runs from SQLite (`RunStore`). |
 | `partex show <run-id>` | Export | Export a run's evidence, findings, verifications, tool calls, and summary as canonical JSON or text. |
 | `partex summarize <run-id>` | Model | Generate or retry a reference-validated `ReviewSummary` over committed findings. |
 | `partex checks` | Registry | List registered checks (`PassiveCheck` / `ActiveCheck`), linked skills, and frontmatter lint status. |
 | `partex agent <engagement>` | Active + Model | Run the deterministic `test` pipeline, then hand control to the interactive CLAI2 agent or bounded `--auto` loop (requires `--authorized`). |
+| `partex browse <engagement>` | Active + Browser (M7) | Browser capture harness: record and actively probe authenticated SPA flows as evidence via operator Chrome (CDP attach) or managed Chromium (requires `--authorized`). |
 | `partex chat <run-id>` | Read-only + Monty | Interactive read-only review chat over a saved run using CLAI2's Monty-backed Code Mode. |
 
 ---
@@ -122,6 +125,7 @@ From [`PLAN.md` §8](PLAN.md#8-cli-surface):
 | **M4** | Summarization | `summarize.py`, `partex summarize`, two-layer finding ID reference validation, retry & timeout handling. | [§13.5](PLAN.md#135-model-and-terminal-integration) |
 | **M5** | Agent & Reviewer | `agent_adapter.py`, `partex chat` (read-only Monty Code Mode + opt-in speculative reads evaluation per [`RUNTIME.md`](RUNTIME.md)), `partex agent` (interactive CLAI2 + `--auto`), hook-based `tool_calls` audit table. | [§13.4 (agent)](PLAN.md#134-scope-gate-capture-and-verification), [§13.5](PLAN.md#135-model-and-terminal-integration) |
 | **M6** | Hardening | 100% branch coverage target (with audited I/O pragmas), operator/engagement authoring docs, recorded validation experiment results. | All §13 gates |
+| **M7** | Browser Capture Harness | `browser.py` (Playwright over CDP — operator-launched Chrome primary, managed Chromium for credential-free discovery and CI), `partex browse` CLI, route-interception scope gate with budget accounting, blanket `secret_fields` marking of browser captures, fixture SPA, agent `browser_*` tools. | [§13.6](PLAN.md#136-browser-capture-harness-m7) |
 
 ### Post-M6 Skill Slices ([`PARTX_SKILL_PLAN.md` §4](PARTX_SKILL_PLAN.md#4-re-ranked-priorities-dual-mode))
 

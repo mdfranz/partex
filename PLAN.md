@@ -50,14 +50,15 @@ or runtime.
 ### Non-goals (v1)
 
 - No multi-user, no server, no web UI beyond the terminal. One operator, one machine.
-- No MITM proxy: live evidence comes from the package's own scoped HTTP client, not from
-  intercepting a browser or external tools (see §17).
+- No MITM proxy: live evidence comes from the package's own scoped HTTP client, from the
+  browser capture harness's network-event recording (M7), or from operator-exported HAR files
+  (M3) — never from intercepting third-party or external tools' traffic (see §17.5).
 - No exploit payload development beyond verification: verification proves a finding with the
   minimal request set (an error triggered, a boundary crossed, a version-confirmed CVE
   signature); it does not build shells, persistence, or post-exploitation tooling (see §17).
 - No write-back to findings from chat or the agent loop: the model proposes, the engine
   validates evidence and disposes (§9).
-- No HAR import, no diffing between runs (see §17).
+- No diffing between runs (see §17).
 
 ### Constraints
 
@@ -122,12 +123,18 @@ Layer rules:
 | Engine | validation, evidence registration, check execution, verification orchestration, persistence, export | import or execute skill content; build prompts |
 | Registry | discover checks (entry points) and skills (directories), join by `check_id` | contain testing logic |
 | Target client | scope enforcement, request execution, evidence capture, rate limiting | decide what to request; bypass scope for any caller |
+| Browser harness (M7) | browser-driven capture and probing into `RunStore`; role contexts; route-interception scope gate | intercept network traffic (MITM); serve as the client for checks or verification (they stay on the scoped client) |
 | Agent adapter | agent construction, scoped tools, CLAI2 wiring, `--auto` loop | mutate run state; construct raw HTTP outside the scoped tool |
 | Checks (passive) | deterministic review logic over validated evidence | I/O, network, model calls, storage access |
 | Checks (active) | probe logic expressed through the target client | construct their own HTTP stack; write storage |
 
-The scope gate lives **only** in the target client, and the target client is the **only** module
-that opens sockets. Checks, the verification runner, and the agent's HTTP tool all receive a
+The scope gate lives **only** in the target client, and the target client is the **only**
+module that opens sockets directly. The M7 browser capture harness (§15) is the sanctioned
+exception: it attaches to (or, for credential-free discovery and CI, launches) a browser
+process that opens its own sockets, and its scope is enforced at the automation layer's
+route hook — out-of-scope navigations and requests are aborted before send and recorded on
+the run — never by prompt. Checks, the verification runner, and the agent's HTTP tool all
+receive a
 client handle scoped to one engagement; a request that fails scope is a hard error before it
 reaches the network.
 
@@ -216,8 +223,16 @@ partex/
   DNS-rebinding guard and correct SNI + hostname cert verification on a pre-resolved address
   are security-critical; httpx's `follow_redirects=False` and custom transport provide them
   without hand-rolling sockets/`ssl`. No other HTTP library is introduced; anything beyond
-  httpx must come from the audited local source set, not PyPI. Dev dependencies: `pytest`,
-  `anyio`, `ruff`, `pyright`, `inline-snapshot`.
+  httpx must come from the audited local source set, not PyPI. **M0 must settle `httpx` vs
+  `httpx2`** (the local `pydantic-ai-slim`/`pydantic-ai-harness` depend on `httpx2>=2.7`
+  while `pydantic-clai2` pins `httpx>=0.28.1`; `target.py` pins exactly one API surface —
+  see `DEPS.md` §3.9). Dev dependencies: `pytest`, `anyio`, `ruff`, `pyright`,
+  `inline-snapshot`, plus `coverage`/`pytest-cov` (the 100% branch target) and the checkout's
+  `capfire` fixture for Logfire span assertions. The M0–M6 milestones add **no other PyPI
+  runtime dependency** (`DEPS.md` documents the per-module decisions: minimal OpenAPI
+  resolver as check code, stdlib-only JWT crafting, hand-rolled RFC 6265 cookie parsing);
+  the M7 browser harness adds lockfile-pinned `playwright` (fallback: `websockets` for
+  capture-only raw CDP) as the single scheduled post-M6 addition.
 - Tooling conventions mirror the checkout: ruff with single quotes and 120-column lines, pyright
   strict, `anyio_mode = "auto"`, coverage target 100% branch with narrow pragmas on true I/O
   edges.
@@ -346,7 +361,8 @@ Severity = Literal['info', 'low', 'medium', 'high', 'critical']
 class HttpEvidence(BaseModel):
     id: str                  # "ev_" + sha256(canonical_json)[:16]  (§12)
     kind: Literal['http_exchange'] = 'http_exchange'
-    source: str              # bundle-relative file, or "capture:<run-seq>" for live captures
+    source: str              # bundle-relative file; "capture:<run-seq>" (client);
+                              # "capture:browser:<seq>" (harness, M7)
     http: HttpExchange
     secret_fields: list[str] # JSON paths marked secret (credential headers/bodies), redacted on export & model return
 
@@ -653,11 +669,13 @@ emits a passive-reviewable bundle from a live run's captures (redacted by defaul
 | `partex test <engagement>` | live run: capture, passive + active checks, verify | `--authorized` (required), `--checks`, `--workers`, `--no-verify`, `--no-summary`, `--model`, `--db` |
 | `partex verify <run-id> <finding-id>` | (re)run verification for one finding in one run | `--authorized`, `--db` |
 | `partex export-bundle <run-id>` | write a passive bundle from a live run's captures | `--out DIR`, `--include-secrets` |
+| `partex import-har <file.har>` | build a passive-reviewable bundle from an operator-exported HAR (M3; the MITM-free capture path) | `--out DIR` |
 | `partex runs` | list runs (id, state, input, findings count) | `--db`, `--json` |
 | `partex show <run-id>` | export a run | `--format json\|text`, `--include-secrets`, `--out`, `--db` |
 | `partex summarize <run-id>` | (re)generate the summary | `--model`, `--summary-timeout`, `--db` |
 | `partex checks` | list registered checks (kind, scope needs) and their skills | `--json` |
 | `partex agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--verifier-model`, `--judge-model`, `--agent-max-requests`, `--db` |
+| `partex browse <engagement>` | browser capture harness (M7): record and actively probe authenticated SPA flows as evidence | `--authorized` (required), `--attach <cdp-port>`, `--db` |
 | `partex chat <run-id>` | read-only review chat over a saved run | `--model`, `--db`, `--skill-dir` |
 
 Selection semantics unchanged: `--checks` is an explicit, ordered, de-duplicated list; unknown
@@ -1003,6 +1021,9 @@ socket.
 - *Authorization*: `test` without `--authorized` exits 1 before any network or model call.
 - *Capture*: a live `test` against the fixture app records every exchange as evidence;
   `export-bundle` round-trips into a passive `review` that reproduces the passive findings.
+- *HAR import*: a fixture HAR round-trips through `import-har` into a passive `review` that
+  reproduces the passive findings; entries outside the bundle's declared target scope are
+  filtered with a reported count; a malformed HAR exits 1 with a diagnostic.
 - *Verification*: `version-disclosure` finds the banner, `verify` confirms it (verdict
   `confirmed`, evidence attached, finding transitions to `verified`); a fixture app variant
   without the banner yields `not_reproduced` and `verification_failed`; both transitions keep
@@ -1035,6 +1056,29 @@ Verify through embedded CLAI2 that the reviewer receives Code Mode with only its
 tools, no mounts, and fresh state per review invocation. Exercise cancellation and resource
 limits on stored fixture evidence. Compare direct calls, eager Code Mode, and opt-in
 speculation as specified in [RUNTIME.md](RUNTIME.md).
+
+### 13.6 Browser capture harness (M7)
+
+Against the fixture target app extended with a static HTML/JS SPA page, on localhost; the
+`conftest.py` non-loopback socket block stays on. Primary mode attaches over CDP to an
+operator-launched Chromium (`--attach`); CI uses the managed-Chromium mode. Harness-issued
+requests count against the engagement's `max_rps` / `max_requests` budgets exactly like
+client-issued ones.
+
+- *Route-interception scope gate*: out-of-scope navigation and requests (other host, excluded
+  path, disallowed port) are aborted before send and recorded on the run; in-scope flows
+  proceed. Assert no out-of-scope bytes hit the wire.
+- *Role contexts*: two `engagement.roles` run as separate browser contexts with isolated
+  storage state; captured exchanges cite the role.
+- *Credential-free discovery*: route stubs for login/bootstrap endpoints (the forks'
+  `api-recon` mock pattern) render the SPA's post-login shell with zero real credentials.
+- *Capture and redaction*: every exchange commits at capture time (source
+  `capture:browser:<seq>`); `Cookie`/`Authorization` headers are blanket-marked
+  `secret_fields`; default export and `lookup_evidence` show `<redacted>`.
+- *Round-trip*: a browsed session exports as a bundle whose passive `review` reproduces the
+  passive findings.
+- *Driver provenance*: the lockfile pins the exact `playwright` wheel; a §13.1-style check
+  asserts no other new distributions entered the environment.
 
 ## 14. Test strategy
 
@@ -1069,12 +1113,13 @@ gains a "result" column as experiments land).
 | M4 | Summarization | `summarize.py`, `summarize` CLI, retry/validation/timeout policy | 13.5 (references, timeout) |
 | M5 | Agent and chat | `models_config.py`, `agent_adapter.py`, `chat` (read-only) + `agent` (interactive via `chat()` and `--auto` via `agent.run()`/`agent.iter()` with loop/budget guards & `StepPersistence`), reviewer `CodeMode` and opt-in speculation evaluation, headless + cancellation tests, tmux checklist | 13.4 (agent), 13.5 (reviewer runtime, retrieval, cancellation) |
 | M6 | Hardening | coverage to target, README, engagement author docs (scope, authorization, credential handling), experiment results recorded | all |
+| M7 | Browser capture harness | `browser.py` (Playwright; `connect_over_cdp` primary, managed Chromium for credential-free/CI), `partex browse` CLI, route-interception scope gate with budget accounting, blanket `secret_fields` marking of browser captures, fixture SPA page, agent `browser_*` tools over the harness | 13.6 |
 
 ## 16. Risks
 
 | Risk | Mitigation |
 |---|---|
-| The tool is used outside authorized engagements | Hard gates: attestation + `--authorized` required before any traffic; scope enforced in the one module that opens sockets; README and `engage init` template make the authorization requirement unmissable. (This deters accidents and casual misuse, not a determined operator — same posture as the original Artex skills' standing rules.) |
+| The tool is used outside authorized engagements | Hard gates: attestation + `--authorized` required before any traffic; scope enforced in the one module that opens sockets (plus the harness route hook, M7); README and `engage init` template make the authorization requirement unmissable. (This deters accidents and casual misuse, not a determined operator — same posture as the original Artex skills' standing rules.) |
 | Scope bypass (redirect, DNS rebinding, URL parsing edge) | No automatic redirects; pinned per-run resolution; canonicalization tested with hostile URL fixtures; 13.4 asserts nothing reaches the wire on violation |
 | CLAI2 `chat()` is a local checkout API that moves | Adapter is one module + one integration test; checkout is path-pinned; seam exercised by 13.4/13.5 rather than assumed |
 | Terminal tests flaky in CI | Headless-only in CI; interactive checks are manual tmux gates |
@@ -1087,6 +1132,7 @@ gains a "result" column as experiments land).
 | SQLite becomes a multi-operator tool by accretion | v1 documents one operator, one machine; store refuses unknown `user_version` |
 | Workers write to the store directly as features accrete | Single-writer rule; test asserts `RunReader` connections open `mode=ro` and check code cannot import `storage` |
 | `database is locked` under concurrent processes | WAL + `busy_timeout`; one writer connection per process; `BEGIN IMMEDIATE`; lock timeout exits 1 clearly |
+| Browser harness reopens scope and supply-chain surface | Scope enforced at the automation-layer route hook, not prompts; harness requests share engagement budgets; browser captures blanket-mark `secret_fields`; `playwright` lockfile-pinned with capture-only raw CDP as the documented fallback (`DEPS.md` §7); 13.6 asserts refusals precede send |
 
 ## 17. Open questions
 
@@ -1104,9 +1150,12 @@ gains a "result" column as experiments land).
    for usage errors; see §6.
 4. **Migration policy**: additive `ALTER TABLE` with `user_version` bumps (Go forks' approach)
    vs. refuse-and-export/import for v1 only?
-5. **HAR / proxy ingestion**: the Go forks capture via MITM proxy; is `partex import-har`
-   worth shipping as a passive-bundle producer, or does the scoped client stay the only
-   live-capture path?
+5. **HAR / proxy ingestion (decided)**: `partex import-har` ships in M3 as the
+   passive-bundle producer for operator-exported captures — the replacement for the forks'
+   MITM-proxy capture path, since §1 forbids interception. The scoped client stays the only
+   engine-driven live-capture door; the M7 browser harness (§13.6) is the sanctioned
+   browser-flow capture and probing path, and agent-driven browsing enters through `browser_*`
+   tools over that harness, never a shell.
 6. **Chat annotation**: should `chat` gain append-only operator notes (never findings
    mutation), needing a notes table and a read-only-plus-notes store handle?
 7. **CLAI2 session reuse**: should the run record store the agent/chat `session_id` so
@@ -1129,4 +1178,6 @@ P1.1–P1.3 skills (`api-inventory`, `authorization-testing`, `auth-session-cont
 **drafted and staged** in `skills/` per `PARTX_SKILL_PLAN.md` §4; they stay unenabled until
 their checks register and their fixture triads land, integrated one slice at a time
 post-M6, each with its own fixture. Further skill content — including offensive playbooks
-from the BaaRai inventory — follows the same gate.
+from the BaaRai inventory — follows the same gate. Capture and probing run through the same
+three paths the ARTEX lineage ran — the scoped client (M3), operator HAR import (M3), and
+the browser capture harness (M7) — with no MITM interception anywhere.

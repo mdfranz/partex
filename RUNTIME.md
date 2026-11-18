@@ -33,6 +33,26 @@ offline fixtures. Record answer accuracy, time to answer, and calls started, reu
 discarded. Verify redaction, run isolation, and cancellation in each mode. Consider enabling
 speculation by default only if the observed latency improvement justifies the added work.
 
+## M7 browser capture harness
+
+The harness is an evidence producer and an active probe surface, never a check runtime:
+deterministic checks and the verification runner keep the scoped client. Primary mode
+attaches over CDP to an operator-launched Chromium, so partex never manages browser binaries
+or touches the operator's credentials — the browser holds the session. Managed Chromium is
+used only for the credential-free mock-stub discovery mode and CI fixtures against localhost.
+
+Scope is enforced at the automation-layer route hook, not prompts: out-of-scope navigations
+and requests are aborted before send and recorded on the run, and harness requests share
+the engagement's `max_rps` / `max_requests` budgets. Browser contexts map one-to-one onto
+`engagement.roles` with isolated storage state, discarded at session end. Every exchange
+commits at capture time (source `capture:browser:<seq>`), so a browser crash or cancelled
+session leaves all committed evidence readable; `Cookie`/`Authorization` headers from
+browser captures are blanket-marked `secret_fields` and redacted at the export and
+model-facing boundaries like any other secret. Commands that touch the harness pin anyio's
+asyncio backend (Playwright's async API is asyncio-native) and fail loudly on trio. The
+M7 gate is [PLAN.md](PLAN.md) §13.6; engine options and the raw-CDP fallback are recorded
+in [DEPS.md](DEPS.md).
+
 ## Full Python and native tools
 
 Defer a second runtime until an offline analysis task needs packages or binaries unavailable
