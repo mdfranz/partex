@@ -38,6 +38,7 @@ Frontmatter contract:
 | `name` | **Must equal the directory name**, kebab-case. The forks match skills by directory name; the `scopesentry`/`scopesentry-mcp` divergence (see `SKILLS.md`) is the warning case. |
 | `description` | One *when-to-invoke* sentence. The agent reads only this (plus the capability catalog) until it loads the skill. |
 | `checks` | Every registered check id the skill documents. Unknown ids warn at `partex checks` time; a check with no skill and a skill with no check are both legal (§10). |
+| `modes` | Required. The execution modes the skill's guidance serves — `passive` (bundle review), `active` (live testing), or both. Validated by the D6 lint; surfaced to the agent alongside the description, so mode relevance is visible before the body loads. |
 | `license`, `metadata` | Optional, strix-style (`license: Apache-2.0`, `metadata: {author, homepage}`). **Required when content is derived** — see §7. |
 
 Structural rules:
@@ -50,8 +51,9 @@ Structural rules:
   A 40–55-file scenario tree ports as a small set of thematic reference docs, one per finding
   class the checks actually emit (see §7 targets).
 - **English only**, UTF-8, wrapped ~90 cols, matching the repo's doc style.
-- **Mode annotations.** The skill body states which mode(s) its guidance serves (passive bundle
-  review, active live testing, or both) and annotates each documented check id accordingly.
+- **Mode annotations are frontmatter.** `modes` declares the skill's modes (§2 table); the
+  body elaborates per check id where they differ (e.g. `session-cookie-config` passive vs
+  `token-weakness` active within one skill).
 - **Fixtures ship with the skill**: fixture bundles under `partex/fixtures/skills/<name>/`
   (engine fixtures already live in `partex/fixtures/`, §13), one bundle per acceptance case.
 
@@ -75,11 +77,13 @@ author docs (M6), and the coverage report derived from `runs.scope_snapshot` +
 
 ## 4. Re-ranked priorities (dual-mode)
 
-Rationale carried forward from the superseded draft, now mode-annotated: API inventory comes
-first because it establishes the **stable operation identifiers and evidence references** that
-authorization reuses; authorization is the highest-impact family; session/auth builds on both.
-Defensive coverage validation (the old P1.2/P1.3 core) moves behind the offensive path as P2.3
-because it depends on an engine input format that does not exist yet (D4 below).
+Ranking criteria carried over from the superseded draft — **impact on the application under
+test, breadth of coverage, readiness of the existing evidence model** — now applied per mode.
+API inventory comes first because it establishes the **stable operation identifiers and
+evidence references** that authorization reuses; authorization is the highest-impact family;
+session/auth builds on both. Defensive coverage validation (the old P1.2/P1.3 core) moves
+behind the offensive path as P2.3 because it depends on an engine input format that does not
+exist yet (D4 below).
 
 | Priority | Skill (dir name) | Modes & checks | Primary sources | First deliverable | Acceptance criteria | Lands after |
 |---|---|---|---|---|---|---|
@@ -99,16 +103,17 @@ fixture). P0 rows are already inside M1–M3 and anchor every contract below.
 
 ## 5. Engine deltas required (proposed `PLAN.md` amendments)
 
-Gaps the re-ranked skills expose in the engine plan. Each is a proposal, not yet in `PLAN.md`:
+Gaps the re-ranked skills expose in the engine plan. **D1, D2, and D6 are landed in `PLAN.md`
+(this round); D3 rides with its slice (S4); D4 and D5 stay deferred:**
 
 | # | Delta | Amends | Needed by | State |
 |---|---|---|---|---|
-| D1 | Contracts as evidence: OpenAPI documents enter bundles as `ConfigExcerpt` with `format: openapi` and a `revision` field; checks match concrete captured paths against path templates. Evidence model (§5) unchanged; adds an **operation-key normalization rule** (method + normalized path) so finding IDs stay stable (§12). | §4.3, §5, §12 | P1.1 | proposal |
-| D2 | Engagement `roles` block: optional role→credential map (`{"owner": "PARTEX_CRED_OWNER", ...}`), validated like `credentials` (E4: env-var names only). Authorization probes need two scoped identities. | §4.1 | P1.2 | proposal |
+| D1 | Contracts as evidence: OpenAPI documents enter bundles as `ConfigExcerpt` with `format: openapi` and a `revision` field; checks match concrete captured paths against path templates. Evidence model (§5) unchanged; adds an **operation-key normalization rule** (method + normalized path) so finding IDs stay stable (§12). | §4.3, §5, §12 | P1.1 | **landed in PLAN.md** |
+| D2 | Engagement `roles` block: optional role→credential map (`{"owner": "PARTEX_CRED_OWNER", ...}`), validated like `credentials` (E4: env-var names only). Authorization probes need two scoped identities. | §4.1 | P1.2 | **landed in PLAN.md** |
 | D3 | Coverage report: derive from `runs.scope_snapshot` + `requests_spent`; the owner-maintained route inventory is a bundle `ConfigExcerpt`. Replaces the old "assessment brief" draft artifact. | §7, §11 | P2.1/P2.3 | proposal |
 | D4 | CI-result import format (policy revision, operation/test id, expected, observed, evidence ref). New evidence kind, not a `ConfigExcerpt`. | §4.3, §5 | P2.3 | deferred, then proposal |
 | D5 | `SourceCheck` protocol for white-box review. `PLAN.md` §17.8 already asks; answer stays **deferred** — no source-assisted skill lands before the P3 proposal. | §10 | P3 | deferred |
-| D6 | Frontmatter lint: `name == dirname`, attribution fields present when derived, `checks` cross-join clean under `partex checks`. | §10 | P0/M2 | proposal |
+| D6 | Frontmatter lint: `name == dirname`, `modes` values valid, attribution fields present when derived, `checks` cross-join clean under `partex checks`. | §10 | P0/M2 | **landed in PLAN.md** |
 
 ## 6. Definition of ready (per skill)
 
@@ -136,14 +141,17 @@ Condensed from `SOURCE_SKILL_SYNTHESIS.md`; the full fork inventory stays in `SK
   `api-recon`, `playwright-cli`, `scopesentry`. Use **BaaRai as the English base** (10 skills),
   consult **failsafe** for packaging hardening (runtime refusal patterns), treat `artex-global`
   as the Chinese localization reference. `playwright-cli`'s 9 companion docs are byte-identical
-  across forks — port once, as agent guidance, without the Bash tool gate.
+  across forks — port once, as agent guidance, without the Bash tool gate. Treat `scopesentry`
+  as an integration-dependency reference (platform management, outside assessment coverage).
 - **strix** — 9 single-file skills, Apache-2.0. Best source for intake, result review, and
   handoff *structure* (`application-security-testing`'s asset→test mapping). They are
   product-CLI-specific: port the method, rewrite every command reference to the `partex` CLI.
 - **communitytools** — MIT (© 2025 Transilience AI), 49 manifests incl. nested specializations,
   plus a router `INDEX.md`. Deepest scenario trees (`api-security`: 42 refs, `web-app-logic`:
   55). `transilience-report-style` ships schema + example + generator test — the packaging
-  exemplar for any evidence/report format (D3/D4).
+  exemplar for any evidence/report format (D3/D4). Use the router `INDEX.md` as a **coverage
+  catalog**: sweep it before drafting to catch topic gaps. `regression-sweep` ships a companion
+  on **diff normalization** — the model for S4's drift classes.
 - **Python `ARTEX` + `pydantic-ai`** — no web/API skill content; out of this backlog.
 
 Condensation targets: port `api-security`'s 42-file tree into ≤ 6 thematic reference docs (one
@@ -161,6 +169,21 @@ per check finding class), `web-app-logic`'s 55 into ≤ 4; keep only scenarios t
 6. Build fixtures to the §6 definition of ready.
 7. Review gate: walk the acceptance criteria; land post-M6, one skill per slice.
 8. Record provenance per doc (source files condensed, license carried).
+
+**First drafting targets**, field-level specs carried from the superseded draft so S1–S2
+synthesis starts from the same place the old backlog did:
+
+1. **Coverage matrix** — surface, role, workflow, evidence reference, status
+   (`assessed` / `unassessed` / `inapplicable`). This is the core table of the D3 coverage
+   report, not a shipped skill.
+2. **API operation inventory** (S1) — operation identity, protocol, contract revision,
+   provenance (declared vs observed), linked application workflows. Drafting it answers the
+   D1 gate question: can the bundle format represent both declared and observed operations?
+   (Answer is now yes — `format: openapi` excerpts — but the draft still decides how the
+   linkage is expressed.)
+3. **Authorization and workflow coverage guide** (S2) — roles and tenants mapped to expected
+   outcomes per operation, verified against one ordinary **browser** workflow and one
+   **API-only** workflow, to prove one vocabulary covers both surfaces.
 
 ## 9. Out of scope for this backlog
 
