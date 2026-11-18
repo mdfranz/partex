@@ -243,6 +243,7 @@ engagement/
     "operator": "j.operator"
   },
   "credentials": {"session": "PARTEX_CRED_SESSION"},
+  "roles": {"owner": "PARTEX_CRED_OWNER", "guest": "PARTEX_CRED_GUEST"},
   "suggested_checks": ["header-security", "version-disclosure"]
 }
 ```
@@ -258,6 +259,13 @@ row is finalized):
 | E4 | `credentials` values are environment variable **names** matching `[A-Z0-9_]+`; inline values are rejected. Referenced variables must be set at run start | `credential-invalid` / `credential-missing` |
 | E5 | `base_url` host must be inside `scope.hosts` | `scope-invalid` |
 | E6 | `suggested_checks` entries that are not registered are dropped with a warning | - |
+| E7 | `roles` is optional; keys are role names, values are environment variable **names** matching `[A-Z0-9_]+`, validated exactly like `credentials` (E4), each role a distinct variable; referenced variables must be set at run start | `credential-invalid` / `credential-missing` |
+
+`roles` maps role names to credential variables for multi-identity testing: active
+authorization checks and their verification recipes replay the same operation under two roles
+to prove a boundary is real (never by trusting a single response). Each role binds its own
+client handle through the same scope gate (§4.2), and its credential fields are marked
+`secret_fields` at capture like any other (§5).
 
 ### 4.2 Scope enforcement (target client)
 
@@ -302,7 +310,11 @@ required. Sanitization-before-sharing remains the producer's responsibility and 
 absence of evidence is not evidence of absence.
 
 Evidence model (v1 kinds) is unchanged: `HttpExchange` (request/response with headers and
-optional text bodies) and `ConfigExcerpt` (path, format, content). Response capture sends
+optional text bodies) and `ConfigExcerpt` (path, format, content). API contract documents
+enter as `ConfigExcerpt` records with `format: openapi` and a `revision` (git SHA or version
+string) alongside the path, so passive checks match concrete captured paths against the
+contract's path templates and findings can cite the contract revision they were reviewed
+against. Response capture sends
 `Accept-Encoding: gzip` and transparently decodes `Content-Encoding` before storage; a decoded
 body that is not valid UTF-8 (or is dominated by non-printable bytes) is captured as headers
 plus a `body_refused` marker — binary bytes are never stored, and `Content-Type` is a hint, not
@@ -722,7 +734,7 @@ offensive playbooks); checks are code. They stay outside the engine and are join
 
 ```text
 skills/<name>/
-  SKILL.md        # YAML frontmatter: name, description, checks: [...]
+  SKILL.md        # YAML frontmatter: name, description, modes: [...], checks: [...]
   reference/*.md  # optional deeper content; exposed on demand via Capability(..., defer_loading=True)
 ```
 
@@ -753,6 +765,11 @@ class ActiveCheck(Protocol):
 - Third-party checks register via the entry-point group `partex.checks`. Check code loads
   **only** from installed distributions; extra skill roots load via `--skill-dir` (data). That
   is the trust boundary: arbitrary paths can add Markdown, never code.
+- **Frontmatter lint** (`partex checks`): `name` must equal the directory name (matching is by
+  directory); `modes` values are validated against `passive`/`active` — the execution modes the
+  skill's guidance serves, surfaced to the agent alongside the description; skills whose
+  content is derived from third-party material must declare `license` and `metadata` provenance
+  fields.
 - A skill naming an unregistered check is a warning at `partex checks` time; a check with
   no skill is fine; a skill with no check is fine (agent playbook only).
 
@@ -820,7 +837,10 @@ The scope change splits the guarantee in two:
 - **Passive mode keeps full determinism.** Evidence ID = `ev_` + sha256 of the canonical JSON of
   `kind` + `http`/`config` **only** (excluding `id`, `source`, and `secret_fields`, so an
   exchange hashes the same whether captured live or re-imported from a bundle); finding ID =
-  `fn_` + sha256 of `check_id + '\0' + title + '\0' + '\0'.join(sorted evidence_ids)`. Checks
+  `fn_` + sha256 of `check_id + '\0' + title + '\0' + '\0'.join(sorted evidence_ids)`.
+  Findings that name an API operation use the **normalized operation key** — uppercase method
+  plus the contract's path template with parameters inlined — never the raw observed path, so
+  finding IDs survive bundle revisions and route reordering. Checks
   may run concurrently but assemble in selection order; exports are canonical JSON. Given the
   same bundle and selection, passive exports are byte-identical across runs, machines, and
   restarts.
