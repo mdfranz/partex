@@ -8,6 +8,8 @@
 > outside the engine as data, findings are always evidence-backed and survive every failure
 > mode, and the validation suite runs credential-free against local fixture targets.
 
+See [RUNTIME.md](RUNTIME.md) for execution environments, access boundaries, and state lifetime.
+
 ## 1. Scope
 
 Build a new Python package, `partex` (import name `partex`), from scratch using the local
@@ -199,6 +201,13 @@ partex/
   `[tool.uv.overrides]` entries so clai2's workspace references and exact-version pins resolve to
   the local paths. Settling the precise `sources` + `overrides` shape is part of M0, and is a
   known risk (not a surprise) going in.
+- **M0 Monty packaging**: CLAI2 requires `pydantic-monty>=1.5.0,<2` even when
+  Code Mode is disabled. Map `pydantic-monty` to `../monty/packages/pydantic-monty`,
+  `pydantic-monty-client` to `../monty/crates/monty-python`, and
+  `pydantic-monty-runtime` to `../monty/crates/monty-runtime`. Resolve all three from
+  the same audited revision, honor the metapackage's exact pins, and verify the Rust/Maturin
+  source builds and worker startup from outside both checkouts. Apply uv overrides as needed
+  for the metapackage's workspace dependencies.
 - Other runtime dependencies: the target client uses **httpx** (pinned via the lockfile; it is
   already a direct dependency of `pydantic-clai2`, so it is present regardless). The
   DNS-rebinding guard and correct SNI + hostname cert verification on a pre-resolved address
@@ -618,6 +627,11 @@ skill playbooks registered as on-demand deferred capabilities (`defer_loading=Tr
 evidence redacted and framed as attacker-controlled data, no write tools, and cross-run IDs
 rejected via `ToolFailed`.
 
+**Code Mode settings.** Enable `run.code_mode` for the read-only reviewer in M5.
+Keep `run.speculative_code_mode` off by default and evaluate it as a reviewer opt-in.
+Set both switches off for other embedded sessions. Headless `agent.run()` and
+`agent.iter()` use the capabilities supplied to the agent. See [RUNTIME.md](RUNTIME.md).
+
 **`agent <engagement>` — operator in the loop or `--auto`**: an agent with tools over the live
 engagement. `agent` runs the **same deterministic pipeline as `test`** first — baseline capture
 + passive checks + active checks + verification — producing a `checks_complete` run with
@@ -872,6 +886,9 @@ As before: fresh venv, local path sources, run `partex review fixtures/bundles/v
 distribution, no Artex-fork modules in `sys.modules`, no PyPI `pydantic-*` (non-`pydantic`
 deps may come from PyPI).
 
+Check that the Monty metapackage, client, and runtime all resolve from the audited local
+checkout, and smoke-test a Monty session with a constant expression from outside the checkouts.
+
 ### 13.2 Skill separation
 
 As before: register `banner-leak` via a tiny entry-point distribution (or the public registry
@@ -928,6 +945,11 @@ cross-run IDs via `ToolFailed`; cancellation mid-turn keeps findings readable an
 history; summary timeout is retryable. All with `TestModel`/`FunctionModel` via
 `agent.override()` and `capture_run_messages()`; real model calls blocked globally.
 
+Verify through embedded CLAI2 that the reviewer receives Code Mode with only its three read
+tools, no mounts, and fresh state per review invocation. Exercise cancellation and resource
+limits on stored fixture evidence. Compare direct calls, eager Code Mode, and opt-in
+speculation as specified in [RUNTIME.md](RUNTIME.md).
+
 ## 14. Test strategy
 
 - **Stack**: pytest + anyio pytest plugin (`anyio_mode = "auto"`), inline-snapshot, ruff +
@@ -954,12 +976,12 @@ gains a "result" column as experiments land).
 
 | # | Milestone | Delivers | Gated by |
 |---|---|---|---|
-| M0 | Environment | package skeleton, uv project with local path sources, CI stub, network + model blocking fixtures | 13.1 |
+| M0 | Environment | package skeleton, uv project with local path sources and Monty source builds, CI stub, network + model blocking fixtures | 13.1 |
 | M1 | Passive core | `models.py`, `bundle.py`, `ids.py`, `storage.py`, `export.py`, `engine.py` (passive path), header-security check, bundle fixtures, `review`/`runs`/`show`/`checks` CLI | 13.3 (a–d) |
 | M2 | Registry and skill separation | `registry.py`, skills as data, entry-point loading, `banner-leak` fixture distribution, `--skill-dir` | 13.2 |
 | M3 | Live testing | `engagement.py`, `scope.py`, `target.py`, `verify.py`, live engine path, per-check commits, fixture target app, `engage`/`test`/`verify`/`export-bundle` CLI, version-disclosure check | 13.3 (e), 13.4 (scope, authorization, capture, verification, budgets, redaction) |
 | M4 | Summarization | `summarize.py`, `summarize` CLI, retry/validation/timeout policy | 13.5 (references, timeout) |
-| M5 | Agent and chat | `agent_adapter.py`, `chat` (read-only) + `agent` (interactive via `chat()` and `--auto` via `agent.run()`/`agent.iter()`), headless + cancellation tests, tmux checklist | 13.4 (agent), 13.5 (retrieval, cancellation) |
+| M5 | Agent and chat | `agent_adapter.py`, `chat` (read-only) + `agent` (interactive via `chat()` and `--auto` via `agent.run()`/`agent.iter()`), reviewer Code Mode and opt-in speculation evaluation, headless + cancellation tests, tmux checklist | 13.4 (agent), 13.5 (reviewer runtime, retrieval, cancellation) |
 | M6 | Hardening | coverage to target, README, engagement author docs (scope, authorization, credential handling), experiment results recorded | all |
 
 ## 16. Risks

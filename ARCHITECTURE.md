@@ -7,6 +7,11 @@ points on the feature-vs-integrity spectrum.
 
 ---
 
+Partex's proposed architecture is in [PLAN.md](PLAN.md). Its passive engine runs installed
+Python checks and owns persistence. The CLAI2 reviewer runs generated Python in Monty and
+accesses stored evidence through run-scoped, redacted read tools. See [RUNTIME.md](RUNTIME.md)
+for the execution boundaries and milestone decisions.
+
 ## High-Level Comparison
 
 | Dimension | `ARTEX/` (Python) | `artex-global/` | `BaaRai/ARTEX/` | `failsafe/artex/` |
