@@ -58,8 +58,8 @@ Structural rules:
 - **Mode annotations are frontmatter.** `modes` declares the skill's modes (§2 table); the
   body elaborates per check id where they differ (e.g. `session-cookie-config` passive vs
   `token-weakness` active within one skill).
-- **Fixtures ship with the skill**: fixture bundles under `partex/fixtures/skills/<name>/`
-  (engine fixtures already live in `partex/fixtures/`, §13), one bundle per acceptance case.
+- **Fixtures ship with the skill**: fixture bundles under `fixtures/skills/<name>/`
+  (engine fixtures already live in `fixtures/`, §13), one bundle per acceptance case.
 
 ## 3. Taxonomy
 

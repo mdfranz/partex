@@ -140,13 +140,14 @@ reaches the network.
 
 ## 3. Package layout
 
-New standalone package at `partex/` beside the checkouts (not inside the `pydantic-ai` uv
-workspace; see §3.1):
+The package lives at the **root of this repository** (not inside the `pydantic-ai` uv
+workspace; see §3.1). The repository root is the uv project; `skills/` and `fixtures/` stay at
+the root where they already are:
 
 ```text
-partex/
+<repo root>/
   pyproject.toml
-  README.md
+  README.md  PLAN.md  RUNTIME.md  ...   # planning docs stay at the root
   src/partex/
     __init__.py            # version, public re-exports
     __main__.py            # console entry point
@@ -160,25 +161,37 @@ partex/
                            #   ensure_ascii, compact separators)
     models_config.py       # role-based ModelRouter, fallback/retry/concurrency wrappers,
                            #   per-role ModelSettings (thinking, cache, timeouts)
+    errors.py              # PartexError, ValidationFailed (rule code), ScopeViolation, BudgetExhausted
     registry.py            # check/skill discovery and join
+    surface.py             # deterministic surface graph population (nodes/edges) from evidence
     checks/
-      __init__.py          # PassiveCheck / ActiveCheck protocols, draft validation
-      builtin.py           # header-security (passive), version-disclosure (active probe)
-    target.py              # scoped HTTP client (the only socket-opening module), capture
+      __init__.py          # PassiveCheck / ActiveCheck / TargetClient protocols, FindingDraft,
+                           #   VerificationRecipe, draft validation
+      builtin.py           # re-exports the built-in checks below (entry-point targets)
+      header_security.py   # header-security (passive)
+      version_disclosure.py  # version-disclosure (active probe + verify_recipe)
+    har.py                 # import-har: HAR file -> passive bundle, scope-filtered (M3)
+    browser.py             # M7 browser capture harness (Playwright; sanctioned socket exception)
+    target.py              # scoped HTTP client (the only engine socket-opening module), capture
                            #   (httpx2, follow_redirects=False, pinned resolver + SNI)
     verify.py              # verification runner: minimal PoC replay, verdict, evidence
     engine.py              # run lifecycle, ordered execution, failure policy, single writer
     storage.py             # SQLite RunStore, schema, migrations
     export.py              # JSON export with default secret redaction
     summarize.py           # model-backed ReviewSummary generation + reference validation
-    agent_adapter.py       # agent, AgentDeps, scoped tools, CLAI2 chat() wiring (interactive)
-                           # + --auto loop via agent.run()/agent.iter()
-    skills/
-      header-review/
-        SKILL.md           # frontmatter: name, description, checks: [header-security]
-        reference/*.md
-      version-disclosure/
-        SKILL.md
+    agent_adapter/         # the only package that imports pydantic_clai2
+      __init__.py          # AgentDeps, build helpers, public entry points
+      tools.py             # shared run-scoped read tools, redaction + untrusted-data envelope
+      reviewer.py          # partex_reviewer_agent (chat <run-id>), CodeMode wiring
+      tester.py            # partex_tester_agent, scoped live tools, audit hooks
+      auto.py              # --auto loop via agent.run()/agent.iter(), StepPersistence
+  skills/                  # built-in skills (data); shipped in the wheel as partex/skills/
+    header-review/
+      SKILL.md             # frontmatter: name, description, modes, checks: [header-security]
+      reference/*.md
+    version-disclosure/
+      SKILL.md
+    api-inventory/  authorization-testing/  auth-session-controls/   # staged (§10)
   fixtures/
     bundles/valid/         # valid passive fixture bundle
     bundles/malformed/     # one dir per failure mode (§13)
@@ -190,19 +203,37 @@ partex/
     test_target.py         # scope gate: in-scope allowed, out-of-scope refused, redirect handling
     test_verify.py         # verdicts, replay, evidence capture against fixture app
     test_engine.py  test_storage.py  test_export.py  test_summarize.py
-    test_agent_adapter.py  # tools scoped to engagement+run, out-of-scope tool calls refused,
+    test_agent_tester.py   # tools scoped to engagement+run, out-of-scope tool calls refused,
                            #   tool_calls audit rows recorded
-    test_agent_terminal.py # chat() integration: TestModel, Console(StringIO), cancellation
+    test_agent_reviewer.py # chat() integration: TestModel, Console(StringIO), cancellation
 ```
+
+Built-in skills stay at `skills/` in the source tree (one location for drafting and shipping);
+the build backend force-includes them into the wheel at `partex/skills/` and the registry
+loads them through `importlib.resources`. They remain data: nothing under `skills/` is imported
+or executed. `fixtures/` and `tests/` are not shipped.
+
+The module splits above (`errors.py`, `surface.py`, one module per built-in check, and
+`agent_adapter/` as a package) exist so independent work items own disjoint files; the
+architectural boundaries in §2 are unchanged (`agent_adapter` is still the only importer of
+`pydantic_clai2`, `target.py` still the only engine socket-opening module, with the M7
+`browser.py` harness as the one sanctioned exception described in §2).
 
 ### 3.1 Environment and dependencies
 
-- Python `>= 3.11`, matching the checkout's floor. Managed with `uv` (0.12.x, available locally).
+- Python `>= 3.11`, matching the checkout's floor. Code must not use 3.12+ syntax (no PEP 695
+  `type` statements or generic class syntax); type aliases are plain assignments. Managed with
+  `uv` (0.12.x, available locally).
+- **Local checkout locations**: the audited checkouts are expected as siblings of this
+  repository — `../pydantic-ai` and `../monty` — and every path below is relative to the
+  repository root. uv path sources cannot read environment variables, so a machine that keeps
+  the checkouts elsewhere symlinks them into those sibling paths; it never edits
+  `pyproject.toml` to point at another location. `partex` does not build without them.
 - A standalone uv project. `[tool.uv.sources]` maps every `pydantic-*` dependency to the local
   checkout paths so **no `pydantic-*` resolves from PyPI**:
-  `pydantic-ai-slim -> pydantic-ai/pydantic_ai_slim`, `pydantic-ai-harness ->
-  pydantic-ai/src/pydantic_ai_harness` (with `[repair-tool-arguments]` for `json-repair`),
-  `pydantic-clai2 -> pydantic-ai/src/pydantic_clai2`.
+  `pydantic-ai-slim -> ../pydantic-ai/pydantic_ai_slim`, `pydantic-ai-harness ->
+  ../pydantic-ai/src/pydantic_ai_harness` (with `[repair-tool-arguments]` for `json-repair`),
+  `pydantic-clai2 -> ../pydantic-ai/src/pydantic_clai2`.
   Non-`pydantic` third-party dependencies resolve from the pinned lockfile as normal. The exact
   transitive member list is settled in M0 (§15) by the greenfield dependency check.
 - **M0 packaging note**: `pydantic-clai2` declares its `pydantic-ai-slim`/`pydantic-ai-harness`
@@ -373,7 +404,7 @@ class ConfigEvidence(BaseModel):
     config: ConfigExcerpt
     secret_fields: list[str]
 
-type Evidence = Annotated[HttpEvidence | ConfigEvidence, Field(discriminator='kind')]
+Evidence = Annotated[HttpEvidence | ConfigEvidence, Field(discriminator='kind')]  # plain alias: 3.11 floor
 
 class Finding(BaseModel):
     id: str                  # "fn_" + sha256(check_id + '\0' + title + '\0' + sorted evidence_ids)[:16]
@@ -649,7 +680,7 @@ CREATE TABLE llm_usage (
 );
 ```
 
-Dual-graph & coverage note: `surface_nodes` / `surface_edges` (populated deterministically at capture and OpenAPI contract ingestion time) form the **Surface Graph** ("what exists"), while `coverage_entries` + `findings` + `verifications` + `tool_calls` form the **Exploration & Coverage Ledger** ("what was tested, by which source, and with what evidence"). Reconciling `agent_reported` closures against `machine_observed` runtime facts (checks run, skills loaded, budget/timeout completion) powers the D3 coverage report without conflating self-reports with observed execution.
+Dual-graph & coverage note: `surface_nodes` / `surface_edges` (populated deterministically at capture and OpenAPI contract ingestion time) form the **Surface Graph** ("what exists"), while `coverage_entries` + `findings` + `verifications` + `tool_calls` form the **Exploration & Coverage Ledger** ("what was tested, by which source, and with what evidence"). Reconciling `agent_reported` closures against `check_observed` runtime facts (checks run, skills loaded, budget/timeout completion) powers the D3 coverage report without conflating self-reports with observed execution.
 
 Schema versioning: `PRAGMA user_version`; a store with an unknown version is refused with a
 clear error, never migrated destructively (§17).
@@ -977,7 +1008,7 @@ The scope change splits the guarantee in two:
 ## 13. Validation experiments
 
 Each experiment is scripted and credential-free: live tests run against the bundled fixture
-target app on localhost; all fixtures live in `partex/fixtures/`. Experiments gate the
+target app on localhost; all fixtures live in `fixtures/`. Experiments gate the
 milestones (§15).
 
 **Fixture target app** (`fixtures/target_app/`): a deliberately vulnerable stdlib
@@ -1000,7 +1031,7 @@ checkout, and smoke-test a Monty session with a constant expression from outside
 
 As before: register `banner-leak` via a tiny entry-point distribution (or the public registry
 API), run the same passive review, confirm findings persist and export with **no edits** to
-`engine.py`, `storage.py`, `models.py`, `agent_adapter.py`.
+`engine.py`, `storage.py`, `models.py`, or `agent_adapter/`.
 
 ### 13.3 Engine repeatability and failure policy
 
@@ -1119,7 +1150,7 @@ gains a "result" column as experiments land).
 | M2 | Registry and skill separation | `registry.py`, skills as data, entry-point loading, `banner-leak` fixture distribution, `--skill-dir` | 13.2 |
 | M3 | Live testing | `engagement.py`, `scope.py`, `target.py`, `verify.py` (incl. `counterevidence`), live engine path, per-check commits, fixture target app, `engage`/`test`/`verify`/`export-bundle` CLI, version-disclosure check | 13.3 (e), 13.4 (scope, authorization, capture, verification, budgets, redaction) |
 | M4 | Summarization | `summarize.py`, `summarize` CLI, retry/validation/timeout policy | 13.5 (references, timeout) |
-| M5 | Agent and chat | `models_config.py`, `agent_adapter.py`, `chat` (read-only) + `agent` (interactive via `chat()` and `--auto` via `agent.run()`/`agent.iter()` with loop/budget guards & `StepPersistence`), reviewer `CodeMode` and opt-in speculation evaluation, headless + cancellation tests, tmux checklist | 13.4 (agent), 13.5 (reviewer runtime, retrieval, cancellation) |
+| M5 | Agent and chat | `models_config.py`, `agent_adapter/`, `chat` (read-only) + `agent` (interactive via `chat()` and `--auto` via `agent.run()`/`agent.iter()` with loop/budget guards & `StepPersistence`), reviewer `CodeMode` and opt-in speculation evaluation, headless + cancellation tests, tmux checklist | 13.4 (agent), 13.5 (reviewer runtime, retrieval, cancellation) |
 | M6 | Hardening | coverage to target, README, engagement author docs (scope, authorization, credential handling), experiment results recorded | all |
 | M7 | Browser capture harness | `browser.py` (Playwright; `connect_over_cdp` primary, managed Chromium for credential-free/CI), `partex browse` CLI, route-interception scope gate with budget accounting, blanket `secret_fields` marking of browser captures, fixture SPA page, agent `browser_*` tools over the harness | 13.6 |
 

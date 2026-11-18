@@ -46,7 +46,7 @@ It draws workflow patterns—engagement lifecycle, evidence-linked findings, rep
    - **Checks** (`PassiveCheck` and `ActiveCheck` protocols) are trusted Python code loaded exclusively from installed distributions via the `partex.checks` entry-point group—never from arbitrary filesystem paths.
 
 6. **Sandboxed Reviewer & Scoped Agent Runtimes**
-   - **`partex chat <run-id>` (Read-Only Reviewer)**: Uses CLAI2's Monty-backed Code Mode (`run.code_mode=True`, `load_plugins=False`) with only three run-scoped, secret-redacted read tools (`list_findings`, `get_finding`, `lookup_evidence`), fresh per-invocation sandbox state, resource/time limits, and zero filesystem mounts, network doors, or store handles.
+   - **`partex chat <run-id>` (Read-Only Reviewer)**: Uses Monty-backed `CodeMode` attached directly on the reviewer agent (CLAI2's own `run.code_mode` and `run.speculative_code_mode` stay **off** so no host directory is mounted; `load_plugins=False`) with only three run-scoped, secret-redacted read tools (`list_findings`, `get_finding`, `lookup_evidence`), fresh per-invocation sandbox state, resource/time limits, and zero filesystem mounts, network doors, or store handles.
    - **`partex agent <engagement>` (Tester Agent)**: Executes the deterministic `test` pipeline first, then launches an interactive CLAI2 `chat()` session or a bounded `--auto` loop (`agent.run()` / `agent.iter()`) confined to the engagement scope by the tool layer (`http_request`, `run_check`, `request_verification`, `list_findings`, `lookup_evidence`, `list_surface`, `record_coverage` — plus the M7 `browser_*` harness tools for browser-driven flows) with full `tool_calls` audit logging.
 
 7. **Supply-Chain Hardening & Hermetic Validation**
@@ -58,6 +58,8 @@ It draws workflow patterns—engagement lifecycle, evidence-linked findings, rep
 ## Source & Reference Repositories
 
 ### 1. Runtime & Agent Stack (Audited Local Checkouts)
+
+Both checkouts must sit beside this repository at the paths below (symlink them there if they live elsewhere); `pyproject.toml` resolves them by relative path, and `partex` does not build without them. See [`PLAN.md` §3.1](PLAN.md#31-environment-and-dependencies).
 
 | Repository | Local Checkout Path | Role in ParTEx |
 |---|---|---|
@@ -124,7 +126,7 @@ From [`PLAN.md` §8](PLAN.md#8-cli-surface):
 | **M2** | Registry & Skill Separation | `registry.py`, data-only skills + frontmatter lint (D6), entry-point check loading, `banner-leak` fixture distribution, `--skill-dir`. | [§13.2](PLAN.md#132-skill-separation) |
 | **M3** | Live Testing | `engagement.py` (incl. `roles` D2), `scope.py`, `target.py` (`ScopedHttpClient`), `verify.py`, per-capture/per-check commits, local fixture target app, `version-disclosure` active check, `engage`/`test`/`verify`/`export-bundle` CLI. | [§13.3 (e)](PLAN.md#133-engine-repeatability-and-failure-policy), [§13.4](PLAN.md#134-scope-gate-capture-and-verification) |
 | **M4** | Summarization | `summarize.py`, `partex summarize`, two-layer finding ID reference validation, retry & timeout handling. | [§13.5](PLAN.md#135-model-and-terminal-integration) |
-| **M5** | Agent & Reviewer | `agent_adapter.py`, `partex chat` (read-only Monty Code Mode + opt-in speculative reads evaluation per [`RUNTIME.md`](RUNTIME.md)), `partex agent` (interactive CLAI2 + `--auto`), hook-based `tool_calls` audit table. | [§13.4 (agent)](PLAN.md#134-scope-gate-capture-and-verification), [§13.5](PLAN.md#135-model-and-terminal-integration) |
+| **M5** | Agent & Reviewer | `agent_adapter/`, `partex chat` (read-only Monty Code Mode + opt-in speculative reads evaluation per [`RUNTIME.md`](RUNTIME.md)), `partex agent` (interactive CLAI2 + `--auto`), hook-based `tool_calls` audit table. | [§13.4 (agent)](PLAN.md#134-scope-gate-capture-and-verification), [§13.5](PLAN.md#135-model-and-terminal-integration) |
 | **M6** | Hardening | 100% branch coverage target (with audited I/O pragmas), operator/engagement authoring docs, recorded validation experiment results. | All §13 gates |
 | **M7** | Browser Capture Harness | `browser.py` (Playwright over CDP — operator-launched Chrome primary, managed Chromium for credential-free discovery and CI), `partex browse` CLI, route-interception scope gate with budget accounting, blanket `secret_fields` marking of browser captures, fixture SPA, agent `browser_*` tools. | [§13.6](PLAN.md#136-browser-capture-harness-m7) |
 
