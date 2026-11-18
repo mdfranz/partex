@@ -151,6 +151,8 @@ partex/
     scope.py               # Scope model + matching (hosts, path prefixes, exclusions, ports)
     ids.py                 # content-hash IDs, canonical JSON encoding (sorted keys,
                            #   ensure_ascii, compact separators)
+    models_config.py       # role-based ModelRouter, fallback/retry/concurrency wrappers,
+                           #   per-role ModelSettings (thinking, cache, timeouts)
     registry.py            # check/skill discovery and join
     checks/
       __init__.py          # PassiveCheck / ActiveCheck protocols, draft validation
@@ -192,7 +194,8 @@ partex/
 - A standalone uv project. `[tool.uv.sources]` maps every `pydantic-*` dependency to the local
   checkout paths so **no `pydantic-*` resolves from PyPI**:
   `pydantic-ai-slim -> pydantic-ai/pydantic_ai_slim`, `pydantic-ai-harness ->
-  pydantic-ai/src/pydantic_ai_harness`, `pydantic-clai2 -> pydantic-ai/src/pydantic_clai2`.
+  pydantic-ai/src/pydantic_ai_harness` (with `[repair-tool-arguments]` for `json-repair`),
+  `pydantic-clai2 -> pydantic-ai/src/pydantic_clai2`.
   Non-`pydantic` third-party dependencies resolve from the pinned lockfile as normal. The exact
   transitive member list is settled in M0 (§15) by the greenfield dependency check.
 - **M0 packaging note**: `pydantic-clai2` declares its `pydantic-ai-slim`/`pydantic-ai-harness`
@@ -376,6 +379,16 @@ class Verification(BaseModel):
     verdict: Literal['confirmed', 'not_reproduced', 'inconclusive']
     replayable: bool         # True when verdict came from a deterministic replay recipe
     detail: str              # why the verdict holds: matched error, crossed boundary, etc.
+    counterevidence: str     # opposing-case check (reachability, preconditions, scope, control)
+
+class CoverageEntry(BaseModel):
+    surface: str             # surface node key or normalized operation key (e.g. "GET /api/users/{id}")
+    risk_area: str           # check_id or vulnerability class
+    outcome: Literal['reported', 'no_issue_found', 'ruled_out', 'not_applicable', 'needs_follow_up']
+    source: Literal['check_observed', 'agent_reported']
+    evidence_ids: list[str]  # required for reported / no_issue_found
+    reason: str              # required for ruled_out / not_applicable / needs_follow_up
+    goal_attempts: int = 0   # conceptual-goal attempt counter for stuck detection
 
 class ReviewSummary(BaseModel):
     narrative: str
@@ -573,13 +586,57 @@ CREATE TABLE summaries (
   model TEXT NOT NULL,
   generated_at TEXT NOT NULL
 );
+CREATE TABLE surface_nodes (
+  run_id TEXT NOT NULL REFERENCES runs,
+  node_id TEXT NOT NULL,          -- deterministic hash of (kind, key)
+  kind TEXT NOT NULL,             -- host | endpoint | parameter | role | tech_banner
+  key TEXT NOT NULL,              -- normalized key (e.g. "GET /users/{id}" per §12)
+  metadata TEXT NOT NULL,         -- JSON attributes
+  evidence_ids TEXT NOT NULL,     -- JSON array of supporting evidence_ids
+  PRIMARY KEY (run_id, node_id)
+);
+CREATE TABLE surface_edges (
+  run_id TEXT NOT NULL REFERENCES runs,
+  src_id TEXT NOT NULL,
+  dst_id TEXT NOT NULL,
+  rel TEXT NOT NULL,              -- exposes_endpoint | accepts_param | authenticated_as | redirects_to
+  evidence_id TEXT,
+  PRIMARY KEY (run_id, src_id, dst_id, rel)
+);
+CREATE TABLE coverage_entries (
+  run_id TEXT NOT NULL REFERENCES runs,
+  surface TEXT NOT NULL,
+  risk_area TEXT NOT NULL,
+  outcome TEXT NOT NULL,          -- reported | no_issue_found | ruled_out | not_applicable | needs_follow_up
+  source TEXT NOT NULL,           -- check_observed | agent_reported
+  evidence_ids TEXT NOT NULL,     -- JSON array
+  reason TEXT NOT NULL,
+  goal_attempts INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (run_id, surface, risk_area)
+);
+CREATE TABLE llm_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES runs,
+  role TEXT NOT NULL,             -- tester | verifier | summarizer | reviewer | judge
+  model TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,           -- ok | error
+  created_at TEXT NOT NULL
+);
 ```
+
+Dual-graph & coverage note: `surface_nodes` / `surface_edges` (populated deterministically at capture and OpenAPI contract ingestion time) form the **Surface Graph** ("what exists"), while `coverage_entries` + `findings` + `verifications` + `tool_calls` form the **Exploration & Coverage Ledger** ("what was tested, by which source, and with what evidence"). Reconciling `agent_reported` closures against `machine_observed` runtime facts (checks run, skills loaded, budget/timeout completion) powers the D3 coverage report without conflating self-reports with observed execution.
 
 Schema versioning: `PRAGMA user_version`; a store with an unknown version is refused with a
 clear error, never migrated destructively (§17).
 
 Export (`partex show <run-id> --format json [--out FILE]`) emits the run, its evidence, its
-findings, its verifications, its tool calls, and its summary (or `null`), with sorted keys and
+findings, its verifications, its coverage ledger, its tool calls, and its summary (or `null`), with sorted keys and
 stable field order. **`secret_fields` are redacted to `<redacted>` by default**; `--include-secrets` opts
 out and warns. Export excludes `created_at`, run IDs, and timestamps, so the repeatability
 experiment compares passive exports byte-for-byte (§13). Findings order: (severity rank desc,
@@ -600,7 +657,7 @@ emits a passive-reviewable bundle from a live run's captures (redacted by defaul
 | `partex show <run-id>` | export a run | `--format json\|text`, `--include-secrets`, `--out`, `--db` |
 | `partex summarize <run-id>` | (re)generate the summary | `--model`, `--summary-timeout`, `--db` |
 | `partex checks` | list registered checks (kind, scope needs) and their skills | `--json` |
-| `partex agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--agent-max-requests`, `--db` |
+| `partex agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--verifier-model`, `--judge-model`, `--agent-max-requests`, `--db` |
 | `partex chat <run-id>` | read-only review chat over a saved run | `--model`, `--db`, `--skill-dir` |
 
 Selection semantics unchanged: `--checks` is an explicit, ordered, de-duplicated list; unknown
@@ -627,10 +684,7 @@ skill playbooks registered as on-demand deferred capabilities (`defer_loading=Tr
 evidence redacted and framed as attacker-controlled data, no write tools, and cross-run IDs
 rejected via `ToolFailed`.
 
-**Code Mode settings.** Enable `run.code_mode` for the read-only reviewer in M5.
-Keep `run.speculative_code_mode` off by default and evaluate it as a reviewer opt-in.
-Set both switches off for other embedded sessions. Headless `agent.run()` and
-`agent.iter()` use the capabilities supplied to the agent. See [RUNTIME.md](RUNTIME.md).
+**Code Mode settings.** For `partex chat <run-id>`, attach `CodeMode(tools=['list_findings', 'get_finding', 'lookup_evidence'], eager=True, speculate=['list_findings', 'get_finding', 'lookup_evidence'] if speculate else None, mount=None, os_access=None)` directly on `partex_reviewer_agent` and keep CLAI2's `run.code_mode` and `run.speculative_code_mode` off (so CLAI2's `WorkspaceCodeMode` does not mount the host working directory and its `SpeculativeExecution` allowlist does not filter out `partex`'s tools). Keep speculation off by default and evaluate it as a reviewer opt-in. Headless `agent.run()` and `agent.iter()` use the capabilities supplied to the agent. See [RUNTIME.md](RUNTIME.md).
 
 **`agent <engagement>` — operator in the loop or `--auto`**: an agent with tools over the live
 engagement. `agent` runs the **same deterministic pipeline as `test`** first — baseline capture
@@ -647,7 +701,11 @@ class AgentDeps:
     client: ScopedHttpClient   # target client handle; scope enforced inside (§4.2)
     engine: EngineHandle       # submit drafts, request verification — never raw storage
 
-def build_agent(model: Model | str, skills: Sequence[Capability]) -> Agent[AgentDeps, str]:
+from pydantic_ai_harness.repair_tool_arguments import RepairToolArguments
+
+def build_agent(model: Model | str, skills: Sequence[Capability],
+                *, fallbacks: Sequence[Model | str] = (),
+                auto: bool = False) -> Agent[AgentDeps, str]:
     agent = Agent(
         model,
         name='partex_tester_agent',
@@ -657,10 +715,14 @@ def build_agent(model: Model | str, skills: Sequence[Capability]) -> Agent[Agent
         defer_model_check=True,
         capabilities=[
             Caching(),
+            RetryOnModelErrors(max_attempts=3, initial_delay=1.0, max_delay=30.0),
+            *( [ModelFallback(*fallbacks, sticky=True)] if fallbacks else [] ),
             RepairToolArguments(),
             ToolOutputLimits(bands=[Band(over=10_000, action=Truncate())]),
+            ToolBudgets(refuse_repeats={'http_request', 'run_check', 'request_verification'}),
+            DetectLoops(action='nudge'),
             SystemReminders(dynamic_reminders=[GoalReanchor()]),
-            build_audit_hooks(),  # records every tool call & result to tool_calls table
+            build_audit_hooks(),  # records tool_calls + llm_usage to RunStore
             *skills,              # each skill wrapped with Capability(..., defer_loading=True)
         ],
     )
@@ -688,10 +750,22 @@ def build_agent(model: Model | str, skills: Sequence[Capability]) -> Agent[Agent
     @agent.tool
     def lookup_evidence(ctx: RunContext[AgentDeps], evidence_id: str) -> Evidence: ...
         # cross-run or unknown evidence_id raises ToolFailed; returns secret-redacted Evidence
+        # wrapped in a per-run random-nonce untrusted data envelope (<partex_evidence_<nonce>>)
+
+    @agent.tool
+    def list_surface(ctx: RunContext[AgentDeps]) -> list[dict[str, Any]]: ...
+        # read-only view of the run's SQLite Surface Graph (hosts, endpoints, params, roles)
+
+    @agent.tool
+    def record_coverage(ctx: RunContext[AgentDeps], surface: str, risk_area: str,
+                        outcome: str, evidence_ids: list[str] | None = None,
+                        reason: str = '') -> CoverageEntry: ...
+        # records agent_reported coverage via ctx.deps.engine (single writer)
 ```
 
 Design rules:
 
+- **Role-based model routing & provider resilience (`models_config.py`)**: `--model` (and optional role overrides `--planner-model`, `--verifier-model`, `--summarizer-model`, `--judge-model` plus CLAI2-style `PROVIDER[@PROFILE]:MODEL` or comma-separated fallback chains) resolve via `ResolveModelId` / `ModelOption` with per-role `ModelSettings` (`thinking`, `cache`, `request_timeout`, `first_event_timeout`). Every model-backed agent attaches `RetryOnModelErrors` + `ModelFallback(..., sticky=True)` (falling back on `ModelAPIError`, `ContentFilterError`, and `OutputTokenLimitExceeded`), and optional `ConcurrencyLimitedModel` when sharing provider quota across sub-agents. Every model call logs token/cache/latency metrics to `llm_usage` (§7).
 - **No plugins**: `load_plugins=False`; no coding tools, no filesystem access, no network
   except the scoped `http_request` tool.
 - **Explicit agent metadata, caching, and lifecycle**: every `Agent` (`partex_tester_agent`,
@@ -711,22 +785,27 @@ Design rules:
 - **The model never writes findings and never sees cleartext secrets.** It can only invoke
   `run_check` / `request_verification`; the engine validates drafts and evidence and commits.
   `http_request` and `lookup_evidence` always redact `secret_fields` before returning `Evidence`
-  to the model.
-- **Harness safety and context controls**: `RepairToolArguments()` repairs minor JSON syntax
-  glitches from smaller/local models; `ToolOutputLimits(bands=[Band(over=10_000, action=Truncate())])`
-  prevents large HTTP response bodies from overflowing the context window (using `Truncate`
-  rather than `WorkspaceStore`, because no `LocalWorkspace` is attached); and
-  `SystemReminders(dynamic_reminders=[GoalReanchor()])` keeps long `--auto` runs anchored to
+  to the model, and wrap attacker-controlled payloads in per-run random-nonce XML tags
+  (`<partex_evidence_<nonce>>`) to isolate untrusted data from instructions.
+- **Harness safety, loop guards, and context controls**: `RepairToolArguments()` (from
+  `pydantic_ai_harness.repair_tool_arguments`) repairs minor JSON syntax glitches from
+  smaller/local models; `ToolOutputLimits(bands=[Band(over=10_000, action=Truncate())])` prevents
+  large HTTP response bodies from overflowing the context window (using `Truncate` rather than
+  `WorkspaceOverflowStore`, because no `LocalWorkspace` is attached); `ToolBudgets(refuse_repeats=...)`
+  and `DetectLoops(action='nudge')` prevent repeated identical probes from burning request budget;
+  and `SystemReminders(dynamic_reminders=[GoalReanchor()])` keeps long `--auto` runs anchored to
   the engagement scope behind a `CachePoint` without busting the prompt cache.
-- **`--auto` loop and hook-based auditing**: the agent runs a bounded planner loop (recon →
-  hypothesize → `run_check` → `request_verification` → report) driven directly through
-  `agent.run(..., run_id=deps.run_id)` / `agent.iter()` under `UsageLimits` and the
-  engagement's `max_requests` budget. Passing `run_id=deps.run_id` aligns `RunContext.run_id`
-  and OpenTelemetry `gen_ai.agent.call.id` with `runs.id` in SQLite (multi-turn `chat`
-  correlates via a UUID `session_id` / `conversation_id` instead, since `run_id` is per
-  `Agent.run` call). A `Hooks` capability (`wrap_tool_execute`) records every tool invocation
-  in the `tool_calls` table (§7) with secret arguments redacted, keeping tool bodies free of
-  duplicate audit boilerplate.
+- **`--auto` loop, stigmergic coordination, and hook-based auditing**: `--auto` runs a bounded
+  loop driven directly through `agent.run(..., run_id=deps.run_id)` / `agent.iter()` under
+  `UsageLimits` and the engagement's `max_requests` budget (with a 90% sub-agent request/budget
+  reserve so the final 10% is preserved for verification and coverage settlement). Optional
+  specialist `SubAgents` (e.g., `prober` vs. `verifier`) share `AgentDeps` (`ScopedHttpClient` +
+  `EngineHandle`), enforce context separation in code (a blind `verifier` receives only
+  `finding_id`/`evidence_ids`, never the explorer's narrative theory), and can be steered live via
+  `ctx.enqueue(priority='asap')` (including optional `TrajectoryJudge` or `goal_attempts >= 3`
+  stuck resets). `StepPersistence(store=SqliteStepStore(...))` records continuable snapshots and
+  tool-effect status (`started | completed | failed`). A `Hooks` capability (`wrap_tool_execute`)
+  records every tool invocation in `tool_calls` (§7) with secret arguments redacted.
 - **Progressive disclosure of skills (`defer_loading=True`)**: the adapter wraps each
   discovered skill (`SKILL.md` body and `reference/*.md`) as a deferred
   `Capability(id=skill.name, description=skill.description, instructions=skill.body, defer_loading=True)`.
@@ -977,11 +1056,11 @@ gains a "result" column as experiments land).
 | # | Milestone | Delivers | Gated by |
 |---|---|---|---|
 | M0 | Environment | package skeleton, uv project with local path sources and Monty source builds, CI stub, network + model blocking fixtures | 13.1 |
-| M1 | Passive core | `models.py`, `bundle.py`, `ids.py`, `storage.py`, `export.py`, `engine.py` (passive path), header-security check, bundle fixtures, `review`/`runs`/`show`/`checks` CLI | 13.3 (a–d) |
+| M1 | Passive core | `models.py`, `bundle.py`, `ids.py`, `storage.py` (incl. `surface_nodes`/`surface_edges`/`coverage_entries`/`llm_usage`), `export.py`, `engine.py` (passive path), header-security check, bundle fixtures, `review`/`runs`/`show`/`checks` CLI | 13.3 (a–d) |
 | M2 | Registry and skill separation | `registry.py`, skills as data, entry-point loading, `banner-leak` fixture distribution, `--skill-dir` | 13.2 |
-| M3 | Live testing | `engagement.py`, `scope.py`, `target.py`, `verify.py`, live engine path, per-check commits, fixture target app, `engage`/`test`/`verify`/`export-bundle` CLI, version-disclosure check | 13.3 (e), 13.4 (scope, authorization, capture, verification, budgets, redaction) |
+| M3 | Live testing | `engagement.py`, `scope.py`, `target.py`, `verify.py` (incl. `counterevidence`), live engine path, per-check commits, fixture target app, `engage`/`test`/`verify`/`export-bundle` CLI, version-disclosure check | 13.3 (e), 13.4 (scope, authorization, capture, verification, budgets, redaction) |
 | M4 | Summarization | `summarize.py`, `summarize` CLI, retry/validation/timeout policy | 13.5 (references, timeout) |
-| M5 | Agent and chat | `agent_adapter.py`, `chat` (read-only) + `agent` (interactive via `chat()` and `--auto` via `agent.run()`/`agent.iter()`), reviewer Code Mode and opt-in speculation evaluation, headless + cancellation tests, tmux checklist | 13.4 (agent), 13.5 (reviewer runtime, retrieval, cancellation) |
+| M5 | Agent and chat | `models_config.py`, `agent_adapter.py`, `chat` (read-only) + `agent` (interactive via `chat()` and `--auto` via `agent.run()`/`agent.iter()` with loop/budget guards & `StepPersistence`), reviewer `CodeMode` and opt-in speculation evaluation, headless + cancellation tests, tmux checklist | 13.4 (agent), 13.5 (reviewer runtime, retrieval, cancellation) |
 | M6 | Hardening | coverage to target, README, engagement author docs (scope, authorization, credential handling), experiment results recorded | all |
 
 ## 16. Risks
@@ -1006,9 +1085,10 @@ gains a "result" column as experiments land).
 
 1. **Resume policy for live runs (deferred out of v1)**: when `--resume` is added, should it
    re-run from the failed check, or from the failed check *plus* re-verification of earlier
-   findings (target may have changed mid-run)? The failed-check marker is recorded in v1; the
-   resume command itself is future work. Re-verification is available per-finding today via
-   `verify <run-id> <finding-id>`.
+   findings (target may have changed mid-run)? The failed-check marker is recorded in v1, and M5
+   attaches `StepPersistence(store=SqliteStepStore(...))` to `--auto` so agent snapshots and
+   unresolved `ToolEffectRecord`s are already captured; the `--resume` command itself is future
+   work. Re-verification is available per-finding today via `verify <run-id> <finding-id>`.
 2. **Verification depth**: where exactly is the v1 line between "minimal confirmation" and
    exploitation proper? Proposal: verification may trigger errors, cross an auth boundary with
    provided credentials, or match a known-vulnerable signature — and stops there. Too tight?
