@@ -221,9 +221,10 @@ architectural boundaries in §2 are unchanged (`agent_adapter` is still the only
 
 ### 3.1 Environment and dependencies
 
-- Python `>= 3.11`, matching the checkout's floor. Code must not use 3.12+ syntax (no PEP 695
-  `type` statements or generic class syntax); type aliases are plain assignments. Managed with
-  `uv` (0.12.x, available locally).
+- Python `>= 3.14` (`requires-python = ">=3.14"`), deliberately above the checkouts' `>=3.11`
+  floor so partex can use current syntax and semantics freely: PEP 695 `type` aliases and
+  generic class syntax, and PEP 649 deferred annotations (so `from __future__ import
+  annotations` is never needed). Monty's PyO3 0.30 supports 3.14. Managed with `uv`.
 - **Local checkout locations**: the audited checkouts are expected as siblings of this
   repository — `../pydantic-ai` and `../monty` — and every path below is relative to the
   repository root. uv path sources cannot read environment variables, so a machine that keeps
@@ -404,7 +405,7 @@ class ConfigEvidence(BaseModel):
     config: ConfigExcerpt
     secret_fields: list[str]
 
-Evidence = Annotated[HttpEvidence | ConfigEvidence, Field(discriminator='kind')]  # plain alias: 3.11 floor
+type Evidence = Annotated[HttpEvidence | ConfigEvidence, Field(discriminator='kind')]
 
 class Finding(BaseModel):
     id: str                  # "fn_" + sha256(check_id + '\0' + title + '\0' + sorted evidence_ids)[:16]
