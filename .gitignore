@@ -1,8 +1,7 @@
-# Track only files at the workspace root. Every subdirectory stays out of
-# this repository: several of them (ARTEX/, artex-global/, communitytools/,
-# pydantic-ai/, strix/) are their own git checkouts, and the others are
-# reference trees that should not be versioned here.
+# Track only files at the workspace root, except partex's own skill and fixture trees.
 /*/
+!skills/
+!fixtures/
 
 # Keep root-level editor/OS junk out even though root files are tracked.
 .DS_Store
