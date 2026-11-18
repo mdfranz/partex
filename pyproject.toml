@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "partex"
+version = "0.1.0"
+description = "Offline web application security evidence review"
+requires-python = ">=3.14"
+
+[project.scripts]
+partex = "partex.__main__:main"
+
+[project.entry-points."partex.checks"]
+
+[dependency-groups]
+dev = ["anyio", "inline-snapshot", "pyright", "pytest", "pytest-cov", "ruff"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/partex"]
+
+[tool.ruff]
+include = ["*.py", "*.pyi", "pyproject.toml"]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "strict"
+include = ["src", "scripts"]
+
+[tool.pytest.ini_options]
+anyio_mode = "auto"
+testpaths = ["scripts/check_greenfield.py", "tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["partex"]
