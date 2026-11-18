@@ -10,7 +10,7 @@
 
 ## 1. Scope
 
-Build a new Python package, `artex-web` (import name `artex_web`), from scratch using the local
+Build a new Python package, `partex` (import name `partex`), from scratch using the local
 Pydantic AI and CLAI2 checkout. Use Artex as a reference for workflow patterns — engagement
 lifecycle, evidence-linked findings, exploit verification, skill playbooks, and reporting — and
 for its skill content format. The package has no dependency on any Artex fork, service, schema,
@@ -84,7 +84,7 @@ or runtime.
 ## 2. Architecture
 
 ```text
-┌──────────────────────────── artex-web CLI ────────────────────────────────┐
+┌───────────────────────────── partex CLI ──────────────────────────────────┐
 │ engage   review <bundle>   test <eng>   verify <run-id> <finding-id>      │
 │ runs   show <run-id>   summarize <run-id>   checks   agent <eng>          │
 │ chat <run-id>                                                              │
@@ -131,14 +131,14 @@ reaches the network.
 
 ## 3. Package layout
 
-New standalone package at `artex-web/` beside the checkouts (not inside the `pydantic-ai` uv
+New standalone package at `partex/` beside the checkouts (not inside the `pydantic-ai` uv
 workspace; see §3.1):
 
 ```text
-artex-web/
+partex/
   pyproject.toml
   README.md
-  src/artex_web/
+  src/partex/
     __init__.py            # version, public re-exports
     __main__.py            # console entry point
     cli.py                 # argparse surface (engage/review/test/verify/runs/show/summarize/checks/agent/chat)
@@ -195,7 +195,7 @@ artex-web/
   transitive member list is settled in M0 (§15) by the greenfield dependency check.
 - **M0 packaging note**: `pydantic-clai2` declares its `pydantic-ai-slim`/`pydantic-ai-harness`
   deps as `{ workspace = true }` and pins their exact versions via hatch metadata hooks. Because
-  `artex-web` is *outside* that workspace, the path sources above must also be accompanied by
+  `partex` is *outside* that workspace, the path sources above must also be accompanied by
   `[tool.uv.overrides]` entries so clai2's workspace references and exact-version pins resolve to
   the local paths. Settling the precise `sources` + `overrides` shape is part of M0, and is a
   known risk (not a surprise) going in.
@@ -242,7 +242,7 @@ engagement/
     "attestation": "Written authorization from Example Corp, ref SOW-2026-114, expires 2026-12-31.",
     "operator": "j.operator"
   },
-  "credentials": {"session": "ARTEX_WEB_CRED_SESSION"},
+  "credentials": {"session": "PARTEX_CRED_SESSION"},
   "suggested_checks": ["header-security", "version-disclosure"]
 }
 ```
@@ -439,7 +439,7 @@ must not discard evidence already paid for in requests. Policy:
 - Validation failure aborts **before any network or model call** (exit 1; run row kept in
   `invalid` for audit).
 - Summarization failure, timeout (default 60 s, `--summary-timeout`), or Ctrl-C leaves the run
-  `checks_complete`; `artex-web summarize <run-id>` retries.
+  `checks_complete`; `partex summarize <run-id>` retries.
 - Without a `--model`, summarize is skipped; the run ends `checks_complete`.
 - Budget exhaustion (`max_requests`) ends active stages cleanly and transitions to
   `checks_complete`, not failure.
@@ -453,8 +453,8 @@ crash); `130` interrupted.
 
 ## 7. Storage and export
 
-Single SQLite file, stdlib `sqlite3`, WAL mode. Default path: `$XDG_DATA_HOME/artex-web/artex-web.db`
-(fallback `~/.local/share/artex-web/`), overridable with `--db PATH` / `ARTEX_WEB_DB`. One
+Single SQLite file, stdlib `sqlite3`, WAL mode. Default path: `$XDG_DATA_HOME/partex/partex.db`
+(fallback `~/.local/share/partex/`), overridable with `--db PATH` / `PARTEX_DB`. One
 operator, one machine: work runs on local workers inside one process (§7.1). The database must
 live on a local filesystem (WAL is unreliable on network mounts); documented, not detected.
 
@@ -557,30 +557,30 @@ CREATE TABLE summaries (
 Schema versioning: `PRAGMA user_version`; a store with an unknown version is refused with a
 clear error, never migrated destructively (§17).
 
-Export (`artex-web show <run-id> --format json [--out FILE]`) emits the run, its evidence, its
+Export (`partex show <run-id> --format json [--out FILE]`) emits the run, its evidence, its
 findings, its verifications, its tool calls, and its summary (or `null`), with sorted keys and
 stable field order. **`secret_fields` are redacted to `<redacted>` by default**; `--include-secrets` opts
 out and warns. Export excludes `created_at`, run IDs, and timestamps, so the repeatability
 experiment compares passive exports byte-for-byte (§13). Findings order: (severity rank desc,
-check_id, finding_id); evidence by registration order. `artex-web export-bundle <run-id>`
+check_id, finding_id); evidence by registration order. `partex export-bundle <run-id>`
 emits a passive-reviewable bundle from a live run's captures (redacted by default).
 
 ## 8. CLI surface
 
 | Command | Purpose | Key flags |
 |---|---|---|
-| `artex-web engage init <dir>` | scaffold an engagement file | `--target`, `--scope-host` |
-| `artex-web engage check <dir>` | validate engagement + scope + credentials, no traffic | `--json` |
-| `artex-web review <bundle>` | passive review of an offline bundle | `--checks a,b` / `--all`, `--workers N`, `--db`, `--no-summary`, `--model`, `--out` |
-| `artex-web test <engagement>` | live run: capture, passive + active checks, verify | `--authorized` (required), `--checks`, `--workers`, `--no-verify`, `--no-summary`, `--model`, `--db` |
-| `artex-web verify <run-id> <finding-id>` | (re)run verification for one finding in one run | `--authorized`, `--db` |
-| `artex-web export-bundle <run-id>` | write a passive bundle from a live run's captures | `--out DIR`, `--include-secrets` |
-| `artex-web runs` | list runs (id, state, input, findings count) | `--db`, `--json` |
-| `artex-web show <run-id>` | export a run | `--format json\|text`, `--include-secrets`, `--out`, `--db` |
-| `artex-web summarize <run-id>` | (re)generate the summary | `--model`, `--summary-timeout`, `--db` |
-| `artex-web checks` | list registered checks (kind, scope needs) and their skills | `--json` |
-| `artex-web agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--agent-max-requests`, `--db` |
-| `artex-web chat <run-id>` | read-only review chat over a saved run | `--model`, `--db`, `--skill-dir` |
+| `partex engage init <dir>` | scaffold an engagement file | `--target`, `--scope-host` |
+| `partex engage check <dir>` | validate engagement + scope + credentials, no traffic | `--json` |
+| `partex review <bundle>` | passive review of an offline bundle | `--checks a,b` / `--all`, `--workers N`, `--db`, `--no-summary`, `--model`, `--out` |
+| `partex test <engagement>` | live run: capture, passive + active checks, verify | `--authorized` (required), `--checks`, `--workers`, `--no-verify`, `--no-summary`, `--model`, `--db` |
+| `partex verify <run-id> <finding-id>` | (re)run verification for one finding in one run | `--authorized`, `--db` |
+| `partex export-bundle <run-id>` | write a passive bundle from a live run's captures | `--out DIR`, `--include-secrets` |
+| `partex runs` | list runs (id, state, input, findings count) | `--db`, `--json` |
+| `partex show <run-id>` | export a run | `--format json\|text`, `--include-secrets`, `--out`, `--db` |
+| `partex summarize <run-id>` | (re)generate the summary | `--model`, `--summary-timeout`, `--db` |
+| `partex checks` | list registered checks (kind, scope needs) and their skills | `--json` |
+| `partex agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--agent-max-requests`, `--db` |
+| `partex chat <run-id>` | read-only review chat over a saved run | `--model`, `--db`, `--skill-dir` |
 
 Selection semantics unchanged: `--checks` is an explicit, ordered, de-duplicated list; unknown
 ID exits 1 listing available IDs; `--all` runs registration order; empty selection is a usage
@@ -624,7 +624,7 @@ class AgentDeps:
 def build_agent(model: Model | str, skills: Sequence[Capability]) -> Agent[AgentDeps, str]:
     agent = Agent(
         model,
-        name='artex_tester_agent',
+        name='partex_tester_agent',
         deps_type=AgentDeps,
         output_type=str,
         instructions=TESTER_INSTRUCTIONS,
@@ -668,8 +668,8 @@ Design rules:
 
 - **No plugins**: `load_plugins=False`; no coding tools, no filesystem access, no network
   except the scoped `http_request` tool.
-- **Explicit agent metadata, caching, and lifecycle**: every `Agent` (`artex_tester_agent`,
-  `artex_reviewer_agent`, `artex_summarizer_agent`) sets an explicit `name=`, uses
+- **Explicit agent metadata, caching, and lifecycle**: every `Agent` (`partex_tester_agent`,
+  `partex_reviewer_agent`, `partex_summarizer_agent`) sets an explicit `name=`, uses
   `instructions=`, enables `defer_model_check=True` (so importing or constructing agents never
   requires provider API keys and tests override models via `with agent.override(model=...):`),
   and attaches `Caching()` (`Caching(messages=False)` on one-shot `summarize`). Programmatic
@@ -750,10 +750,10 @@ class ActiveCheck(Protocol):
 
 - `verify_recipe` returns the minimal request set that confirms the finding (the replay the
   verification runner executes); checks without a recipe produce `reported`-only findings.
-- Third-party checks register via the entry-point group `artex_web.checks`. Check code loads
+- Third-party checks register via the entry-point group `partex.checks`. Check code loads
   **only** from installed distributions; extra skill roots load via `--skill-dir` (data). That
   is the trust boundary: arbitrary paths can add Markdown, never code.
-- A skill naming an unregistered check is a warning at `artex-web checks` time; a check with
+- A skill naming an unregistered check is a warning at `partex checks` time; a check with
   no skill is fine; a skill with no check is fine (agent playbook only).
 
 **Fixtures**:
@@ -778,7 +778,7 @@ Summarization is unchanged in shape from the earlier design:
 async def summarize_run(run_id: str, store: RunStore, model: Model | str) -> ReviewSummary
 ```
 
-- `output_type=ReviewSummary` agent (`name='artex_summarizer_agent'`, `defer_model_check=True`,
+- `output_type=ReviewSummary` agent (`name='partex_summarizer_agent'`, `defer_model_check=True`,
   `capabilities=[Caching(messages=False)]`) over the run's findings (id, severity, status,
   title, description, remediation), run inside `async with agent:` with `run_id=run_id`. Raw
   evidence stays out of the summarizer prompt in v1.
@@ -793,13 +793,13 @@ async def summarize_run(run_id: str, store: RunStore, model: Model | str) -> Rev
 
 ### 11.1 Logfire observability and secret safety
 
-- **Opt-in CLI setup and strict ordering**: when `--logfire` is passed (or `ARTEX_WEB_LOGFIRE=1`
-  is set), `cli.py` calls `logfire.configure(service_name='artex-web', service_version=__version__)`
+- **Opt-in CLI setup and strict ordering**: when `--logfire` is passed (or `PARTEX_LOGFIRE=1`
+  is set), `cli.py` calls `logfire.configure(service_name='partex', service_version=__version__)`
   **once at process startup before** `logfire.instrument_pydantic_ai()`. Without `--logfire`,
   no network exporter is configured so offline runs and the hermetic test suite never open
   external telemetry sockets.
 - **No `logfire.instrument_httpx()` on the target client**: global HTTPX instrumentation is
-  explicitly forbidden because `target.py` sends real engagement credentials (`ARTEX_WEB_CRED_*`)
+  explicitly forbidden because `target.py` sends real engagement credentials (`PARTEX_CRED_*`)
   that must not bypass `secret_fields` redaction into OpenTelemetry spans. Instead, `target.py`
   wraps outbound requests in a manual structured span using template placeholders —
   `logfire.span('target request {method} {host}{path}', method=method, host=host, path=path, run_id=run_id)`
@@ -828,7 +828,7 @@ The scope change splits the guarantee in two:
   from live runs cannot be byte-reproducible. Instead: every request and response the engine
   sends or receives is captured as evidence; every finding links its evidence; every
   verification links the exact PoC exchanges and a replay recipe; input fingerprint +
-  `engine_version` + `check_version` are stored per run. `artex-web verify <run-id> <finding-id>`
+  `engine_version` + `check_version` are stored per run. `partex verify <run-id> <finding-id>`
   re-executes the recipe against the target to test whether the finding still reproduces.
 - Live runs record `requests_spent` and the scope snapshot (`runs.scope_snapshot`), so two live
   runs over the same engagement can be compared for coverage even when their findings differ.
@@ -836,7 +836,7 @@ The scope change splits the guarantee in two:
 ## 13. Validation experiments
 
 Each experiment is scripted and credential-free: live tests run against the bundled fixture
-target app on localhost; all fixtures live in `artex-web/fixtures/`. Experiments gate the
+target app on localhost; all fixtures live in `partex/fixtures/`. Experiments gate the
 milestones (§15).
 
 **Fixture target app** (`fixtures/target_app/`): a deliberately vulnerable stdlib
@@ -847,7 +847,7 @@ it; a second fixture engagement deliberately omits the app's host for scope-gate
 
 ### 13.1 Greenfield dependency check
 
-As before: fresh venv, local path sources, run `artex-web review fixtures/bundles/valid
+As before: fresh venv, local path sources, run `partex review fixtures/bundles/valid
 --checks header-security --no-summary` from outside any checkout; assert no `artex`/`strix`
 distribution, no Artex-fork modules in `sys.modules`, no PyPI `pydantic-*` (non-`pydantic`
 deps may come from PyPI).
@@ -975,7 +975,7 @@ gains a "result" column as experiments land).
    for usage errors; see §6.
 4. **Migration policy**: additive `ALTER TABLE` with `user_version` bumps (Go forks' approach)
    vs. refuse-and-export/import for v1 only?
-5. **HAR / proxy ingestion**: the Go forks capture via MITM proxy; is `artex-web import-har`
+5. **HAR / proxy ingestion**: the Go forks capture via MITM proxy; is `partex import-har`
    worth shipping as a passive-bundle producer, or does the scoped client stay the only
    live-capture path?
 6. **Chat annotation**: should `chat` gain append-only operator notes (never findings
