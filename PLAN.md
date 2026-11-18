@@ -66,7 +66,7 @@ or runtime.
   `pydantic-ai-harness`, `pydantic-clai2`), never from PyPI. Given the November 2026
   prebuilt-image backdoor in the Artex lineage (see `README.md`), the package installs its
   `pydantic-*` dependencies only from audited local paths and publishes no prebuilt artifacts;
-  non-`pydantic` third-party dependencies (`httpx`, `rich`, `prompt-toolkit`, etc.) resolve from
+  non-`pydantic` third-party dependencies (`httpx2`, `rich`, `prompt-toolkit`, etc.) resolve from
   the pinned lockfile as normal.
 - **Authorization is a hard gate, not a convention.** Every live run requires an engagement
   file containing an explicit authorization attestation, and every outbound request passes a
@@ -165,7 +165,7 @@ partex/
       __init__.py          # PassiveCheck / ActiveCheck protocols, draft validation
       builtin.py           # header-security (passive), version-disclosure (active probe)
     target.py              # scoped HTTP client (the only socket-opening module), capture
-                           #   (httpx, follow_redirects=False, pinned resolver + SNI)
+                           #   (httpx2, follow_redirects=False, pinned resolver + SNI)
     verify.py              # verification runner: minimal PoC replay, verdict, evidence
     engine.py              # run lifecycle, ordered execution, failure policy, single writer
     storage.py             # SQLite RunStore, schema, migrations
@@ -218,15 +218,15 @@ partex/
   the same audited revision, honor the metapackage's exact pins, and verify the Rust/Maturin
   source builds and worker startup from outside both checkouts. Apply uv overrides as needed
   for the metapackage's workspace dependencies.
-- Other runtime dependencies: the target client uses **httpx** (pinned via the lockfile; it is
-  already a direct dependency of `pydantic-clai2`, so it is present regardless). The
-  DNS-rebinding guard and correct SNI + hostname cert verification on a pre-resolved address
-  are security-critical; httpx's `follow_redirects=False` and custom transport provide them
-  without hand-rolling sockets/`ssl`. No other HTTP library is introduced; anything beyond
-  httpx must come from the audited local source set, not PyPI. **M0 must settle `httpx` vs
-  `httpx2`** (the local `pydantic-ai-slim`/`pydantic-ai-harness` depend on `httpx2>=2.7`
-  while `pydantic-clai2` pins `httpx>=0.28.1`; `target.py` pins exactly one API surface —
-  see `DEPS.md` §3.9). Dev dependencies: `pytest`, `anyio`, `ruff`, `pyright`,
+- Other runtime dependencies: the target client uses **httpx2** (decided, `DEPS.md` §8.1: the
+  HTTP library the local `pydantic-ai-slim`/`pydantic-ai-harness` stack builds on throughout;
+  pinned via the lockfile). The DNS-rebinding guard and correct SNI + hostname cert
+  verification on a pre-resolved address are security-critical; `follow_redirects=False` and
+  a custom transport provide them without hand-rolling sockets/`ssl`. M0 runs the
+  API-equivalence gate on that custom-transport surface (§4.2); on failure the fallback is
+  `httpx` 0.28.x (present via `pydantic-clai2` until its own httpx2 migration). No other
+  HTTP library is introduced; anything beyond the locked set must come from the audited local
+  source set, not PyPI. Dev dependencies: `pytest`, `anyio`, `ruff`, `pyright`,
   `inline-snapshot`, plus `coverage`/`pytest-cov` (the 100% branch target) and the checkout's
   `capfire` fixture for Logfire span assertions. The M0–M6 milestones add **no other PyPI
   runtime dependency** (`DEPS.md` documents the per-module decisions: minimal OpenAPI
@@ -304,7 +304,7 @@ tool — is validated immediately before send:
    not match `example.test`). DNS rebinding guard: resolution happens once per run through a
    pinned resolver result, and the client connects to the resolved address while keeping the
    original `Host` header and SNI (and cert verification against the original hostname, not the
-   IP) — via httpx's transport, never hand-rolled sockets.
+   IP) — via httpx2's transport, never hand-rolled sockets.
 3. **Path**: must start with an allowed `path_prefix` and match no `exclusions` prefix
    (exclusions win).
 4. **Redirects**: never followed automatically; a redirect response is captured as evidence,
@@ -432,7 +432,10 @@ Contract rules:
   `secret_fields` to `<redacted>` by default (`--include-secrets` emits them and prints a
   warning), and agent/chat tools (`http_request`, `lookup_evidence`) always return redacted
   `Evidence` so cleartext credentials never leak into LLM provider requests, CLAI2 transcripts,
-  or OpenTelemetry spans.
+  or OpenTelemetry spans. Browser captures (M7) blanket-mark `Cookie`/`Authorization`
+  headers — the browser holds sessions partex never provisioned — and mark `Set-Cookie`
+  **value-only**, so cookie attributes stay visible to `session-cookie-config` and survive
+  redacted export-bundle round-trips (`DEPS.md` §8.5).
 - Models round-trip: storage writes serialized models and re-validates on read (via
   `TypeAdapter(Evidence)` for the discriminated union), so a schema drift between engine
   versions is a load error, never silent data loss.
@@ -1023,7 +1026,9 @@ socket.
   `export-bundle` round-trips into a passive `review` that reproduces the passive findings.
 - *HAR import*: a fixture HAR round-trips through `import-har` into a passive `review` that
   reproduces the passive findings; entries outside the bundle's declared target scope are
-  filtered with a reported count; a malformed HAR exits 1 with a diagnostic.
+  filtered with a reported count and a dropped-host histogram recorded in the bundle
+  manifest; a malformed HAR exits 1 with a diagnostic, and so does an import with zero
+  in-scope entries (operator-error guard; `DEPS.md` §8.6).
 - *Verification*: `version-disclosure` finds the banner, `verify` confirms it (verdict
   `confirmed`, evidence attached, finding transitions to `verified`); a fixture app variant
   without the banner yields `not_reproduced` and `verification_failed`; both transitions keep
@@ -1074,11 +1079,14 @@ client-issued ones.
   `api-recon` mock pattern) render the SPA's post-login shell with zero real credentials.
 - *Capture and redaction*: every exchange commits at capture time (source
   `capture:browser:<seq>`); `Cookie`/`Authorization` headers are blanket-marked
-  `secret_fields`; default export and `lookup_evidence` show `<redacted>`.
+  `secret_fields`, and `Set-Cookie` is marked value-only so cookie attributes survive
+  redaction (`DEPS.md` §8.5); default export and `lookup_evidence` show `<redacted>`.
 - *Round-trip*: a browsed session exports as a bundle whose passive `review` reproduces the
   passive findings.
 - *Driver provenance*: the lockfile pins the exact `playwright` wheel; a §13.1-style check
-  asserts no other new distributions entered the environment.
+  asserts no other new distributions entered the environment. The managed Chromium build is
+  pinned in fixture setup (version + hash asserted), since `playwright install` artifacts
+  bypass the uv lockfile (`DEPS.md` §8.4).
 
 ## 14. Test strategy
 

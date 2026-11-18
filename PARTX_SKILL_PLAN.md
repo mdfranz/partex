@@ -3,15 +3,16 @@
 > Status: skill roadmap for the planned `partex` package (no code yet). Consolidates and
 > supersedes `WEB_API_SKILL_PRIORITIES.md` and `SOURCE_SKILL_SYNTHESIS.md` from this branch
 > (preserved in git history at 39c1028). The engine contract targeted here is `PLAN.md` as of
-> 49a7984: **full offensive scope**, two execution modes — passive review of offline bundles and
-> active live testing with probe → verify → replay — with skills as data-only Markdown and
-> checks as entry-point code (`PLAN.md` §10).
+> 45dfaa4: **full offensive scope**, two execution modes — passive review of offline bundles and
+> active live testing with probe → verify → replay — and three required capture/probe paths
+> (scoped HTTP client and HAR import in M3, browser capture harness in M7; `DEPS.md` §5), with
+> skills as data-only Markdown and checks as entry-point code (`PLAN.md` §10).
 
 ## 1. Reading order
 
 | Doc | Role |
 |---|---|
-| `PLAN.md` (main branch) | Engine contract: modes, data contracts, registry, milestones M0–M6 |
+| `PLAN.md` (main branch) | Engine contract: modes, data contracts, registry, milestones M0–M7 |
 | `SKILLS.md` | Inventory of skill **sources** in the three Go forks |
 | `ARCHITECTURE.md` | Fork internals the skill system inherited |
 | this doc | How ParTEx skills are structured, synthesized from sources, and sequenced |
@@ -45,8 +46,11 @@ Structural rules:
 
 - **Data only.** No scripts, no frontmatter `allowed-tools`, no `mcps`. The forks' `api-recon`
   `scripts/` tree (spider, harvest, Puppeteer runtime) does **not** port: execution moves into
-  check code driven by the `ScopedHttpClient`, or into agent guidance over the fixed toolset
-  (`http_request`, `run_check`, `request_verification`, `list_findings`, `lookup_evidence`, §9).
+  check code driven by the `ScopedHttpClient`, into the M7 browser capture harness
+  (`DEPS.md` §5 — the Puppeteer-harvesting capability returns as engine machinery, not
+  scripts), or into agent guidance over the fixed toolset (`http_request`, `run_check`,
+  `request_verification`, `list_findings`, `lookup_evidence`, `list_surface`,
+  `record_coverage`, §9 — plus the M7 `browser_*` harness tools).
 - **References condense.** `references/` (plural, forks) → `reference/` (singular, ParTEx).
   A 40–55-file scenario tree ports as a small set of thematic reference docs, one per finding
   class the checks actually emit (see §7 targets).
@@ -141,7 +145,8 @@ Condensed from `SOURCE_SKILL_SYNTHESIS.md`; the full fork inventory stays in `SK
   `api-recon`, `playwright-cli`, `scopesentry`. Use **BaaRai as the English base** (10 skills),
   consult **failsafe** for packaging hardening (runtime refusal patterns), treat `artex-global`
   as the Chinese localization reference. `playwright-cli`'s 9 companion docs are byte-identical
-  across forks — port once, as agent guidance, without the Bash tool gate. Treat `scopesentry`
+  across forks — port once, as agent guidance over the M7 `browser_*` harness tools, without
+  the Bash tool gate (never a shell to a browser CLI; `DEPS.md` §7 item 4). Treat `scopesentry`
   as an integration-dependency reference (platform management, outside assessment coverage).
   **License gate:** the forks are AGPL-3.0. Never cite a fork file as `derived_from` for an
   Apache-2.0 skill — fork-original text cannot be relicensed. When a fork skill is itself

@@ -1,19 +1,19 @@
 # Partex dependency decisions and browser automation strategy
 
-> Status: review draft. No code yet. Answers two questions left implicit by `PLAN.md` and
-> `RUNTIME.md`: (1) which Python libraries the engine actually needs beyond the pinned local
-> checkout set, and (2) how browser automation should work. **Stance: ParTEx requires active
-> probing via the scoped Python client *and* via browser automation, plus HAR import — the
-> same three paths the original ARTEX frameworks ran** (§5). What is genuinely open is
-> sequencing and the browser engine choice, not whether these ship. Every load-bearing claim
-> cites its source document; reviewer disagreements should be recorded against the section
+> Status: decisions recorded (§8). No code yet. Answers two questions left implicit by
+> `PLAN.md` and `RUNTIME.md`: (1) which Python libraries the engine actually needs beyond the
+> pinned local checkout set, and (2) how browser automation should work. **Stance: ParTEx
+> requires active probing via the scoped Python client *and* via browser automation, plus
+> HAR import — the same three paths the original ARTEX frameworks ran** (§5). Sequencing and
+> the browser engine choice are decided in §8; nothing below stays open. Every load-bearing
+> claim cites its source document; disagreements should be recorded against the section
 > numbers here.
 
 ## 1. Relationship to the other docs
 
 | Doc | Boundary |
 |---|---|
-| `PLAN.md` §3.1 | Owns the environment contract (uv, local path sources, dev toolchain). This doc's amendments are **applied** to `PLAN.md` (§1 non-goals, §2 layer rules, §3.1 deps, §5 source convention, §8 CLI, §13.4, §13.6, §15 M7, §16, §17.5, §18); what remains open is §8 below. |
+| `PLAN.md` §3.1 | Owns the environment contract (uv, local path sources, dev toolchain). This doc's amendments are **applied** to `PLAN.md` (§1 non-goals, §2 layer rules, §3.1 deps, §5 source convention, §8 CLI, §13.4, §13.6, §15 M7, §16, §17.5, §18); the review questions are resolved in §8 below. |
 | `RUNTIME.md` | Owns execution environments (Monty Code Mode, microVM deferral). The browser capture harness gained its section there (M7). |
 | `PARTX_SKILL_PLAN.md` §4 | Owns slice sequencing. The S1 `api-inventory` skill is the first consumer of the harness's captures. |
 
@@ -24,8 +24,8 @@ checkout pyprojects, November 2026):
 
 | Library | Floor | Via | Used by partex for |
 |---|---|---|---|
-| `httpx` | 0.28.1 | `pydantic-clai2` (direct) | `target.py` scoped client (`PLAN.md` §3.1 already relies on this) |
-| `httpx2` | 2.7 | `pydantic-ai-slim`, `pydantic-ai-harness` (direct) | **Conflict to resolve at M0** — see §3.9 |
+| `httpx` | 0.28.1 | `pydantic-clai2` (direct, transitional until its own httpx2 migration) | Fallback for `target.py` if the M0 API gate fails (§3.9, §8.1) |
+| `httpx2` | 2.7 | `pydantic-ai-slim`, `pydantic-ai-harness` (direct) | `target.py` scoped client — **decided §8.1**, M0 API gate §3.9 |
 | `anyio` | 4.7.0 | `pydantic-ai-slim` (direct, pinned for cancellation delivery) | Worker task groups, `CapacityLimiter`, `fail_after`, `to_thread` (`PLAN.md` §7.1) |
 | `pydantic` | 2.12 | `pydantic-ai-slim` | All data contracts (`PLAN.md` §5) |
 | `pyyaml` | 6.0.2 | `pydantic-clai2` (direct) | `SKILL.md` frontmatter lint (D6) and `format: openapi` `ConfigExcerpt`s, which may be YAML |
@@ -105,7 +105,9 @@ wheel, so it must not be adopted preemptively — only on demonstrated need.
 **Decision: `partex import-har <file.har> --out DIR` as a passive-bundle producer**, stdlib
 `json` only. HAR is JSON; the producer validates and converts to `evidence/NNNN.json`
 records. Scheduled for M3 (`PLAN.md` §8, §13.4); it is one of the three required capture
-paths in §5.
+paths in §5. Entries outside the bundle manifest's declared scope are filtered with a
+reported count and a dropped-host histogram recorded in the manifest; an import with zero
+in-scope entries exits 1 as an operator-error guard (§8.6).
 
 ### 3.7 Storage, IDs, time
 
@@ -120,15 +122,17 @@ No ORM, no migration library; `PRAGMA user_version` per `PLAN.md` §7.
 | `capfire` / `InMemorySpanExporter` | Logfire span assertions in the hermetic suite (`PLAN.md` §14) | From the pydantic-ai checkout; pin as a local path source like the other checkout test fixtures |
 | `pytest`, `anyio` (plugin), `ruff`, `pyright`, `inline-snapshot` | Already named in §3.1 | Unchanged |
 
-### 3.9 Open item for M0: `httpx` vs `httpx2`
+### 3.9 `target.py` pins `httpx2` (decided §8.1; M0 API gate)
 
-`pydantic-ai-slim` and `pydantic-ai-harness` depend on **`httpx2>=2.7`** (a fork/successor
-line), while `pydantic-clai2` pins **`httpx>=0.28.1`** and `PLAN.md` §3.1 says "httpx".
-`target.py` must pin exactly one API surface. The greenfield dependency check (§13.1) should
-assert which one `partex` imports and that both resolve from the lockfile without conflict.
-This doc proposes: **`httpx2` if the transport API needed for §4.2 (custom transport, pinned
-resolver, `follow_redirects=False`) is equivalent; otherwise plain `httpx` 0.28.x** — to be
-settled by inspection at M0, not assumed.
+`pydantic-ai-slim` and `pydantic-ai-harness` depend on **`httpx2>=2.7`** and import it
+throughout, while `pydantic-clai2` pins **`httpx>=0.28.1`** only transitionally (its
+pyproject comments the pin as "until its own `httpx2` migration"). `target.py` therefore
+pins **`httpx2`** — one HTTP API surface to audit, on the line the stack itself maintains.
+The M0 gate stands: verify by inspection that the custom-transport API covers §4.2 (pinned
+resolver connect-to-IP with original `Host`/SNI/hostname cert verification,
+`follow_redirects=False`); on failure, fall back to `httpx` 0.28.x. The greenfield
+dependency check (§13.1) asserts which library `partex` actually imports and that both
+resolve from the lockfile without conflict.
 
 ## 4. Supply-chain posture (unchanged, restated)
 
@@ -174,7 +178,8 @@ The harness (path 2) must respect the same constraints as everything else:
   on the run).
 - Secrets: browser-captured `Cookie`/`Authorization` headers are blanket-marked
   `secret_fields` (in addition to engagement-credential pattern matching), because the
-  browser holds sessions partex never provisioned.
+  browser holds sessions partex never provisioned. `Set-Cookie` is marked **value-only** —
+  attributes stay visible for `session-cookie-config` and redacted round-trips (§8.5).
 
 ## 6. Browser engine options (path 2)
 
@@ -244,31 +249,61 @@ anyio-based. They coexist on anyio's **asyncio** backend only — commands that 
 harness must pin that backend explicitly (assert in the harness entry point; fail loudly on
 trio).
 
-## 8. Questions for review
+## 8. Decisions (resolved from review)
 
-1. **§3.9 (httpx vs httpx2)** — does the M0 plan already cover which API surface `target.py`
-   pins, and should `PLAN.md` §3.1 say `httpx2` instead of `httpx` if that is the intent?
-2. **§3.1 (minimal OpenAPI resolver)** — acceptable to own the subset in check code with
-   fixtures, vs. taking `openapi-core`'s dependency tree now to avoid resolver edge-case
-   bugs later? The license is permissive either way; the question is maintenance risk vs.
-   supply-chain surface.
+All eight review questions are resolved. Rationale is kept here so the §-numbered sections
+above stay terse.
+
+1. **§3.9 (httpx vs httpx2) — decided**: `target.py` pins **`httpx2`**. The whole agent
+   stack already builds on it (`pydantic-ai-slim` imports `httpx2` throughout;
+   `pydantic-clai2` comments its legacy `httpx` pin as "until its own `httpx2` migration"),
+   so one HTTP API surface is audited instead of two, on the line the stack itself
+   maintains. The M0 gate stands: verify the custom-transport API covers §4.2 (pinned
+   resolver connect-to-IP with original `Host`/SNI/hostname cert verification,
+   `follow_redirects=False`); on failure, fall back to `httpx` 0.28.x. The §13.1 greenfield
+   check asserts which library `partex` actually imports.
+2. **§3.1 (minimal OpenAPI resolver) — decided**: own the subset in check code. v1 never
+   performs full request/response validation, and the resolver implements a specified
+   contract (the insufficient-evidence path in
+   `skills/api-inventory/reference/contract-matching.md` §1), not the whole spec.
+   Edge-case risk is bounded by the S1 fixture triad; the P2.2 `gateway-policy` revisit
+   trigger stands.
 3. **§7.2 (import-har placement) — decided**: M3, beside `export-bundle` (applied to
    `PLAN.md` §8, §13.4, §17.5).
-4. **§7.3 (Playwright Node driver)** — is a lockfile-pinned PyPI wheel acceptable, given the
-   posture that made monty source-built locally (`RUNTIME.md`)? If not, Option C
-   (capture-only raw CDP) becomes the primary harness proposal and §7.3 needs rewriting.
-5. **§5 (secret marking)** — blanket `secret_fields` marking of all `Cookie`/`Authorization`
-   headers in browser captures: right default, or too aggressive (it redacts non-credential
-   cookies in exports and model returns, at the cost of model visibility into session flow)?
-6. **§3.6 (HAR provenance)** — a HAR from the operator's browser can contain arbitrary hosts
-   and out-of-scope traffic. Proposal: `import-har` filters to in-bundle manifest scope and
-   *reports* dropped entries, rather than importing everything. Confirm or amend.
-7. **§7.3 (harness milestone placement) — decided**: dedicated post-M6 milestone **M7** with
-   its own gate (`PLAN.md` §13.6: fixture SPA, route-interception scope test, redaction
-   tests, capture → passive review round-trip). Engine machinery stays out of the skill
-   slices; `agent`'s `browser_*` tools land with M7.
-8. **§7.4 (browser-capable checks)** — deterministic `ActiveCheck`s stay scoped-client-only
-   in the near term, with browser-driven active testing entering via the agent `browser_*`
-   tools. Should a check protocol variant ever receive the harness handle (a
-   `BrowserProbe` protocol), or is check-vs-browser separation a permanent boundary? A
-   protocol variant would repeat the D-series amendment process in `PARTX_SKILL_PLAN.md` §5.
+4. **§7.3 (Playwright Node driver) — decided**: accept the lockfile-pinned wheel. Attach
+   mode (`connect_over_cdp` to operator-launched Chrome) is the mitigation: partex never
+   downloads a browser binary or touches credentials in the mode that matters, and the Node
+   driver is a CDP *client* library — it executes no target code and holds no credentials,
+   unlike the in-boundary code-execution artifacts the source-build posture guards. Raw CDP
+   trades a reviewable, lockfile-pinnable dependency for unbounded protocol-churn
+   maintenance, and it cannot deliver the flow automation that is the point of path 2
+   (capture-only ≠ probing). Managed Chromium stays confined to localhost fixtures and
+   credential-free discovery; because `playwright install` artifacts bypass the uv lockfile,
+   §13.6's driver-provenance test pins the browser build (version + hash asserted in
+   fixture setup). Raw CDP remains the documented capture-only fallback.
+5. **§5 (secret marking) — decided**: keep blanket `Cookie`/`Authorization` marking in
+   browser captures. Under-marking leaks live session tokens into provider requests,
+   transcripts, and spans; over-marking only costs the model some session-flow visibility —
+   the failure costs are asymmetric. Refinement: `Set-Cookie` is **not** blanket-marked; it
+   is marked **value-only** (attributes such as `Secure`/`HttpOnly`/`SameSite` stay
+   visible) once the S3 RFC 6265 splitter lands and is shared between the capture layer and
+   the `session-cookie-config` check. Blanket-marking `Set-Cookie` would blind the §13.4
+   redacted export-bundle → passive-review round-trip for cookie-attribute findings.
+6. **§3.6 (HAR provenance) — decided**: filter to the bundle manifest's declared scope and
+   report the dropped count. Real HARs always carry extension/telemetry/CDN noise, so
+   out-of-scope entries are normal and never an error. Two guardrails: an import with
+   **zero in-scope entries exits 1** (almost always operator error — wrong file or
+   manifest), and the dropped-host histogram is recorded in the bundle manifest so the
+   filtering is auditable, not silent.
+7. **§7.3 (harness milestone placement) — decided**: dedicated post-M6 milestone **M7**
+   with its own gate (`PLAN.md` §13.6: fixture SPA, route-interception scope test,
+   redaction tests, capture → passive review round-trip). Engine machinery stays out of
+   the skill slices; `agent`'s `browser_*` tools land with M7.
+8. **§7.4 (browser-capable checks) — decided**: the check-vs-browser separation holds; no
+   `BrowserProbe` protocol in v1. A check holding a harness handle inherits JS-runtime
+   nondeterminism and timing flakiness and breaks the deterministic-check boundary;
+   browser-driven active testing enters via the agent `browser_*` tools, where
+   nondeterminism is acceptable. If a DOM-dependent check is ever needed, the shape is a
+   new evidence kind (a harness-captured DOM snapshot) plus a passive check over it —
+   revisited through the D-series amendment process (`PARTX_SKILL_PLAN.md` §5) with a
+   concrete skill in hand, not before.

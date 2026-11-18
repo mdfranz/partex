@@ -47,8 +47,10 @@ the engagement's `max_rps` / `max_requests` budgets. Browser contexts map one-to
 `engagement.roles` with isolated storage state, discarded at session end. Every exchange
 commits at capture time (source `capture:browser:<seq>`), so a browser crash or cancelled
 session leaves all committed evidence readable; `Cookie`/`Authorization` headers from
-browser captures are blanket-marked `secret_fields` and redacted at the export and
-model-facing boundaries like any other secret. Commands that touch the harness pin anyio's
+browser captures are blanket-marked `secret_fields`, and `Set-Cookie` is marked value-only
+so cookie attributes stay visible to policy checks and redacted round-trips; both are
+redacted at the export and model-facing boundaries like any other secret. Commands that
+touch the harness pin anyio's
 asyncio backend (Playwright's async API is asyncio-native) and fail loudly on trio. The
 M7 gate is [PLAN.md](PLAN.md) §13.6; engine options and the raw-CDP fallback are recorded
 in [DEPS.md](DEPS.md).
