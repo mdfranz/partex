@@ -13,7 +13,7 @@ Several agents work in parallel, often on different machines. Before starting:
    (`gh api repos/mdfranz/partex/issues/<n>/dependencies/blocked_by`). Don't start a blocked issue.
 3. Check nobody else has it: assignees, recent comments, `gh pr list`, and remote branches
    (`gh api repos/mdfranz/partex/branches`).
-4. Claim it: assign yourself and comment `Agent hostname: <output of hostname>`.
+4. Claim it: assign yourself and comment `Agent hostname: <output of hostname>` and `Agent Name: <Claude/codex/opencode/agy>`
 
 While working:
 
