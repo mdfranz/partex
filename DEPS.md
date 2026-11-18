@@ -134,6 +134,18 @@ resolver connect-to-IP with original `Host`/SNI/hostname cert verification,
 dependency check (§13.1) asserts which library `partex` actually imports and that both
 resolve from the lockfile without conflict.
 
+**M0 gate result (recorded 2026-11-18, issue #1): passed — `target.py` pins `httpx2`; the
+`httpx` 0.28.x fallback is not needed.** `scripts/check_httpx2_gate.py` proves httpx2
+2.16.2's custom-transport surface covers §4.2 rules 2 and 4, against a loopback-only TLS
+server whose hostname does not exist in DNS: a `httpcore2.AsyncConnectionPool` with a
+custom `network_backend` connects only to the pinned resolved address, while the request
+URL keeps the original `Host` header and SNI, and certificate verification succeeds against
+the original hostname — and fails, as a negative control, when the origin is the address
+itself. Redirect responses are returned unfollowed with `follow_redirects=False`. Note for
+`target.py`: exception mapping from httpcore2 to httpx2 types lives in the *default*
+transport, so a custom transport surfaces `httpcore2.ConnectError` unless it maps them
+itself.
+
 ## 4. Supply-chain posture (unchanged, restated)
 
 All `pydantic-*` and `pydantic-monty*` packages resolve from audited local paths
@@ -143,6 +155,28 @@ posture by *shrinking* the PyPI surface to zero new runtime deps for the v1 mile
 by keeping every later addition a named, reviewable event: `playwright`/`websockets` arrive
 with the scheduled harness milestone (§7), while `ada-url`, PyJWT, and `openapi-core` stay
 behind their §3 triggers.
+
+### 4.1 Pinned checkout revisions
+
+The table below is the **single source of truth** for which sibling-checkout revisions are
+audited (issue #1). `scripts/check_greenfield.py` fails the build when `../pydantic-ai` or
+`../monty` is at any other revision or has a dirty tree, and `.github/workflows/ci.yml`
+clones exactly these revisions. `pydantic`, `pydantic-core`, and `pydantic-settings` are
+upstream PyPI releases the checkout stack itself depends on (like `httpx2`) — they are
+audited via the lockfile, not the checkouts; every distribution the checkouts *do* provide
+(`pydantic-ai-slim`, `pydantic-graph`, `pydantic-ai-harness`, `pydantic-clai2`, and the
+`pydantic-monty*` trio) must resolve from the local paths.
+
+Bumping a pin is an explicit, reviewed change to this table, followed by a re-lock:
+`git -C ../<checkout> fetch && git -C ../<checkout> checkout <sha>`, then `uv lock`.
+
+| Checkout | Revision | Pinned | Observed |
+|---|---|---|---|
+| `../pydantic-ai` | `89d26232f9be3ce26343a65e9d77ca635d99c15f` | 2026-11-18 | `pydantic-ai-slim` 2.70.1.dev6+89d26232f, `pydantic-ai-harness` 0.70.1.dev6+89d26232f, `pydantic-clai2` 0.70.1.dev6+89d26232f, `httpx2` 2.16.2 |
+| `../monty` | `3bf82f8f81be5b4eef8494b34062b3ca3e39c0f8` | 2026-11-18 | `pydantic-monty` 1.6.0 (metapackage, client, runtime), `httpx` 0.28.1 |
+
+Machines that cloned at other revisions check these out to match (`franz-optiplex-7050`'s
+pair, `75e4b551`/`2d39d5d0`, is superseded by this one, per the #1 comment thread).
 
 ## 5. Capture and probe surfaces: three required paths
 
