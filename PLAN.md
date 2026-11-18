@@ -72,7 +72,7 @@ or runtime.
   only") and bbot's program-policy gates, but enforced in code.
 - **Secrets are first-class.** Live testing needs real credentials; they enter via engagement
   credential references (environment variables), are marked secret at capture, and are redacted
-  in exports by default (§5).
+  in exports, model-facing tool returns, and telemetry by default (§5, §9, §11.1).
 - Model-backed stages (summary, agent, chat) are opt-in and injectable with test models. The
   validation suite never needs credentials or a network beyond localhost (§13).
 - Skill content is data (Markdown), including offensive playbooks. It is never executed,
@@ -279,8 +279,9 @@ tool — is validated immediately before send:
    committed), it is not an error.
 
 A scope violation raises `ScopeViolation` before any bytes hit the wire, is recorded on the
-run, and — when triggered by the agent — is returned to the model as a typed tool error. The
-client has no API that skips validation; tests assert there is no escape hatch (§13.4).
+run, and — when triggered by the agent — is raised as a `ToolFailed` tool error so the model
+sees the failure and adapts without burning its tool retry budget (§9). The client has no API
+that skips validation; tests assert there is no escape hatch (§13.4).
 
 ### 4.3 Bundle format (passive input)
 
@@ -310,18 +311,29 @@ the arbiter.
 ## 5. Data contracts
 
 All Pydantic models, `extra='forbid'`, validated at every boundary (input load, check output,
-storage round-trip, export).
+storage round-trip, export). Models avoid `from __future__ import annotations`, express
+field-level bounds (E1–E5, non-empty `evidence_ids`) via `Annotated` + `Field` /
+`StringConstraints` / `AfterValidator`, and use discriminated unions rather than nullable
+sibling fields:
 
 ```python
 Severity = Literal['info', 'low', 'medium', 'high', 'critical']
 
-class Evidence(BaseModel):
+class HttpEvidence(BaseModel):
     id: str                  # "ev_" + sha256(canonical_json)[:16]  (§12)
-    kind: EvidenceKind       # http_exchange | config_excerpt
+    kind: Literal['http_exchange'] = 'http_exchange'
     source: str              # bundle-relative file, or "capture:<run-seq>" for live captures
-    http: HttpExchange | None
-    config: ConfigExcerpt | None
-    secret_fields: list[str] # JSON paths marked secret (credential headers/bodies), redacted on export
+    http: HttpExchange
+    secret_fields: list[str] # JSON paths marked secret (credential headers/bodies), redacted on export & model return
+
+class ConfigEvidence(BaseModel):
+    id: str                  # "ev_" + sha256(canonical_json)[:16]  (§12)
+    kind: Literal['config_excerpt'] = 'config_excerpt'
+    source: str              # bundle-relative file
+    config: ConfigExcerpt
+    secret_fields: list[str]
+
+type Evidence = Annotated[HttpEvidence | ConfigEvidence, Field(discriminator='kind')]
 
 class Finding(BaseModel):
     id: str                  # "fn_" + sha256(check_id + '\0' + title + '\0' + sorted evidence_ids)[:16]
@@ -330,7 +342,7 @@ class Finding(BaseModel):
     severity: Severity
     title: str
     description: str
-    evidence_ids: list[str]  # >= 1, each must exist in the run's evidence
+    evidence_ids: Annotated[list[str], Field(min_length=1)]  # each must exist in the run's evidence
     remediation: str
     status: Literal['reported', 'verified', 'verification_failed']
     verification_id: str | None
@@ -364,12 +376,16 @@ Contract rules:
 - `ReviewSummary.finding_ids` must be a subset of the saved run's finding IDs; duplicates
   rejected; empty list with a non-empty run rejected.
 - **Secrets**: at capture time the target client marks fields sourced from engagement
-  credentials (matched header names and body tokens) in `secret_fields`. Exports redact those
-  fields to `<redacted>` by default; `--include-secrets` emits them and prints a warning.
-  Storage holds cleartext (single-operator machine, replay needs it); the export boundary is
-  where redaction is enforced.
-- Models round-trip: storage writes serialized models and re-validates on read, so a schema
-  drift between engine versions is a load error, never silent data loss.
+  credentials (matched header names and body tokens) in `secret_fields`. Storage holds
+  cleartext (single-operator machine, deterministic `verify` replay needs it), while **both
+  the export boundary and the model/telemetry boundary enforce redaction**: exports redact
+  `secret_fields` to `<redacted>` by default (`--include-secrets` emits them and prints a
+  warning), and agent/chat tools (`http_request`, `lookup_evidence`) always return redacted
+  `Evidence` so cleartext credentials never leak into LLM provider requests, CLAI2 transcripts,
+  or OpenTelemetry spans.
+- Models round-trip: storage writes serialized models and re-validates on read (via
+  `TypeAdapter(Evidence)` for the discriminated union), so a schema drift between engine
+  versions is a load error, never silent data loss.
 
 ## 6. Engine and run lifecycle
 
@@ -573,19 +589,22 @@ run later per finding.
 
 The `test` command prints a compact summary to stdout (run id, requests spent, checks run,
 findings by severity and status) and writes the full export when `--out` is given. Output is
-JSON when stdout is not a TTY.
+JSON when stdout is not a TTY. Any command may also pass `--logfire` to enable Logfire
+observability for the process (§11.1).
 
 ## 9. Agent and CLAI2 integration
 
 Two model surfaces, both built on the local pydantic-ai agent stack. Interactive mode embeds
 the agent in the CLAI2 [`chat()` terminal client](pydantic-ai/src/pydantic_clai2/pydantic_clai2/app.py#L165)
 (`chat()` is a TUI conversation API that returns `None`); `--auto` drives the agent directly
-via `agent.run()`/`agent.iter()` with `UsageLimits`, never through the terminal:
+via `agent.run()`/`agent.iter()` with `UsageLimits` inside `async with agent:`, never through
+the terminal:
 
-**`chat <run-id>` — read-only reviewer** (unchanged from the earlier design): three run-scoped
-read tools (`list_findings`, `get_finding`, `lookup_evidence`), `load_plugins=False`, skill
-content injected at agent build time, evidence framed as attacker-controlled data, no write
-tools, cross-run IDs return typed not-found errors.
+**`chat <run-id>` — read-only reviewer** (unchanged in scope from the earlier design): three
+run-scoped read tools (`list_findings`, `get_finding`, `lookup_evidence`), `load_plugins=False`,
+skill playbooks registered as on-demand deferred capabilities (`defer_loading=True`),
+evidence redacted and framed as attacker-controlled data, no write tools, and cross-run IDs
+rejected via `ToolFailed`.
 
 **`agent <engagement>` — operator in the loop or `--auto`**: an agent with tools over the live
 engagement. `agent` runs the **same deterministic pipeline as `test`** first — baseline capture
@@ -602,55 +621,96 @@ class AgentDeps:
     client: ScopedHttpClient   # target client handle; scope enforced inside (§4.2)
     engine: EngineHandle       # submit drafts, request verification — never raw storage
 
-def build_agent(model: Model | str) -> Agent[AgentDeps, str]:
-    agent = Agent(model, deps_type=AgentDeps, output_type=str, system_prompt=TESTER_SYSTEM_PROMPT)
+def build_agent(model: Model | str, skills: Sequence[Capability]) -> Agent[AgentDeps, str]:
+    agent = Agent(
+        model,
+        name='artex_tester_agent',
+        deps_type=AgentDeps,
+        output_type=str,
+        instructions=TESTER_INSTRUCTIONS,
+        defer_model_check=True,
+        capabilities=[
+            Caching(),
+            RepairToolArguments(),
+            ToolOutputLimits(bands=[Band(over=10_000, action=Truncate())]),
+            SystemReminders(dynamic_reminders=[GoalReanchor()]),
+            build_audit_hooks(),  # records every tool call & result to tool_calls table
+            *skills,              # each skill wrapped with Capability(..., defer_loading=True)
+        ],
+    )
 
     @agent.tool
-    def http_request(ctx, method: str, path: str, headers: dict[str, str] | None,
-                     body: str | None, host: str | None = None) -> Evidence: ...
-        # sends via deps.client; `host` defaults to base_url's host and is validated against
-        # scope.hosts (so the agent can address any in-scope host, incl. cross-host redirects);
-        # ScopeViolation → typed tool error; exchange auto-captured
+    def http_request(ctx: RunContext[AgentDeps], method: str, path: str,
+                     headers: dict[str, str] | None = None, body: str | None = None,
+                     host: str | None = None) -> Evidence: ...
+        # sends via ctx.deps.client; `host` defaults to base_url's host and is validated
+        # against scope.hosts (so the agent can address any in-scope host, incl. cross-host
+        # redirects); ScopeViolation or budget exhaustion → raises ToolFailed; exchange
+        # auto-captured in RunStore and returned to the model with secret_fields redacted
+
+    @agent.tool(args_validator=validate_check_id)
+    def run_check(ctx: RunContext[AgentDeps], check_id: str) -> list[Finding]: ...
+        # unknown check_id raises ModelRetry listing registered checks; valid check_id
+        # invokes the check through ctx.deps.engine, which validates + commits drafts
+
+    @agent.tool(args_validator=validate_finding_id)
+    def request_verification(ctx: RunContext[AgentDeps], finding_id: str) -> Verification: ...
 
     @agent.tool
-    def run_check(ctx, check_id: str) -> list[Finding]: ...
-        # invokes a registered check through the engine; engine validates + commits drafts
+    def list_findings(ctx: RunContext[AgentDeps]) -> list[Finding]: ...
 
     @agent.tool
-    def request_verification(ctx, finding_id: str) -> Verification: ...
-
-    @agent.tool
-    def list_findings(ctx) -> list[Finding]: ...
-
-    @agent.tool
-    def lookup_evidence(ctx, evidence_id: str) -> Evidence: ...
+    def lookup_evidence(ctx: RunContext[AgentDeps], evidence_id: str) -> Evidence: ...
+        # cross-run or unknown evidence_id raises ToolFailed; returns secret-redacted Evidence
 ```
 
 Design rules:
 
 - **No plugins**: `load_plugins=False`; no coding tools, no filesystem access, no network
   except the scoped `http_request` tool.
-- **Scope is enforced in the tool layer.** `http_request` is the only network door and it goes
-  through the engagement-scoped client (§4.2). The system prompt states the rules, but the
-  design never relies on the model obeying them: out-of-scope requests fail as typed errors.
-- **The model never writes findings.** It can only invoke `run_check` / `request_verification`;
-  the engine validates drafts and evidence and commits. A model-invented finding with no
-  evidence cannot enter the store by construction.
-- **`--auto` loop**: the agent runs a bounded planner loop (recon → hypothesize → `run_check` →
-  `request_verification` → report) driven directly through `agent.run()`/`agent.iter()` under
-  `UsageLimits` and the engagement's `max_requests` budget. The budget is the hard stop; the
-  loop also stops when a full planner pass yields no new actions. The optional
-  `--agent-max-requests` flag sets a tighter agent-loop budget that can only lower the
-  engagement ceiling, never raise it. Every tool call is recorded in the `tool_calls` table
-  (§7), so an `--auto` run is fully auditable after the fact.
-- **Skill content is injected at construction**: the adapter reads the run's `SKILL.md` bodies
-  and `reference/*.md` once at build time (including offensive playbooks such as an
-  `api-security`-style skill) and renders them into the system prompt. No tool reads files.
+- **Explicit agent metadata, caching, and lifecycle**: every `Agent` (`artex_tester_agent`,
+  `artex_reviewer_agent`, `artex_summarizer_agent`) sets an explicit `name=`, uses
+  `instructions=`, enables `defer_model_check=True` (so importing or constructing agents never
+  requires provider API keys and tests override models via `with agent.override(model=...):`),
+  and attaches `Caching()` (`Caching(messages=False)` on one-shot `summarize`). Programmatic
+  runs (`--auto`, `summarize`) enter `async with agent:` so provider HTTP clients are reused
+  and closed cleanly (`chat()` enters `async with agent:` internally).
+- **Scope and tool error taxonomy (`ToolFailed` vs `ModelRetry`)**: `http_request` is the only
+  network door and goes through the engagement-scoped client (§4.2). Out-of-scope requests,
+  budget exhaustion, target transport errors, and cross-run ID lookups raise `ToolFailed`
+  (recorded as `ToolReturnPart(outcome='failed')`, traced as an error, and never consuming the
+  tool retry budget so the model adapts). Recoverable parameter mistakes (such as an unknown
+  `check_id` passed to `run_check`) raise `ModelRetry` from an `args_validator` so the model
+  can self-correct within its retry budget.
+- **The model never writes findings and never sees cleartext secrets.** It can only invoke
+  `run_check` / `request_verification`; the engine validates drafts and evidence and commits.
+  `http_request` and `lookup_evidence` always redact `secret_fields` before returning `Evidence`
+  to the model.
+- **Harness safety and context controls**: `RepairToolArguments()` repairs minor JSON syntax
+  glitches from smaller/local models; `ToolOutputLimits(bands=[Band(over=10_000, action=Truncate())])`
+  prevents large HTTP response bodies from overflowing the context window (using `Truncate`
+  rather than `WorkspaceStore`, because no `LocalWorkspace` is attached); and
+  `SystemReminders(dynamic_reminders=[GoalReanchor()])` keeps long `--auto` runs anchored to
+  the engagement scope behind a `CachePoint` without busting the prompt cache.
+- **`--auto` loop and hook-based auditing**: the agent runs a bounded planner loop (recon →
+  hypothesize → `run_check` → `request_verification` → report) driven directly through
+  `agent.run(..., run_id=deps.run_id)` / `agent.iter()` under `UsageLimits` and the
+  engagement's `max_requests` budget. Passing `run_id=deps.run_id` aligns `RunContext.run_id`
+  and OpenTelemetry `gen_ai.agent.call.id` with `runs.id` in SQLite (multi-turn `chat`
+  correlates via a UUID `session_id` / `conversation_id` instead, since `run_id` is per
+  `Agent.run` call). A `Hooks` capability (`wrap_tool_execute`) records every tool invocation
+  in the `tool_calls` table (§7) with secret arguments redacted, keeping tool bodies free of
+  duplicate audit boilerplate.
+- **Progressive disclosure of skills (`defer_loading=True`)**: the adapter wraps each
+  discovered skill (`SKILL.md` body and `reference/*.md`) as a deferred
+  `Capability(id=skill.name, description=skill.description, instructions=skill.body, defer_loading=True)`.
+  The model sees only the compact capability catalog initially and calls the framework-managed
+  `load_capability` tool when a playbook is relevant. No tool reads arbitrary files from disk.
 - **Terminal behavior**: Esc cancels the current turn; failed/cancelled turns retain history
   (CLAI2 semantics); committed findings are unaffected by construction.
 - The agent adapter module is the only file that imports `pydantic_clai2`. Tests drive both
-  surfaces with `TestModel` / `FunctionModel` and `Console(file=StringIO())`, plus one manual
-  tmux pass per release (§14).
+  surfaces with `TestModel` / `FunctionModel` via `agent.override()` and
+  `Console(file=StringIO())`, plus one manual tmux pass per release (§14).
 
 ## 10. Skill boundary and registry
 
@@ -663,7 +723,7 @@ offensive playbooks); checks are code. They stay outside the engine and are join
 ```text
 skills/<name>/
   SKILL.md        # YAML frontmatter: name, description, checks: [...]
-  reference/*.md  # optional deeper content; injected into agent prompts at build time
+  reference/*.md  # optional deeper content; exposed on demand via Capability(..., defer_loading=True)
 ```
 
 **Check discovery** (code, installed only). Two protocols:
@@ -710,16 +770,18 @@ class ActiveCheck(Protocol):
 The header-review fixture exercises the whole passive contract; the version-disclosure fixture
 exercises capture → active probe → verify → replay → export against the local fixture app.
 
-## 11. Summarization
+## 11. Summarization and observability
 
-Unchanged in shape from the earlier design:
+Summarization is unchanged in shape from the earlier design:
 
 ```python
-async def summarize_run(run_id: str, store: RunStore, model: Model) -> ReviewSummary
+async def summarize_run(run_id: str, store: RunStore, model: Model | str) -> ReviewSummary
 ```
 
-- `output_type=ReviewSummary` agent over the run's findings (id, severity, status, title,
-  description, remediation). Raw evidence stays out of the summarizer prompt in v1.
+- `output_type=ReviewSummary` agent (`name='artex_summarizer_agent'`, `defer_model_check=True`,
+  `capabilities=[Caching(messages=False)]`) over the run's findings (id, severity, status,
+  title, description, remediation), run inside `async with agent:` with `run_id=run_id`. Raw
+  evidence stays out of the summarizer prompt in v1.
 - Two-layer reference validation: output validator raises `ModelRetry` listing valid finding
   IDs on hallucination (bounded retries, default 2); final failure records `runs.summary_error`
   and leaves the run `checks_complete`. Engine-side validation repeats the check before
@@ -728,6 +790,24 @@ async def summarize_run(run_id: str, store: RunStore, model: Model) -> ReviewSum
 - The narrative must distinguish `verified` from `reported` findings; the prompt includes
   status, and the output schema keeps it via `finding_ids` referencing findings whose status is
   stored.
+
+### 11.1 Logfire observability and secret safety
+
+- **Opt-in CLI setup and strict ordering**: when `--logfire` is passed (or `ARTEX_WEB_LOGFIRE=1`
+  is set), `cli.py` calls `logfire.configure(service_name='artex-web', service_version=__version__)`
+  **once at process startup before** `logfire.instrument_pydantic_ai()`. Without `--logfire`,
+  no network exporter is configured so offline runs and the hermetic test suite never open
+  external telemetry sockets.
+- **No `logfire.instrument_httpx()` on the target client**: global HTTPX instrumentation is
+  explicitly forbidden because `target.py` sends real engagement credentials (`ARTEX_WEB_CRED_*`)
+  that must not bypass `secret_fields` redaction into OpenTelemetry spans. Instead, `target.py`
+  wraps outbound requests in a manual structured span using template placeholders —
+  `logfire.span('target request {method} {host}{path}', method=method, host=host, path=path, run_id=run_id)`
+  — recording metadata and the resulting `evidence_id` without raw headers or bodies.
+- **Telemetry treated as untrusted data**: spans, tool arguments, tool returns, and model
+  payloads are diagnostic data only, never instructions; because `http_request` and
+  `lookup_evidence` return secret-redacted `Evidence` (§5, §9), `instrument_pydantic_ai()` span
+  attributes never capture cleartext engagement secrets.
 
 ## 12. Determinism and reproducibility
 
@@ -806,28 +886,38 @@ socket.
   the finding readable.
 - *Budgets*: `max_requests: 3` ends the run cleanly in `checks_complete` with exactly three
   captured requests.
-- *Redaction*: with a credential env var set, captured evidence marks `secret_fields`; default
-  export shows `<redacted>`; `--include-secrets` shows the value and warns.
-- *Agent*: `TestModel` (calls every tool) drives `agent` against the fixture engagement:
-  `http_request` in scope succeeds and is captured; out-of-scope calls return typed errors;
-  `run_check` commits evidence-backed findings; a scripted model turn that tries to emit a
-  free-form finding cannot (no such tool). Every tool invocation lands in `tool_calls` (with
-  secret args redacted). `--auto` terminates within `max_requests`.
+- *Redaction*: with a credential env var set, captured evidence marks `secret_fields` (cleartext
+  in `RunStore` for `verify` replay); default export and agent tool returns (`http_request`,
+  `lookup_evidence`) show `<redacted>`; `--include-secrets` on export shows the value and warns.
+- *Agent*: `TestModel(call_tools=[])` smoke-tests agent construction, and a scripted
+  `FunctionModel` (via `agent.override(model=...)`) drives `agent` against the fixture
+  engagement through a realistic multi-turn sequence: `load_capability` loads a deferred skill
+  playbook on demand; `http_request` in scope succeeds, is captured in `RunStore`, and returns
+  secret-redacted `Evidence` to the model; out-of-scope calls raise `ToolFailed` (recorded with
+  `outcome='failed'` without burning retry budget); an unknown `check_id` triggers `ModelRetry`
+  while a valid `run_check` commits evidence-backed findings; a scripted model turn that tries
+  to emit a free-form finding cannot (no such tool). Every tool invocation lands in
+  `tool_calls` via the `Hooks` capability (with secret args redacted). `--auto` terminates
+  within `max_requests`.
 
 ### 13.5 Model and terminal integration
 
 As before: hallucinated summary references trigger `ModelRetry` then persist; always-invalid
 summary leaves `checks_complete` with `runs.summary_error` set; run-scoped chat tools reject
-cross-run IDs; cancellation mid-turn keeps findings readable and retains history; summary
-timeout is retryable. All with `TestModel`/`FunctionModel`; real model calls blocked globally.
+cross-run IDs via `ToolFailed`; cancellation mid-turn keeps findings readable and retains
+history; summary timeout is retryable. All with `TestModel`/`FunctionModel` via
+`agent.override()` and `capture_run_messages()`; real model calls blocked globally.
 
 ## 14. Test strategy
 
 - **Stack**: pytest + anyio pytest plugin (`anyio_mode = "auto"`), inline-snapshot, ruff +
   pyright strict, 100% branch coverage target with audited pragmas.
-- **Network blocking**: a session fixture fails any socket connect to a non-loopback address,
-  so the suite is hermetic by construction; the fixture target app binds `127.0.0.1` only.
-- **Model blocking**: session fixture fails any model that is not `TestModel`/`FunctionModel`.
+- **Network and telemetry blocking**: a session fixture configures
+  `logfire.configure(send_to_logfire=False)` (exposing `capfire` / `InMemorySpanExporter` for
+  span assertions) and fails any socket connect to a non-loopback address, so the suite is
+  hermetic by construction; the fixture target app binds `127.0.0.1` only.
+- **Model blocking**: agents build with `defer_model_check=True`, and a session fixture fails
+  any model execution that is not `TestModel`/`FunctionModel` injected via `agent.override()`.
 - **Isolation**: fresh temporary SQLite store per test; no test touches `$XDG_DATA_HOME`; no
   test needs real credentials (fixture engagement credentials point at dummy env vars set by
   the fixture).
@@ -861,7 +951,7 @@ gains a "result" column as experiments land).
 | CLAI2 `chat()` is a local checkout API that moves | Adapter is one module + one integration test; checkout is path-pinned; seam exercised by 13.4/13.5 rather than assumed |
 | Terminal tests flaky in CI | Headless-only in CI; interactive checks are manual tmux gates |
 | Live mode's non-determinism hides regressions | Passive mode keeps byte-determinism; live findings always carry evidence + replay recipe; `verify` re-tests reproducibility on demand |
-| Secrets leak through exports, logs, or prompts | Secret marking at capture; export redaction by default; summarizer sees findings only; chat/agent evidence framing; 13.4 tests redaction |
+| Secrets leak through exports, logs, telemetry, or prompts | Secret marking at capture; redaction by default on both exports and model-facing tool returns (`http_request`, `lookup_evidence`); no `logfire.instrument_httpx()` on `target.py`; summarizer sees findings only; chat/agent evidence framing; 13.4 tests redaction across export and tool returns |
 | Runaway agent loop spends unbounded requests | Engagement `max_requests` is a hard budget in the client; `--auto` additionally bounded by `UsageLimits`; every tool call captured for audit |
 | Entry-point checks add supply-chain surface | Code loads only from installed distributions, never paths; skills are data-only; no prebuilt artifacts published |
 | Prompt injection through captured responses steers the agent | Evidence framed as untrusted data; model has no write path to findings; scope gate is code, not prompt; the worst a hostile response can do is waste budget |
