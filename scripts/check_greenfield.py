@@ -1,11 +1,12 @@
 """Build and install the wheel in a fresh environment outside the checkout."""
 
+import json
 import subprocess
 import sys
 from contextlib import redirect_stdout
 from importlib.metadata import version
 from io import StringIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from runpy import run_path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -25,7 +26,7 @@ def main() -> None:
         (wheel,) = scratch.glob('*.whl')
         with ZipFile(wheel) as archive:
             for name in archive.namelist():
-                if name.startswith(('fixtures/', 'tests/', 'partex/fixtures/', 'partex/tests/')):
+                if {'fixtures', 'tests'}.intersection(PurePosixPath(name).parts[:-1]):
                     raise ValueError(f'Unexpected wheel member: {name}')
 
         environment = scratch / '.venv'
@@ -37,6 +38,18 @@ def main() -> None:
             check=True,
             cwd=scratch,
         )
+        installed = subprocess.run(
+            ['uv', '--offline', 'pip', 'list', '--python', str(environment / 'bin/python'), '--format', 'json'],
+            check=True,
+            cwd=scratch,
+            capture_output=True,
+            text=True,
+        )
+        distributions: list[dict[str, str]] = json.loads(installed.stdout)
+        names = {distribution['name'] for distribution in distributions}
+        if names != {'partex'}:
+            raise ValueError(f'Expected only partex in the fresh environment, found {sorted(names)}')
+
         commands = (
             [str(environment / 'bin/partex'), '--version'],
             [str(environment / 'bin/python'), '-m', 'partex', '--version'],
