@@ -25,7 +25,9 @@ or runtime.
   evidence. A finding the engine cannot tie to evidence is never persisted. Verified findings
   additionally carry a replayable verification record.
 - **Findings that always survive**: persisted before any model-backed stage, readable after a
-  failed, timed-out, or cancelled summary, verification, agent loop, or chat turn.
+  failed, timed-out, or cancelled summary, verification, agent loop, or chat turn. Evidence is
+  persisted **at capture time** (each capture commits immediately), so even a mid-run crash
+  discards nothing already sent or received.
 - **Two execution modes**:
   - *Passive*: deterministic review of offline evidence bundles (imported captures, config
     excerpts) or of traffic captured during earlier active runs. Passive findings are a pure
@@ -34,10 +36,14 @@ or runtime.
   - *Active*: scoped live testing — active checks send probes through the target client, and
     verification replays minimal PoC requests to confirm exploitability. Active findings carry
     full evidence snapshots so they are auditable and replayable even though target state may
-    drift.
-- **An agent layer** over the run, built on the local CLAI2 `chat()` API: an interactive
-  operator-driven mode and a `--auto` autonomous loop (planner → tool calls → evidence-gated
-  findings), both confined to the engagement scope by the tool layer, not by the prompt.
+    drift. Live evidence commits at capture time (see §6.1), so a crash mid-run never loses
+    exchanges already paid for in requests.
+- **An agent layer** over the run, built on the local pydantic-ai agent stack: an interactive
+  operator-driven mode embedded in the CLAI2 `chat()` terminal client, and a `--auto`
+  autonomous loop (planner → tool calls → evidence-gated findings) that drives the same agent
+  directly via `agent.run()`/`agent.iter()` — not through `chat()`, which is a TUI-only
+  conversation API returning `None`. Both are confined to the engagement scope by the tool
+  layer, not by the prompt.
 
 ### Non-goals (v1)
 
@@ -53,10 +59,12 @@ or runtime.
 
 ### Constraints
 
-- Dependent packages import from the local checkout (`pydantic-ai-slim`, `pydantic-ai-harness`,
-  `pydantic-clai2`), not from PyPI. Given the November 2026 prebuilt-image backdoor in the
-  Artex lineage (see `README.md`), the package installs only from audited local paths and
-  publishes no prebuilt artifacts.
+- Dependent `pydantic-*` packages import from the local checkout (`pydantic-ai-slim`,
+  `pydantic-ai-harness`, `pydantic-clai2`), never from PyPI. Given the November 2026
+  prebuilt-image backdoor in the Artex lineage (see `README.md`), the package installs its
+  `pydantic-*` dependencies only from audited local paths and publishes no prebuilt artifacts;
+  non-`pydantic` third-party dependencies (`httpx`, `rich`, `prompt-toolkit`, etc.) resolve from
+  the pinned lockfile as normal.
 - **Authorization is a hard gate, not a convention.** Every live run requires an engagement
   file containing an explicit authorization attestation, and every outbound request passes a
   scope check in the target client (§4.2). There is no code path that sends traffic without
@@ -77,8 +85,9 @@ or runtime.
 
 ```text
 ┌──────────────────────────── artex-web CLI ────────────────────────────────┐
-│ engage   review <bundle>   test <eng>   verify <finding-id>   runs        │
-│ show <run-id>   summarize <id>   checks   agent <eng>   chat <run-id>     │
+│ engage   review <bundle>   test <eng>   verify <run-id> <finding-id>      │
+│ runs   show <run-id>   summarize <run-id>   checks   agent <eng>          │
+│ chat <run-id>                                                              │
 └──────┬──────────────────────────────────────────────┬───────────────────┘
        │                                              │
 ┌──────▼───────────────────────────────┐   ┌──────────▼──────────────────┐
@@ -93,7 +102,7 @@ or runtime.
        │                                             │
 ┌──────▼─────────────────────────────────────────────▼───────────────────┐
 │  RunStore: SQLite (engagements, runs, evidence, findings,              │
-│  verifications, summaries) + JSON export                               │
+│  verifications, tool_calls, summaries) + JSON export                    │
 └────────────────────────────────────────────────────────────────────────┘
        ▲                    ▲                            ▲
 ┌──────┴───────────┐ ┌──────┴──────────────┐ ┌───────────┴───────────┐
@@ -138,18 +147,21 @@ artex-web/
     bundle.py              # bundle load + validation (passive mode input)
     engagement.py          # engagement load + validation, authorization attestation
     scope.py               # Scope model + matching (hosts, path prefixes, exclusions, ports)
-    ids.py                 # content-hash IDs, canonical JSON encoding
+    ids.py                 # content-hash IDs, canonical JSON encoding (sorted keys,
+                           #   ensure_ascii, compact separators)
     registry.py            # check/skill discovery and join
     checks/
       __init__.py          # PassiveCheck / ActiveCheck protocols, draft validation
       builtin.py           # header-security (passive), version-disclosure (active probe)
     target.py              # scoped HTTP client (the only socket-opening module), capture
+                           #   (httpx, follow_redirects=False, pinned resolver + SNI)
     verify.py              # verification runner: minimal PoC replay, verdict, evidence
     engine.py              # run lifecycle, ordered execution, failure policy, single writer
     storage.py             # SQLite RunStore, schema, migrations
     export.py              # JSON export with default secret redaction
     summarize.py           # model-backed ReviewSummary generation + reference validation
-    agent_adapter.py       # agent, AgentDeps, scoped tools, CLAI2 chat() wiring, --auto loop
+    agent_adapter.py       # agent, AgentDeps, scoped tools, CLAI2 chat() wiring (interactive)
+                           # + --auto loop via agent.run()/agent.iter()
     skills/
       header-review/
         SKILL.md           # frontmatter: name, description, checks: [header-security]
@@ -167,7 +179,8 @@ artex-web/
     test_target.py         # scope gate: in-scope allowed, out-of-scope refused, redirect handling
     test_verify.py         # verdicts, replay, evidence capture against fixture app
     test_engine.py  test_storage.py  test_export.py  test_summarize.py
-    test_agent_adapter.py  # tools scoped to engagement+run, out-of-scope tool calls refused
+    test_agent_adapter.py  # tools scoped to engagement+run, out-of-scope tool calls refused,
+                           #   tool_calls audit rows recorded
     test_agent_terminal.py # chat() integration: TestModel, Console(StringIO), cancellation
 ```
 
@@ -175,14 +188,24 @@ artex-web/
 
 - Python `>= 3.11`, matching the checkout's floor. Managed with `uv` (0.12.x, available locally).
 - A standalone uv project. `[tool.uv.sources]` maps every `pydantic-*` dependency to the local
-  checkout paths so nothing resolves from PyPI:
+  checkout paths so **no `pydantic-*` resolves from PyPI**:
   `pydantic-ai-slim -> pydantic-ai/pydantic_ai_slim`, `pydantic-ai-harness ->
   pydantic-ai/src/pydantic_ai_harness`, `pydantic-clai2 -> pydantic-ai/src/pydantic_clai2`.
-  The exact transitive member list is settled in M0 (§15) by the greenfield dependency check.
-- Other runtime dependencies: `httpx` is **not** introduced lightly — the target client starts
-  on stdlib (`http.client`/`urllib`) unless M2 measurement shows that untenable; any HTTP
-  library added must come from the audited local source set, not PyPI. Dev dependencies:
-  `pytest`, `anyio`, `ruff`, `pyright`, `inline-snapshot`.
+  Non-`pydantic` third-party dependencies resolve from the pinned lockfile as normal. The exact
+  transitive member list is settled in M0 (§15) by the greenfield dependency check.
+- **M0 packaging note**: `pydantic-clai2` declares its `pydantic-ai-slim`/`pydantic-ai-harness`
+  deps as `{ workspace = true }` and pins their exact versions via hatch metadata hooks. Because
+  `artex-web` is *outside* that workspace, the path sources above must also be accompanied by
+  `[tool.uv.overrides]` entries so clai2's workspace references and exact-version pins resolve to
+  the local paths. Settling the precise `sources` + `overrides` shape is part of M0, and is a
+  known risk (not a surprise) going in.
+- Other runtime dependencies: the target client uses **httpx** (pinned via the lockfile; it is
+  already a direct dependency of `pydantic-clai2`, so it is present regardless). The
+  DNS-rebinding guard and correct SNI + hostname cert verification on a pre-resolved address
+  are security-critical; httpx's `follow_redirects=False` and custom transport provide them
+  without hand-rolling sockets/`ssl`. No other HTTP library is introduced; anything beyond
+  httpx must come from the audited local source set, not PyPI. Dev dependencies: `pytest`,
+  `anyio`, `ruff`, `pyright`, `inline-snapshot`.
 - Tooling conventions mirror the checkout: ruff with single quotes and 120-column lines, pyright
   strict, `anyio_mode = "auto"`, coverage target 100% branch with narrow pragmas on true I/O
   edges.
@@ -244,8 +267,9 @@ tool — is validated immediately before send:
 1. **Scheme and port**: `http`/`https` only; the effective port must be in `scope.ports`.
 2. **Host**: exact match against `scope.hosts` (no suffix matching; `evil-example.test` does
    not match `example.test`). DNS rebinding guard: resolution happens once per run through a
-   pinned resolver result, and the client connects to the resolved address with the original
-   `Host` header / SNI.
+   pinned resolver result, and the client connects to the resolved address while keeping the
+   original `Host` header and SNI (and cert verification against the original hostname, not the
+   IP) — via httpx's transport, never hand-rolled sockets.
 3. **Path**: must start with an allowed `path_prefix` and match no `exclusions` prefix
    (exclusions win).
 4. **Redirects**: never followed automatically; a redirect response is captured as evidence,
@@ -277,7 +301,11 @@ required. Sanitization-before-sharing remains the producer's responsibility and 
 absence of evidence is not evidence of absence.
 
 Evidence model (v1 kinds) is unchanged: `HttpExchange` (request/response with headers and
-optional text bodies; binary bodies refused) and `ConfigExcerpt` (path, format, content).
+optional text bodies) and `ConfigExcerpt` (path, format, content). Response capture sends
+`Accept-Encoding: gzip` and transparently decodes `Content-Encoding` before storage; a decoded
+body that is not valid UTF-8 (or is dominated by non-printable bytes) is captured as headers
+plus a `body_refused` marker — binary bytes are never stored, and `Content-Type` is a hint, not
+the arbiter.
 
 ## 5. Data contracts
 
@@ -350,9 +378,9 @@ Two entry pipelines share one lifecycle core:
 - `run_review(bundle)` — passive: load bundle → validate → register evidence → run passive
   checks → commit findings.
 - `run_test(engagement)` — live: load engagement → validate (incl. `--authorized`) → open
-  scoped target client → capture baseline exchanges → run passive checks over captures → run
-  active checks (probes) → run verification on eligible findings → commit incrementally per
-  stage (§6.1) → optionally summarize.
+  scoped target client → capture baseline exchanges (each committed at capture time) → run
+  passive checks over captures → run active checks (probes) → run verification on eligible
+  findings → commit findings incrementally per stage (§6.1) → optionally summarize.
 
 ```text
 load + validate ─▶ register evidence ─▶ checks (passive then active, local workers §7.1)
@@ -385,10 +413,13 @@ publishes nothing). For **live** runs it is wrong: a crashing check late in a lo
 must not discard evidence already paid for in requests. Policy:
 
 - *Passive runs*: unchanged — one transaction at the end, `checks_failed` publishes nothing.
-- *Live runs*: findings commit **per check**, in selection order, each with its evidence in
-  one transaction. A raising check aborts the run (`checks_failed`, exit 1, remaining workers
-  cancelled) but earlier stages' findings stay readable. The run row records which check
-  failed, so `--resume` re-runs from that check onward (§17).
+- *Live runs*: **evidence commits at capture time** — the target client persists each captured
+  exchange as its own small transaction before the check that triggered it proceeds. Findings
+  commit **per check**, in selection order, referencing evidence already persisted. A raising
+  check aborts the run (`checks_failed`, exit 1, remaining workers cancelled) but earlier
+  stages' findings — and every exchange captured up to the failure — stay readable. The run row
+  records which check failed (for audit and forensics); there is no `--resume` command in v1
+  (see §17 Q1).
 - Validation failure aborts **before any network or model call** (exit 1; run row kept in
   `invalid` for audit).
 - Summarization failure, timeout (default 60 s, `--summary-timeout`), or Ctrl-C leaves the run
@@ -399,9 +430,10 @@ must not discard evidence already paid for in requests. Policy:
 - A second run on the same input creates a new run row; runs are immutable once
   `checks_complete` except finding `status` transitions from `verify` (§8).
 
-Exit codes (strix convention): `0` completed, no findings; `2` completed, findings present;
-`1` fatal (invalid input, unauthorized, scope error at startup, storage error, check crash);
-`130` interrupted.
+Exit codes: `0` completed, no findings; `3` completed, findings present; `2` usage error
+(argparse's default — kept distinct so a malformed invocation is never mistaken for "findings
+present"); `1` fatal (invalid input, unauthorized, scope error at startup, storage error, check
+crash); `130` interrupted.
 
 ## 7. Storage and export
 
@@ -417,7 +449,9 @@ workers, no database-backed job queue in v1.
 
 - **The engine is the only writer.** Workers receive validated evidence (passive) or a scoped
   target-client handle (active) and return drafts; they never hold a write handle. The engine
-  validates every draft and commits. Worker count never changes the number of SQLite writers.
+  validates every draft and commits. For live runs the engine also persists each captured
+  exchange at capture time (a small transaction per capture) so evidence survives a mid-run
+  crash. Worker count never changes the number of SQLite writers.
 - **Dispatch, not claiming.** Bounded pool (`--workers N`, default `min(4, os.cpu_count())`;
   `--workers 1` serial) via anyio task group + `CapacityLimiter`. No claim table, no polling.
 - **Order independence.** Passive results are assembled in selection order regardless of
@@ -453,7 +487,10 @@ CREATE TABLE runs (
   selected_checks TEXT NOT NULL,  -- JSON array, selection order
   authorized_flag INTEGER NOT NULL DEFAULT 0,  -- --authorized was passed (live runs)
   model TEXT,
-  error TEXT
+  requests_spent INTEGER NOT NULL DEFAULT 0,   -- live runs: outbound requests consumed
+  scope_snapshot TEXT,            -- serialized Scope (live runs), for cross-run coverage comparison
+  error TEXT,                     -- check/validation failure diagnostic
+  summary_error TEXT              -- summary generation/validation failure diagnostic
 );
 CREATE TABLE evidence (
   run_id TEXT NOT NULL REFERENCES runs,
@@ -484,6 +521,15 @@ CREATE TABLE verifications (
   created_at TEXT NOT NULL,
   PRIMARY KEY (run_id, verification_id)
 );
+CREATE TABLE tool_calls (
+  run_id TEXT NOT NULL REFERENCES runs,
+  call_id TEXT NOT NULL,          -- "tc_" + uuid4
+  tool TEXT NOT NULL,             -- http_request | run_check | request_verification | ...
+  args TEXT NOT NULL,             -- JSON, secret values redacted at capture
+  result TEXT NOT NULL,           -- JSON summary (typed error or committed-effect reference)
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (run_id, call_id)
+);
 CREATE TABLE summaries (
   run_id TEXT PRIMARY KEY REFERENCES runs,
   content TEXT NOT NULL,
@@ -496,8 +542,8 @@ Schema versioning: `PRAGMA user_version`; a store with an unknown version is ref
 clear error, never migrated destructively (§17).
 
 Export (`artex-web show <run-id> --format json [--out FILE]`) emits the run, its evidence, its
-findings, its verifications, and its summary (or `null`), with sorted keys and stable field
-order. **`secret_fields` are redacted to `<redacted>` by default**; `--include-secrets` opts
+findings, its verifications, its tool calls, and its summary (or `null`), with sorted keys and
+stable field order. **`secret_fields` are redacted to `<redacted>` by default**; `--include-secrets` opts
 out and warns. Export excludes `created_at`, run IDs, and timestamps, so the repeatability
 experiment compares passive exports byte-for-byte (§13). Findings order: (severity rank desc,
 check_id, finding_id); evidence by registration order. `artex-web export-bundle <run-id>`
@@ -511,13 +557,13 @@ emits a passive-reviewable bundle from a live run's captures (redacted by defaul
 | `artex-web engage check <dir>` | validate engagement + scope + credentials, no traffic | `--json` |
 | `artex-web review <bundle>` | passive review of an offline bundle | `--checks a,b` / `--all`, `--workers N`, `--db`, `--no-summary`, `--model`, `--out` |
 | `artex-web test <engagement>` | live run: capture, passive + active checks, verify | `--authorized` (required), `--checks`, `--workers`, `--no-verify`, `--no-summary`, `--model`, `--db` |
-| `artex-web verify <finding-id>` | (re)run verification for one finding | `--authorized`, `--db` |
+| `artex-web verify <run-id> <finding-id>` | (re)run verification for one finding in one run | `--authorized`, `--db` |
 | `artex-web export-bundle <run-id>` | write a passive bundle from a live run's captures | `--out DIR`, `--include-secrets` |
 | `artex-web runs` | list runs (id, state, input, findings count) | `--db`, `--json` |
 | `artex-web show <run-id>` | export a run | `--format json\|text`, `--include-secrets`, `--out`, `--db` |
 | `artex-web summarize <run-id>` | (re)generate the summary | `--model`, `--summary-timeout`, `--db` |
 | `artex-web checks` | list registered checks (kind, scope needs) and their skills | `--json` |
-| `artex-web agent <engagement>` | interactive agent, or autonomous loop with `--auto` | `--authorized` (required), `--model`, `--max-requests`, `--db` |
+| `artex-web agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--agent-max-requests`, `--db` |
 | `artex-web chat <run-id>` | read-only review chat over a saved run | `--model`, `--db`, `--skill-dir` |
 
 Selection semantics unchanged: `--checks` is an explicit, ordered, de-duplicated list; unknown
@@ -531,8 +577,10 @@ JSON when stdout is not a TTY.
 
 ## 9. Agent and CLAI2 integration
 
-Two model surfaces, both built on the local
-[CLAI2 `chat()` embedding API](pydantic-ai/src/pydantic_clai2/pydantic_clai2/app.py#L165):
+Two model surfaces, both built on the local pydantic-ai agent stack. Interactive mode embeds
+the agent in the CLAI2 [`chat()` terminal client](pydantic-ai/src/pydantic_clai2/pydantic_clai2/app.py#L165)
+(`chat()` is a TUI conversation API that returns `None`); `--auto` drives the agent directly
+via `agent.run()`/`agent.iter()` with `UsageLimits`, never through the terminal:
 
 **`chat <run-id>` — read-only reviewer** (unchanged from the earlier design): three run-scoped
 read tools (`list_findings`, `get_finding`, `lookup_evidence`), `load_plugins=False`, skill
@@ -540,7 +588,11 @@ content injected at agent build time, evidence framed as attacker-controlled dat
 tools, cross-run IDs return typed not-found errors.
 
 **`agent <engagement>` — operator in the loop or `--auto`**: an agent with tools over the live
-engagement:
+engagement. `agent` runs the **same deterministic pipeline as `test`** first — baseline capture
++ passive checks + active checks + verification — producing a `checks_complete` run with
+model-free findings, and *then* hands control to the model for the operator or `--auto` loop on
+top of that evidence baseline. The model augments the run via tools; it never replaces the
+deterministic pass:
 
 ```python
 @dataclass
@@ -555,8 +607,10 @@ def build_agent(model: Model | str) -> Agent[AgentDeps, str]:
 
     @agent.tool
     def http_request(ctx, method: str, path: str, headers: dict[str, str] | None,
-                     body: str | None) -> Evidence: ...
-        # sends via deps.client; ScopeViolation → typed tool error; exchange auto-captured
+                     body: str | None, host: str | None = None) -> Evidence: ...
+        # sends via deps.client; `host` defaults to base_url's host and is validated against
+        # scope.hosts (so the agent can address any in-scope host, incl. cross-host redirects);
+        # ScopeViolation → typed tool error; exchange auto-captured
 
     @agent.tool
     def run_check(ctx, check_id: str) -> list[Finding]: ...
@@ -583,10 +637,12 @@ Design rules:
   the engine validates drafts and evidence and commits. A model-invented finding with no
   evidence cannot enter the store by construction.
 - **`--auto` loop**: the agent runs a bounded planner loop (recon → hypothesize → `run_check` →
-  `request_verification` → report) under `UsageLimits` and the engagement's `max_requests`
-  budget. The budget is the hard stop; the loop also stops when a full planner pass yields no
-  new actions. Every tool call is recorded as evidence, so an `--auto` run is fully auditable
-  after the fact.
+  `request_verification` → report) driven directly through `agent.run()`/`agent.iter()` under
+  `UsageLimits` and the engagement's `max_requests` budget. The budget is the hard stop; the
+  loop also stops when a full planner pass yields no new actions. The optional
+  `--agent-max-requests` flag sets a tighter agent-loop budget that can only lower the
+  engagement ceiling, never raise it. Every tool call is recorded in the `tool_calls` table
+  (§7), so an `--auto` run is fully auditable after the fact.
 - **Skill content is injected at construction**: the adapter reads the run's `SKILL.md` bodies
   and `reference/*.md` once at build time (including offensive playbooks such as an
   `api-security`-style skill) and renders them into the system prompt. No tool reads files.
@@ -665,8 +721,9 @@ async def summarize_run(run_id: str, store: RunStore, model: Model) -> ReviewSum
 - `output_type=ReviewSummary` agent over the run's findings (id, severity, status, title,
   description, remediation). Raw evidence stays out of the summarizer prompt in v1.
 - Two-layer reference validation: output validator raises `ModelRetry` listing valid finding
-  IDs on hallucination (bounded retries, default 2); final failure records `summary_error` and
-  leaves the run `checks_complete`. Engine-side validation repeats the check before persisting.
+  IDs on hallucination (bounded retries, default 2); final failure records `runs.summary_error`
+  and leaves the run `checks_complete`. Engine-side validation repeats the check before
+  persisting.
 - Timeout via `anyio.fail_after` (default 60 s) and Ctrl-C behave like validation failure.
 - The narrative must distinguish `verified` from `reported` findings; the prompt includes
   status, and the output schema keeps it via `finding_ids` referencing findings whose status is
@@ -676,19 +733,25 @@ async def summarize_run(run_id: str, store: RunStore, model: Model) -> ReviewSum
 
 The scope change splits the guarantee in two:
 
-- **Passive mode keeps full determinism.** Evidence ID = `ev_` + sha256 of canonical JSON;
-  finding ID = `fn_` + sha256 of `check_id + '\0' + title + '\0' + '\0'.join(sorted
-  evidence_ids)`. Checks may run concurrently but assemble in selection order; exports are
-  canonical JSON. Given the same bundle and selection, passive exports are byte-identical
-  across runs, machines, and restarts.
+- **Canonical JSON** (defined once, in `ids.py`) is the encoding every hash and byte-determinism
+  claim below depends on: objects with keys sorted lexicographically, strings UTF-8 encoded with
+  `ensure_ascii=True`, separators `(',', ':')`, no trailing whitespace, `\n` at end of file
+  where applicable.
+- **Passive mode keeps full determinism.** Evidence ID = `ev_` + sha256 of the canonical JSON of
+  `kind` + `http`/`config` **only** (excluding `id`, `source`, and `secret_fields`, so an
+  exchange hashes the same whether captured live or re-imported from a bundle); finding ID =
+  `fn_` + sha256 of `check_id + '\0' + title + '\0' + '\0'.join(sorted evidence_ids)`. Checks
+  may run concurrently but assemble in selection order; exports are canonical JSON. Given the
+  same bundle and selection, passive exports are byte-identical across runs, machines, and
+  restarts.
 - **Live mode guarantees auditability, not byte-identity.** Target state drifts, so findings
   from live runs cannot be byte-reproducible. Instead: every request and response the engine
   sends or receives is captured as evidence; every finding links its evidence; every
   verification links the exact PoC exchanges and a replay recipe; input fingerprint +
-  `engine_version` + `check_version` are stored per run. `artex-web verify <finding-id>`
+  `engine_version` + `check_version` are stored per run. `artex-web verify <run-id> <finding-id>`
   re-executes the recipe against the target to test whether the finding still reproduces.
-- Live runs record `requests_spent` and the scope snapshot, so two live runs over the same
-  engagement can be compared for coverage even when their findings differ.
+- Live runs record `requests_spent` and the scope snapshot (`runs.scope_snapshot`), so two live
+  runs over the same engagement can be compared for coverage even when their findings differ.
 
 ## 13. Validation experiments
 
@@ -706,7 +769,8 @@ it; a second fixture engagement deliberately omits the app's host for scope-gate
 
 As before: fresh venv, local path sources, run `artex-web review fixtures/bundles/valid
 --checks header-security --no-summary` from outside any checkout; assert no `artex`/`strix`
-distribution, no Artex-fork modules in `sys.modules`, no PyPI `pydantic-*`.
+distribution, no Artex-fork modules in `sys.modules`, no PyPI `pydantic-*` (non-`pydantic`
+deps may come from PyPI).
 
 ### 13.2 Skill separation
 
@@ -747,14 +811,15 @@ socket.
 - *Agent*: `TestModel` (calls every tool) drives `agent` against the fixture engagement:
   `http_request` in scope succeeds and is captured; out-of-scope calls return typed errors;
   `run_check` commits evidence-backed findings; a scripted model turn that tries to emit a
-  free-form finding cannot (no such tool). `--auto` terminates within `max_requests`.
+  free-form finding cannot (no such tool). Every tool invocation lands in `tool_calls` (with
+  secret args redacted). `--auto` terminates within `max_requests`.
 
 ### 13.5 Model and terminal integration
 
 As before: hallucinated summary references trigger `ModelRetry` then persist; always-invalid
-summary leaves `checks_complete` with `summary_error`; run-scoped chat tools reject cross-run
-IDs; cancellation mid-turn keeps findings readable and retains history; summary timeout is
-retryable. All with `TestModel`/`FunctionModel`; real model calls blocked globally.
+summary leaves `checks_complete` with `runs.summary_error` set; run-scoped chat tools reject
+cross-run IDs; cancellation mid-turn keeps findings readable and retains history; summary
+timeout is retryable. All with `TestModel`/`FunctionModel`; real model calls blocked globally.
 
 ## 14. Test strategy
 
@@ -784,7 +849,7 @@ gains a "result" column as experiments land).
 | M2 | Registry and skill separation | `registry.py`, skills as data, entry-point loading, `banner-leak` fixture distribution, `--skill-dir` | 13.2 |
 | M3 | Live testing | `engagement.py`, `scope.py`, `target.py`, `verify.py`, live engine path, per-check commits, fixture target app, `engage`/`test`/`verify`/`export-bundle` CLI, version-disclosure check | 13.3 (e), 13.4 (scope, authorization, capture, verification, budgets, redaction) |
 | M4 | Summarization | `summarize.py`, `summarize` CLI, retry/validation/timeout policy | 13.5 (references, timeout) |
-| M5 | Agent and chat | `agent_adapter.py`, `chat` (read-only) + `agent` (interactive + `--auto`), headless + cancellation tests, tmux checklist | 13.4 (agent), 13.5 (retrieval, cancellation) |
+| M5 | Agent and chat | `agent_adapter.py`, `chat` (read-only) + `agent` (interactive via `chat()` and `--auto` via `agent.run()`/`agent.iter()`), headless + cancellation tests, tmux checklist | 13.4 (agent), 13.5 (retrieval, cancellation) |
 | M6 | Hardening | coverage to target, README, engagement author docs (scope, authorization, credential handling), experiment results recorded | all |
 
 ## 16. Risks
@@ -807,13 +872,17 @@ gains a "result" column as experiments land).
 
 ## 17. Open questions
 
-1. **Resume policy for live runs**: `--resume` re-runs from the failed check, or from the
-   failed check *plus* re-verification of earlier findings (target may have changed mid-run)?
+1. **Resume policy for live runs (deferred out of v1)**: when `--resume` is added, should it
+   re-run from the failed check, or from the failed check *plus* re-verification of earlier
+   findings (target may have changed mid-run)? The failed-check marker is recorded in v1; the
+   resume command itself is future work. Re-verification is available per-finding today via
+   `verify <run-id> <finding-id>`.
 2. **Verification depth**: where exactly is the v1 line between "minimal confirmation" and
    exploitation proper? Proposal: verification may trigger errors, cross an auth boundary with
    provided credentials, or match a known-vulnerable signature — and stops there. Too tight?
-3. **Exit code for findings**: keep strix's `2`, or follow the Go Artex forks' conventions if
-   this package ever needs script compatibility with them?
+3. **Exit code for findings (decided)**: `3` = completed with findings, `2` = usage error, `0`
+   = completed with no findings. This departs from strix's `2` because argparse already owns `2`
+   for usage errors; see §6.
 4. **Migration policy**: additive `ALTER TABLE` with `user_version` bumps (Go forks' approach)
    vs. refuse-and-export/import for v1 only?
 5. **HAR / proxy ingestion**: the Go forks capture via MITM proxy; is `artex-web import-har`
