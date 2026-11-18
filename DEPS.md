@@ -2,7 +2,7 @@
 
 > Status: decisions recorded (§8). No code yet. Answers two questions left implicit by
 > `PLAN.md` and `RUNTIME.md`: (1) which Python libraries the engine actually needs beyond the
-> pinned local checkout set, and (2) how browser automation should work. **Stance: ParTEx
+> locked Pydantic AI / Monty stack, and (2) how browser automation should work. **Stance: ParTEx
 > requires active probing via the scoped Python client *and* via browser automation, plus
 > HAR import — the same three paths the original ARTEX frameworks ran** (§5). Sequencing and
 > the browser engine choice are decided in §8; nothing below stays open. Every load-bearing
@@ -17,7 +17,7 @@
 | `RUNTIME.md` | Owns execution environments (Monty Code Mode, microVM deferral). The browser capture harness gained its section there (M7). |
 | `PARTX_SKILL_PLAN.md` §4 | Owns slice sequencing. The S1 `api-inventory` skill is the first consumer of the harness's captures. |
 
-## 2. What the pinned local checkout already provides
+## 2. What the locked stack already provides
 
 Direct dependencies of the local packages `partex` must install anyway (verified against the
 checkout pyprojects, November 2026):
@@ -148,35 +148,25 @@ itself.
 
 ## 4. Supply-chain posture (unchanged, restated)
 
-All `pydantic-*` and `pydantic-monty*` packages resolve from audited local paths
-(`PLAN.md` §3.1, informed by the November 2026 backdoor — `SOURCES.md`). Non-`pydantic`
-third-party deps resolve from the pinned lockfile. This doc's recommendations preserve that
+All `pydantic-*` and `pydantic-monty*` packages resolve from PyPI, pinned with hashes in
+`uv.lock` and installed with `uv sync --frozen` (issue #13, superseding the local-checkout rule
+of #1; the November 2026 backdoor — `SOURCES.md` — is why the lockfile hashes are the control).
+All third-party deps resolve from the pinned lockfile. This doc's recommendations preserve that
 posture by *shrinking* the PyPI surface to zero new runtime deps for the v1 milestones, and
 by keeping every later addition a named, reviewable event: `playwright`/`websockets` arrive
 with the scheduled harness milestone (§7), while `ada-url`, PyJWT, and `openapi-core` stay
 behind their §3 triggers.
 
-### 4.1 Pinned checkout revisions
+### 4.1 Locked stack versions
 
-The table below is the **single source of truth** for which sibling-checkout revisions are
-audited (issue #1). `scripts/check_greenfield.py` fails the build when `../pydantic-ai` or
-`../monty` is at any other revision or has a dirty tree, and `.github/workflows/ci.yml`
-clones exactly these revisions. `pydantic`, `pydantic-core`, and `pydantic-settings` are
-upstream PyPI releases the checkout stack itself depends on (like `httpx2`) — they are
-audited via the lockfile, not the checkouts; every distribution the checkouts *do* provide
-(`pydantic-ai-slim`, `pydantic-graph`, `pydantic-ai-harness`, `pydantic-clai2`, and the
-`pydantic-monty*` trio) must resolve from the local paths.
+`uv.lock` is the single source of truth for the audited versions (issue #13). CI runs
+`uv lock --check` and `uv sync --frozen`, and `scripts/check_greenfield.py` fails the build if
+any locked requirement is unpinned, unhashed, or from a path/VCS/URL source, or if an `artex`
+or `strix` distribution appears. Bumping the stack is an explicit, reviewed `uv.lock` change
+(`uv lock --upgrade-package pydantic-clai2`).
 
-Bumping a pin is an explicit, reviewed change to this table, followed by a re-lock:
-`git -C ../<checkout> fetch && git -C ../<checkout> checkout <sha>`, then `uv lock`.
-
-| Checkout | Revision | Pinned | Observed |
-|---|---|---|---|
-| `../pydantic-ai` | `89d26232f9be3ce26343a65e9d77ca635d99c15f` | 2026-11-18 | `pydantic-ai-slim` 2.70.1.dev6+89d26232f, `pydantic-ai-harness` 0.70.1.dev6+89d26232f, `pydantic-clai2` 0.70.1.dev6+89d26232f, `httpx2` 2.16.2 |
-| `../monty` | `3bf82f8f81be5b4eef8494b34062b3ca3e39c0f8` | 2026-11-18 | `pydantic-monty` 1.6.0 (metapackage, client, runtime), `httpx` 0.28.1 |
-
-Machines that cloned at other revisions check these out to match (`franz-optiplex-7050`'s
-pair, `75e4b551`/`2d39d5d0`, is superseded by this one, per the #1 comment thread).
+Observed at the switch (2026-11-18): `pydantic-ai-slim` 2.68.0, `pydantic-ai-harness` 0.68.0,
+`pydantic-clai2` 0.68.0, `pydantic-monty` (metapackage, client, runtime) 1.6.0, `httpx2` 2.16.2.
 
 ## 5. Capture and probe surfaces: three required paths
 

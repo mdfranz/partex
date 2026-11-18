@@ -64,6 +64,6 @@ untrusted data. A full Python kernel under the host user's account has that user
 
 ## M0 local dependencies
 
-CLAI2 depends on `pydantic-monty` even when Code Mode is disabled. Build the metapackage, client,
-and worker runtime from the same audited local Monty revision. Verify version resolution and
-worker startup in a fresh environment from outside the checkouts.
+CLAI2 depends on `pydantic-monty` even when Code Mode is disabled. Install the metapackage, client,
+and worker runtime as the locked PyPI wheels (exact-pinned together). Verify version resolution
+and worker startup in a fresh environment, as `scripts/check_greenfield.py` does.

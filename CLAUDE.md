@@ -30,9 +30,8 @@ While working:
 
 - Use **uv** for everything: `uv sync`, `uv run pytest`, `uv run ruff check`,
   `uv run ruff format`, `uv run pyright`. No `pip install`, no ad-hoc venvs in the repo.
-- `pydantic-*` and `pydantic-monty*` come only from sibling checkouts `../pydantic-ai` and
-  `../monty` (PLAN §3.1), at the revisions pinned in DEPS.md (pins land with #1). Never add them from PyPI and
-  never point `pyproject.toml` at another path — symlink the checkouts instead.
+- `pydantic-*` and `pydantic-monty*` resolve from PyPI through `uv.lock` (PLAN §3.1, issue #13);
+  never add `[tool.uv.sources]` path overrides, and bump them only as an explicit `uv.lock` change.
 - Python floor is **3.14**: use modern syntax (PEP 695 `type` aliases and generics); never add
   `from __future__ import annotations`.
 - Style: ruff, single quotes, 120 columns; pyright strict.
@@ -52,7 +51,5 @@ While working:
 
 ## Git notes
 
-- Commits may be SSH-signed; if signing prompts for a passphrase you can't supply, stop and
-  ask the operator. Never disable signing.
 - If SSH push/fetch fails, use the gh credential helper over HTTPS:
   `git -c credential.helper= -c credential.helper='!gh auth git-credential' push https://github.com/mdfranz/partex.git <branch>`

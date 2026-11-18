@@ -2,7 +2,7 @@
 
 > **Status:** Planning & architecture repository (pre-implementation). No package code has landed yet; milestone sequencing, runtime boundaries, and skill synthesis plans are tracked in the documents below.
 
-**ParTEx** (`partex`) is a greenfield Python framework for **authorized web application and API security testing**, built on audited local checkouts of [Pydantic AI](https://github.com/pydantic/pydantic-ai) (`pydantic-ai-slim`, `pydantic-ai-harness`, `pydantic-clai2`) and [Monty](https://github.com/pydantic/monty) (`pydantic-monty`).
+**ParTEx** (`partex`) is a greenfield Python framework for **authorized web application and API security testing**, built on locked PyPI releases of [Pydantic AI](https://github.com/pydantic/pydantic-ai) (`pydantic-ai-slim`, `pydantic-ai-harness`, `pydantic-clai2`) and [Monty](https://github.com/pydantic/monty) (`pydantic-monty`).
 
 It draws workflow patterns—engagement lifecycle, evidence-linked findings, replayable exploit verification, and packaged `SKILL.md` playbooks—from the **ARTEX** multi-agent penetration-testing ecosystem and complementary open-source skill collections, while sharing **no runtime, service, schema, or code dependency** with any ARTEX fork.
 
@@ -18,7 +18,7 @@ It draws workflow patterns—engagement lifecycle, evidence-linked findings, rep
 | [`SOURCES.md`](SOURCES.md) | **ARTEX ecosystem overview**: survey of the four ARTEX codebases (`ARTEX/` Python scanner, `artex-global/`, `BaaRai/ARTEX/`, `failsafe/artex/`), lineage tree, quick-start commands, and the November 2026 prebuilt-image supply-chain backdoor incident. |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | **ARTEX architectural comparison**: deep comparison of the Python prototype and the three Go multi-agent forks—system diagrams, planner/worker/retester run loop, asset + exploration dual-graph data model, tool gate (`intercept/`), `llmpool/`, MITM traffic capture, and fork philosophies (*breadth* vs. *depth* vs. *integrity*). |
 | [`SKILLS.md`](SKILLS.md) | **ARTEX skill inventory**: breakdown of the 10 agent skills shipped across the three Go forks (`api-recon`, `playwright-cli`, `scopesentry`, plus BaaRai's 7 offensive/RE playbooks) and the server-side skill management API. |
-| [`DEPS.md`](DEPS.md) | **Dependency & browser automation decisions (review draft)**: what the pinned local checkouts already provide (httpx, anyio, PyYAML, rich, logfire), per-module library decisions for the staged checks (minimal OpenAPI resolver, stdlib-only JWT, RFC 6265 cookie parsing, URL canonicalization contingency), the `httpx`/`httpx2` M0 conflict, and the three **required** capture/probe paths (scoped Python client, browser automation harness, HAR import — mirroring the original frameworks), with the browser engine comparison (Playwright-over-CDP primary, raw CDP fallback) and explicit questions for review. |
+| [`DEPS.md`](DEPS.md) | **Dependency & browser automation decisions (review draft)**: what the locked Pydantic AI / Monty stack already provides (httpx, anyio, PyYAML, rich, logfire), per-module library decisions for the staged checks (minimal OpenAPI resolver, stdlib-only JWT, RFC 6265 cookie parsing, URL canonicalization contingency), the `httpx`/`httpx2` M0 conflict, and the three **required** capture/probe paths (scoped Python client, browser automation harness, HAR import — mirroring the original frameworks), with the browser engine comparison (Playwright-over-CDP primary, raw CDP fallback) and explicit questions for review. |
 
 ---
 
@@ -50,18 +50,18 @@ It draws workflow patterns—engagement lifecycle, evidence-linked findings, rep
    - **`partex agent <engagement>` (Tester Agent)**: Executes the deterministic `test` pipeline first, then launches an interactive CLAI2 `chat()` session or a bounded `--auto` loop (`agent.run()` / `agent.iter()`) confined to the engagement scope by the tool layer (`http_request`, `run_check`, `request_verification`, `list_findings`, `lookup_evidence`, `list_surface`, `record_coverage` — plus the M7 `browser_*` harness tools for browser-driven flows) with full `tool_calls` audit logging.
 
 7. **Supply-Chain Hardening & Hermetic Validation**
-   - Informed by the November 2026 prebuilt-image backdoor in the upstream ARTEX ecosystem (see [`SOURCES.md`](SOURCES.md)), `partex` resolves all `pydantic-*` and `pydantic-monty*` packages strictly from audited local checkouts (`[tool.uv.sources]` + `[tool.uv.overrides]`), never from PyPI, and publishes no prebuilt artifacts.
+   - Informed by the November 2026 prebuilt-image backdoor in the upstream ARTEX ecosystem (see [`SOURCES.md`](SOURCES.md)), `partex` installs all dependencies, including `pydantic-*` and `pydantic-monty*`, from a hash-pinned `uv.lock` via `uv sync --frozen`, checks that lockfile in CI, and publishes no prebuilt artifacts.
    - All validation experiments ([`PLAN.md` §13](PLAN.md#13-validation-experiments)) run credential-free against a local stdlib fixture target application bound to `127.0.0.1`, with non-loopback sockets and live LLM calls blocked by session fixtures.
 
 ---
 
 ## Source & Reference Repositories
 
-### 1. Runtime & Agent Stack (Audited Local Checkouts)
+### 1. Runtime & Agent Stack (Locked PyPI Releases)
 
-Both checkouts must sit beside this repository at the paths below (symlink them there if they live elsewhere); `pyproject.toml` resolves them by relative path, and `partex` does not build without them. See [`PLAN.md` §3.1](PLAN.md#31-environment-and-dependencies).
+These packages resolve from PyPI through `uv.lock`; the repositories below are the upstream sources and the reference for their APIs. See [`PLAN.md` §3.1](PLAN.md#31-environment-and-dependencies).
 
-| Repository | Local Checkout Path | Role in ParTEx |
+| Repository | Former Sibling Path | Role in ParTEx |
 |---|---|---|
 | [`pydantic/pydantic-ai`](https://github.com/pydantic/pydantic-ai) | `../pydantic-ai` | Supplies `pydantic-ai-slim` (`Agent`, `TestModel`, `FunctionModel`, tool validation), `pydantic-ai-harness` (`Caching`, `RepairToolArguments`, `ToolOutputLimits`, `SystemReminders`, `Hooks`, deferred `Capability`), and `pydantic-clai2` (`chat()` terminal UI). |
 | [`pydantic/monty`](https://github.com/pydantic/monty) | `../monty` | Supplies `pydantic-monty`, `pydantic-monty-client` (`crates/monty-python`), and `pydantic-monty-runtime` (`crates/monty-runtime`) for CLAI2's sandboxed Python Code Mode in the M5 read-only reviewer ([`RUNTIME.md`](RUNTIME.md)). |
