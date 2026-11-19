@@ -401,7 +401,9 @@ def test_checks_text(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.Mon
 def test_checks_none_installed(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(engine, 'installed_checks', dict)
     as_tty(monkeypatch)
-    assert run(capsys, 'checks') == (cli.EXIT_OK, 'no checks installed\n', '')
+    code, out, err = run(capsys, 'checks')  # skills naming now-unregistered checks warn on stderr (#25)
+    assert (code, out) == (cli.EXIT_OK, 'no checks installed\n')
+    assert 'warning: header-review: unknown-check' in err
 
 
 def test_check_kind_labels() -> None:
