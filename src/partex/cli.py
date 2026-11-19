@@ -178,6 +178,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     checks.set_defaults(handler=_cmd_checks)
 
+    verify = subparsers.add_parser(
+        'verify', parents=[with_db], help='(re)run the verification replay for one finding (requires --authorized)'
+    )
+    verify.add_argument('run_id', help='the run holding the finding')
+    verify.add_argument('finding_id', help='the finding to re-verify')
+    verify.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
+    verify.add_argument('--json', action='store_true', help='JSON output even on a TTY')
+    verify.set_defaults(handler=_cmd_verify)
+
     chat = subparsers.add_parser(
         'chat', parents=[with_db], help='read-only review chat over a saved run (CLAI2 terminal, no plugins)'
     )
@@ -467,6 +476,38 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    from .verify import VerifyResult, run_verification
+
+    db_path = resolve_db_path(args.db)
+
+    async def go() -> VerifyResult:
+        async with await RunStore.open(db_path) as store:
+            return await run_verification(args.run_id, args.finding_id, store, authorized=bool(args.authorized))
+
+    result = anyio.run(go)  # PartexError → main() prints `partex: <rule>: <msg>` and exits 1
+    if _wants_json(args.json):
+        _print_json(
+            {
+                'run_id': result.run_id,
+                'finding_id': result.finding_id,
+                'verification_id': result.verification_id,
+                'verdict': result.verdict,
+                'finding_status': result.finding_status,
+                'requests_spent': result.requests_spent,
+                'replay_evidence_ids': list(result.replay_evidence_ids),
+                'detail': result.detail,
+                'counterevidence': result.counterevidence,
+            }
+        )
+    else:
+        print(f'finding {result.finding_id}: {result.verdict} (now {result.finding_status})')
+        print(f'detail: {result.detail}')
+        print(f'counterevidence: {result.counterevidence}')
+    # A recorded verdict is a completed command (§6): confirmed, not_reproduced and inconclusive all exit 0.
+    return EXIT_OK
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -725,11 +725,19 @@ class RunStore(_Reads):
         await self._db.run(lambda conn: _transaction(conn, lambda c: _insert_findings(c, run_id, findings)))
 
     async def record_verification(
-        self, run_id: str, verification: Verification, evidence: Sequence[Evidence] = ()
+        self,
+        run_id: str,
+        verification: Verification,
+        evidence: Sequence[Evidence] = (),
+        *,
+        transition: bool = True,
     ) -> None:
         """Store *verification* with its PoC evidence and transition the finding's status, atomically.
 
-        ``confirmed`` → ``verified``; anything else → ``verification_failed``. The finding is never deleted.
+        ``confirmed`` → ``verified``; ``not_reproduced`` → ``verification_failed``;
+        with ``transition=False`` (the runner's ``inconclusive`` path) the finding
+        keeps its current status — the skill's replay table keeps inconclusive
+        findings ``reported``. The finding is never deleted.
         """
 
         def write(conn: sqlite3.Connection) -> None:
@@ -759,10 +767,11 @@ class RunStore(_Reads):
                 ),
             )
             status: FindingStatus = 'verified' if verification.verdict == 'confirmed' else 'verification_failed'
-            conn.execute(
-                'UPDATE findings SET status = ?, verification_id = ? WHERE run_id = ? AND finding_id = ?',
-                (status, verification.id, run_id, verification.finding_id),
-            )
+            if transition:
+                conn.execute(
+                    'UPDATE findings SET status = ?, verification_id = ? WHERE run_id = ? AND finding_id = ?',
+                    (status, verification.id, run_id, verification.finding_id),
+                )
 
         await self._db.run(lambda conn: _transaction(conn, write))
 

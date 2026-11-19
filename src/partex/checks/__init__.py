@@ -81,4 +81,21 @@ class ActiveCheck(Protocol):
         client: TargetClient,
     ) -> Sequence[FindingDraft]: ...
 
-    def verify_recipe(self, finding: Finding) -> VerificationRecipe | None: ...
+    def verify_recipe(self, finding: Finding, evidence: Sequence[Evidence]) -> VerificationRecipe | None:
+        """Build the minimal replay for *finding* from its own cited evidence.
+
+        The runner (``verify.py``) loads the finding's cited evidence from the
+        run store and passes it here — the check knows which exchange produced
+        the finding and turns it into the exact ``(method, url)`` replay.
+        Returns ``None`` for findings that cannot be replayed (reported-only).
+        """
+        raise NotImplementedError  # Protocol — only for static typing
+
+    def verify_match(self, finding: Finding, original: HttpEvidence, replay: HttpEvidence) -> bool:
+        """Return whether *replay* still exhibits what *original* did for *finding*.
+
+        The check owns reproduction semantics: the runner executes the recipe,
+        captures the replay exchange, and asks the check whether the finding's
+        class is still present.  This is the confirmed/not_reproduced seam.
+        """
+        raise NotImplementedError  # Protocol — only for static typing
