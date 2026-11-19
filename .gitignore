@@ -1,9 +1,10 @@
-# Allowlist: track root files plus partex's own source, test, and data trees. Every other
-# top-level directory (venvs, build output, reference clones) stays untracked.
+# Allowlist: track root files plus partex's own source, test, docs, and data trees. Every
+# other top-level directory (venvs, build output, reference clones) stays untracked.
 /*/
 !src/
 !tests/
 !skills/
+!docs/
 !fixtures/
 !scripts/
 !bench/
