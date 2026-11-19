@@ -15,36 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The pinned revisions in DEPS.md are the source of truth (issue #1): the same
-      # rows `scripts/check_greenfield.py` enforces locally. `uv.lock`'s path sources
-      # expect the checkouts as siblings of this repository.
-      - name: Check out the audited sibling checkouts at their pinned revisions
-        run: |
-          python - <<'EOF'
-          import re
-          import subprocess
-          from pathlib import Path
-
-          rows = re.findall(
-              r'^\| *`\.\./(pydantic-ai|monty)` *\| *`([0-9a-f]{40})` *\|',
-              Path('DEPS.md').read_text(),
-              re.MULTILINE,
-          )
-          assert sorted(name for name, _ in rows) == ['monty', 'pydantic-ai'], rows
-          for name, sha in rows:
-              subprocess.run(
-                  ['git', 'clone', f'https://github.com/pydantic/{name}.git', f'../{name}'],
-                  check=True,
-              )
-              subprocess.run(['git', '-C', f'../{name}', 'checkout', sha], check=True)
-          EOF
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.14'
-
-      # `uv sync` builds the Monty client and worker runtime from source (maturin).
-      - uses: dtolnay/rust-toolchain@stable
 
       - uses: astral-sh/setup-uv@v5
         with:

@@ -62,204 +62,31 @@ or runtime.
 
 ### Constraints
 
-- Dependent `pydantic-*` packages import from the local checkout (`pydantic-ai-slim`,
-  `pydantic-ai-harness`, `pydantic-clai2`), never from PyPI. Given the November 2026
-  prebuilt-image backdoor in the Artex lineage (see `README.md`), the package installs its
-  `pydantic-*` dependencies only from audited local paths and publishes no prebuilt artifacts;
-  non-`pydantic` third-party dependencies (`httpx2`, `rich`, `prompt-toolkit`, etc.) resolve from
-  the pinned lockfile as normal.
-- **Authorization is a hard gate, not a convention.** Every live run requires an engagement
-  file containing an explicit authorization attestation, and every outbound request passes a
-  scope check in the target client (§4.2). There is no code path that sends traffic without
-  both. This mirrors the standing rule of every shipped Artex skill ("authorized engagements
-  only") and bbot's program-policy gates, but enforced in code.
-- **Secrets are first-class.** Live testing needs real credentials; they enter via engagement
-  credential references (environment variables), are marked secret at capture, and are redacted
-  in exports, model-facing tool returns, and telemetry by default (§5, §9, §11.1).
-- Model-backed stages (summary, agent, chat) are opt-in and injectable with test models. The
-  validation suite never needs credentials or a network beyond localhost (§13).
-- Skill content is data (Markdown), including offensive playbooks. It is never executed,
-  imported, or interpreted by the engine. Check code loads only from installed distributions
-  via entry points (§10).
-- Evidence bytes are attacker-controlled input wherever they reach a prompt: they are framed
-  as untrusted data, and no model-facing tool can mutate run state (§9).
-
-## 2. Architecture
-
-```text
-┌───────────────────────────── partex CLI ──────────────────────────────────┐
-│ engage   review <bundle>   test <eng>   verify <run-id> <finding-id>      │
-│ runs   show <run-id>   summarize <run-id>   checks   agent <eng>          │
-│ chat <run-id>                                                              │
-└──────┬──────────────────────────────────────────────┬───────────────────┘
-       │                                              │
-┌──────▼───────────────────────────────┐   ┌──────────▼──────────────────┐
-│  Engine                              │   │  Agent adapter              │
-│  bundle/engagement load + validate   │   │  Pydantic AI agent + scoped │
-│  evidence registry                   │   │  tools (http, findings,     │
-│  passive checks (deterministic)      │   │  verify) over CLAI2 chat()  │
-│  active checks via target client     │   │  interactive + --auto loop  │
-│  verification runner (PoC replay)    │   │  load_plugins=False         │
-│  findings commit (single writer)     │   └──────────┬──────────────────┘
-└──────┬───────────────────────────────┘              │
-       │                                             │
-┌──────▼─────────────────────────────────────────────▼───────────────────┐
-│  RunStore: SQLite (engagements, runs, evidence, findings,              │
-│  verifications, tool_calls, summaries) + JSON export                    │
-└────────────────────────────────────────────────────────────────────────┘
-       ▲                    ▲                            ▲
-┌──────┴───────────┐ ┌──────┴──────────────┐ ┌───────────┴───────────┐
-│  Skill registry  │ │  Target client      │ │  pydantic-ai core     │
-│  skill dirs      │ │  scoped HTTP client │ │  Agent, TestModel,    │
-│  (data) + entry- │ │  scope gate, capture│ │  FunctionModel,       │
-│  point checks    │ │  rate limiting      │ │  pydantic_clai2       │
-└──────────────────┘ └─────────────────────┘ └───────────────────────┘
-```
-
-Layer rules:
-
-| Layer | Owns | Never does |
-|---|---|---|
-| Engine | validation, evidence registration, check execution, verification orchestration, persistence, export | import or execute skill content; build prompts |
-| Registry | discover checks (entry points) and skills (directories), join by `check_id` | contain testing logic |
-| Target client | scope enforcement, request execution, evidence capture, rate limiting | decide what to request; bypass scope for any caller |
-| Browser harness (M7) | browser-driven capture and probing into `RunStore`; role contexts; route-interception scope gate | intercept network traffic (MITM); serve as the client for checks or verification (they stay on the scoped client) |
-| Agent adapter | agent construction, scoped tools, CLAI2 wiring, `--auto` loop | mutate run state; construct raw HTTP outside the scoped tool |
-| Checks (passive) | deterministic review logic over validated evidence | I/O, network, model calls, storage access |
-| Checks (active) | probe logic expressed through the target client | construct their own HTTP stack; write storage |
-
-The scope gate lives **only** in the target client, and the target client is the **only**
-module that opens sockets directly. The M7 browser capture harness (§15) is the sanctioned
-exception: it attaches to (or, for credential-free discovery and CI, launches) a browser
-process that opens its own sockets, and its scope is enforced at the automation layer's
-route hook — out-of-scope navigations and requests are aborted before send and recorded on
-the run — never by prompt. Checks, the verification runner, and the agent's HTTP tool all
-receive a
-client handle scoped to one engagement; a request that fails scope is a hard error before it
-reaches the network.
-
-## 3. Package layout
-
-The package lives at the **root of this repository** (not inside the `pydantic-ai` uv
-workspace; see §3.1). The repository root is the uv project; `skills/` and `fixtures/` stay at
-the root where they already are:
-
-```text
-<repo root>/
-  pyproject.toml
-  README.md  PLAN.md  RUNTIME.md  ...   # planning docs stay at the root
-  src/partex/
-    __init__.py            # version, public re-exports
-    __main__.py            # console entry point
-    cli.py                 # argparse surface (engage/review/test/verify/runs/show/summarize/checks/agent/chat)
-    models.py              # Engagement, Scope, ReviewBundle, Evidence, HttpExchange,
-                           # ConfigExcerpt, Finding, Verification, ReviewSummary
-    bundle.py              # bundle load + validation (passive mode input)
-    engagement.py          # engagement load + validation, authorization attestation
-    scope.py               # Scope model + matching (hosts, path prefixes, exclusions, ports)
-    ids.py                 # content-hash IDs, canonical JSON encoding (sorted keys,
-                           #   ensure_ascii, compact separators)
-    models_config.py       # role-based ModelRouter, fallback/retry/concurrency wrappers,
-                           #   per-role ModelSettings (thinking, cache, timeouts)
-    errors.py              # PartexError, ValidationFailed (rule code), ScopeViolation, BudgetExhausted
-    registry.py            # check/skill discovery and join
-    surface.py             # deterministic surface graph population (nodes/edges) from evidence
-    checks/
-      __init__.py          # PassiveCheck / ActiveCheck / TargetClient protocols, FindingDraft,
-                           #   VerificationRecipe, draft validation
-      builtin.py           # re-exports the built-in checks below (entry-point targets)
-      header_security.py   # header-security (passive)
-      version_disclosure.py  # version-disclosure (active probe + verify_recipe)
-    har.py                 # import-har: HAR file -> passive bundle, scope-filtered (M3)
-    browser.py             # M7 browser capture harness (Playwright; sanctioned socket exception)
-    target.py              # scoped HTTP client (the only engine socket-opening module), capture
-                           #   (httpx2, follow_redirects=False, pinned resolver + SNI)
-    verify.py              # verification runner: minimal PoC replay, verdict, evidence
-    engine.py              # run lifecycle, ordered execution, failure policy, single writer
-    storage.py             # SQLite RunStore, schema, migrations
-    export.py              # JSON export with default secret redaction
-    summarize.py           # model-backed ReviewSummary generation + reference validation
-    agent_adapter/         # the only package that imports pydantic_clai2
-      __init__.py          # AgentDeps, build helpers, public entry points
-      tools.py             # shared run-scoped read tools, redaction + untrusted-data envelope
-      reviewer.py          # partex_reviewer_agent (chat <run-id>), CodeMode wiring
-      tester.py            # partex_tester_agent, scoped live tools, audit hooks
-      auto.py              # --auto loop via agent.run()/agent.iter(), StepPersistence
-  skills/                  # built-in skills (data); shipped in the wheel as partex/skills/
-    header-review/
-      SKILL.md             # frontmatter: name, description, modes, checks: [header-security]
-      reference/*.md
-    version-disclosure/
-      SKILL.md
-    api-inventory/  authorization-testing/  auth-session-controls/   # staged (§10)
-  fixtures/
-    bundles/valid/         # valid passive fixture bundle
-    bundles/malformed/     # one dir per failure mode (§13)
-    target_app/            # deliberately vulnerable fixture app (stdlib http.server, localhost)
-    skills/banner-leak/    # fixture skill
-  tests/
-    conftest.py            # model-call blocking, non-localhost network blocking, tmp stores
-    test_bundle.py  test_engagement.py  test_scope.py  test_ids.py  test_registry.py
-    test_target.py         # scope gate: in-scope allowed, out-of-scope refused, redirect handling
-    test_verify.py         # verdicts, replay, evidence capture against fixture app
-    test_engine.py  test_storage.py  test_export.py  test_summarize.py
-    test_agent_tester.py   # tools scoped to engagement+run, out-of-scope tool calls refused,
-                           #   tool_calls audit rows recorded
-    test_agent_reviewer.py # chat() integration: TestModel, Console(StringIO), cancellation
-```
-
-Built-in skills stay at `skills/` in the source tree (one location for drafting and shipping);
-the build backend force-includes them into the wheel at `partex/skills/` and the registry
-loads them through `importlib.resources`. They remain data: nothing under `skills/` is imported
-or executed. `fixtures/` and `tests/` are not shipped.
-
-The module splits above (`errors.py`, `surface.py`, one module per built-in check, and
-`agent_adapter/` as a package) exist so independent work items own disjoint files; the
-architectural boundaries in §2 are unchanged (`agent_adapter` is still the only importer of
-`pydantic_clai2`, `target.py` still the only engine socket-opening module, with the M7
-`browser.py` harness as the one sanctioned exception described in §2).
-
-### 3.1 Environment and dependencies
-
-- Python `>= 3.14` (`requires-python = ">=3.14"`), deliberately above the checkouts' `>=3.11`
+- Dependent `pydantic-*` packages (`pydantic-ai-slim`, `pydantic-ai-harness`, `pydantic-clai2`)
+  resolve from PyPI, pinned with hashes in `uv.lock` and installed with `uv sync --frozen`
+  (issue #13). Given the November 2026 prebuilt-image backdoor in the Artex lineage (see
+  `README.md`), the lockfile hashes and the §13.1 check are the supply-chain control, and the
+  package publishes no prebuilt artifacts; every other dependency (`httpx2`, `rich`,
+  `prompt-toolkit`, etc.) resolves from the same lockfile.
+- Python `>= 3.14` (`requires-python = ">=3.14"`), deliberately above the upstream packages' `>=3.11`
   floor so partex can use current syntax and semantics freely: PEP 695 `type` aliases and
   generic class syntax, and PEP 649 deferred annotations (so `from __future__ import
   annotations` is never needed). Monty's PyO3 0.30 supports 3.14. Managed with `uv`.
-- **Local checkout locations**: the audited checkouts are expected as siblings of this
-  repository — `../pydantic-ai` and `../monty` — and every path below is relative to the
-  repository root. uv path sources cannot read environment variables, so a machine that keeps
-  the checkouts elsewhere symlinks them into those sibling paths; it never edits
-  `pyproject.toml` to point at another location. `partex` does not build without them.
-- A standalone uv project. `[tool.uv.sources]` maps every `pydantic-*` dependency to the local
-  checkout paths so **no `pydantic-*` resolves from PyPI**:
-  `pydantic-ai-slim -> ../pydantic-ai/pydantic_ai_slim`, `pydantic-ai-harness ->
-  ../pydantic-ai/src/pydantic_ai_harness` (with `[repair-tool-arguments]` for `json-repair`),
-  `pydantic-clai2 -> ../pydantic-ai/src/pydantic_clai2`.
-  Non-`pydantic` third-party dependencies resolve from the pinned lockfile as normal. The exact
-  transitive member list is settled in M0 (§15) by the greenfield dependency check.
-- **M0 packaging note**: `pydantic-clai2` declares its `pydantic-ai-slim`/`pydantic-ai-harness`
-  deps as `{ workspace = true }` and pins their exact versions via hatch metadata hooks. Because
-  `partex` is *outside* that workspace, the path sources above must also be accompanied by
-  `[tool.uv.overrides]` entries so clai2's workspace references and exact-version pins resolve to
-  the local paths. Settling the precise `sources` + `overrides` shape is part of M0, and is a
-  known risk (not a surprise) going in.
-- **M0 Monty packaging**: CLAI2 requires `pydantic-monty>=1.5.0,<2` even when
-  Code Mode is disabled. Map `pydantic-monty` to `../monty/packages/pydantic-monty`,
-  `pydantic-monty-client` to `../monty/crates/monty-python`, and
-  `pydantic-monty-runtime` to `../monty/crates/monty-runtime`. Resolve all three from
-  the same audited revision, honor the metapackage's exact pins, and verify the Rust/Maturin
-  source builds and worker startup from outside both checkouts. Apply uv overrides as needed
-  for the metapackage's workspace dependencies.
+- A standalone uv project with no `[tool.uv.sources]` or `[tool.uv.overrides]`: direct dependencies
+  carry minimum-version bounds (`pydantic-ai-harness[repair-tool-arguments]` for `json-repair`),
+  and `pydantic-monty` with its exact-pinned client and runtime arrives transitively through
+  `pydantic-clai2` as prebuilt wheels (no Rust/Maturin build). CLAI2 requires
+  `pydantic-monty>=1.0.0,<2` even when Code Mode is disabled. Upgrading the stack is an explicit,
+  reviewed `uv.lock` change (`DEPS.md` §4.1).
 - Other runtime dependencies: the target client uses **httpx2** (decided, `DEPS.md` §8.1: the
-  HTTP library the local `pydantic-ai-slim`/`pydantic-ai-harness` stack builds on throughout;
+  HTTP library the `pydantic-ai-slim`/`pydantic-ai-harness` stack builds on throughout;
   pinned via the lockfile). The DNS-rebinding guard and correct SNI + hostname cert
   verification on a pre-resolved address are security-critical; `follow_redirects=False` and
   a custom transport provide them without hand-rolling sockets/`ssl`. M0 runs the
   API-equivalence gate on that custom-transport surface (§4.2); on failure the fallback is
   `httpx` 0.28.x (present via `pydantic-clai2` until its own httpx2 migration). No other
-  HTTP library is introduced; anything beyond the locked set must come from the audited local
-  source set, not PyPI. Dev dependencies: `pytest`, `anyio`, `ruff`, `pyright`,
-  `inline-snapshot`, plus `coverage`/`pytest-cov` (the 100% branch target) and the checkout's
+  HTTP library is introduced; anything beyond the locked set is a reviewed `uv.lock` addition. Dev dependencies: `pytest`, `anyio`, `ruff`, `pyright`,
+  `inline-snapshot`, plus `coverage`/`pytest-cov` (the 100% branch target) and the
   `capfire` fixture for Logfire span assertions. The M0–M6 milestones add **no other PyPI
   runtime dependency** (`DEPS.md` documents the per-module decisions: minimal OpenAPI
   resolver as check code, stdlib-only JWT crafting, hand-rolled RFC 6265 cookie parsing);
@@ -1020,13 +847,13 @@ it; a second fixture engagement deliberately omits the app's host for scope-gate
 
 ### 13.1 Greenfield dependency check
 
-As before: fresh venv, local path sources, run `partex review fixtures/bundles/valid
---checks header-security --no-summary` from outside any checkout; assert no `artex`/`strix`
-distribution, no Artex-fork modules in `sys.modules`, no PyPI `pydantic-*` (non-`pydantic`
-deps may come from PyPI).
+As before: fresh venv installed from the frozen lockfile, run `partex review fixtures/bundles/valid
+--checks header-security --no-summary` from outside the repository; assert every locked
+requirement is a hash-pinned registry release (no path, VCS, or URL source), no `artex`/`strix`
+distribution, no Artex-fork modules in `sys.modules`.
 
-Check that the Monty metapackage, client, and runtime all resolve from the audited local
-checkout, and smoke-test a Monty session with a constant expression from outside the checkouts.
+Check that the Monty metapackage, client, and runtime all resolve and smoke-test a Monty
+session with a constant expression from the fresh environment.
 
 ### 13.2 Skill separation
 
@@ -1161,7 +988,7 @@ gains a "result" column as experiments land).
 |---|---|
 | The tool is used outside authorized engagements | Hard gates: attestation + `--authorized` required before any traffic; scope enforced in the one module that opens sockets (plus the harness route hook, M7); README and `engage init` template make the authorization requirement unmissable. (This deters accidents and casual misuse, not a determined operator — same posture as the original Artex skills' standing rules.) |
 | Scope bypass (redirect, DNS rebinding, URL parsing edge) | No automatic redirects; pinned per-run resolution; canonicalization tested with hostile URL fixtures; 13.4 asserts nothing reaches the wire on violation |
-| CLAI2 `chat()` is a local checkout API that moves | Adapter is one module + one integration test; checkout is path-pinned; seam exercised by 13.4/13.5 rather than assumed |
+| CLAI2 `chat()` is an API that moves between releases | Adapter is one module + one integration test; stack is lockfile-pinned; seam exercised by 13.4/13.5 rather than assumed |
 | Terminal tests flaky in CI | Headless-only in CI; interactive checks are manual tmux gates |
 | Live mode's non-determinism hides regressions | Passive mode keeps byte-determinism; live findings always carry evidence + replay recipe; `verify` re-tests reproducibility on demand |
 | Secrets leak through exports, logs, telemetry, or prompts | Secret marking at capture; redaction by default on both exports and model-facing tool returns (`http_request`, `lookup_evidence`); no `logfire.instrument_httpx()` on `target.py`; summarizer sees findings only; chat/agent evidence framing; 13.4 tests redaction across export and tool returns |

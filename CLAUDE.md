@@ -30,9 +30,8 @@ While working:
 
 - Use **uv** for everything: `uv sync`, `uv run pytest`, `uv run ruff check`,
   `uv run ruff format`, `uv run pyright`. No `pip install`, no ad-hoc venvs in the repo.
-- `pydantic-*` and `pydantic-monty*` come only from sibling checkouts `../pydantic-ai` and
-  `../monty` (PLAN §3.1), at the revisions pinned in DEPS.md (pins land with #1). Never add them from PyPI and
-  never point `pyproject.toml` at another path — symlink the checkouts instead.
+- `pydantic-*` and `pydantic-monty*` resolve from PyPI through `uv.lock` (PLAN §3.1, issue #13);
+  never add `[tool.uv.sources]` path overrides, and bump them only as an explicit `uv.lock` change.
 - uv enforces a **2-day cool-off** (`[tool.uv] exclude-newer = "2 days"` in `pyproject.toml`):
   nothing uploaded to PyPI in the last 48 hours can enter `uv.lock`. Don't remove it or set a
   global override; an urgent fix gets a reviewed per-package `exclude-newer-package` entry.
