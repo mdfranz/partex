@@ -68,6 +68,159 @@ or runtime.
   `README.md`), the lockfile hashes and the §13.1 check are the supply-chain control, and the
   package publishes no prebuilt artifacts; every other dependency (`httpx2`, `rich`,
   `prompt-toolkit`, etc.) resolves from the same lockfile.
+- **Authorization is a hard gate, not a convention.** Every live run requires an engagement
+  file containing an explicit authorization attestation, and every outbound request passes a
+  scope check in the target client (§4.2). There is no code path that sends traffic without
+  both. This mirrors the standing rule of every shipped Artex skill ("authorized engagements
+  only") and bbot's program-policy gates, but enforced in code.
+- **Secrets are first-class.** Live testing needs real credentials; they enter via engagement
+  credential references (environment variables), are marked secret at capture, and are redacted
+  in exports, model-facing tool returns, and telemetry by default (§5, §9, §11.1).
+- Model-backed stages (summary, agent, chat) are opt-in and injectable with test models. The
+  validation suite never needs credentials or a network beyond localhost (§13).
+- Skill content is data (Markdown), including offensive playbooks. It is never executed,
+  imported, or interpreted by the engine. Check code loads only from installed distributions
+  via entry points (§10).
+- Evidence bytes are attacker-controlled input wherever they reach a prompt: they are framed
+  as untrusted data, and no model-facing tool can mutate run state (§9).
+
+## 2. Architecture
+
+```text
+┌───────────────────────────── partex CLI ──────────────────────────────────┐
+│ engage   review <bundle>   test <eng>   verify <run-id> <finding-id>      │
+│ runs   show <run-id>   summarize <run-id>   checks   agent <eng>          │
+│ chat <run-id>                                                              │
+└──────┬──────────────────────────────────────────────┬───────────────────┘
+       │                                              │
+┌──────▼───────────────────────────────┐   ┌──────────▼──────────────────┐
+│  Engine                              │   │  Agent adapter              │
+│  bundle/engagement load + validate   │   │  Pydantic AI agent + scoped │
+│  evidence registry                   │   │  tools (http, findings,     │
+│  passive checks (deterministic)      │   │  verify) over CLAI2 chat()  │
+│  active checks via target client     │   │  interactive + --auto loop  │
+│  verification runner (PoC replay)    │   │  load_plugins=False         │
+│  findings commit (single writer)     │   └──────────┬──────────────────┘
+└──────┬───────────────────────────────┘              │
+       │                                             │
+┌──────▼─────────────────────────────────────────────▼───────────────────┐
+│  RunStore: SQLite (engagements, runs, evidence, findings,              │
+│  verifications, tool_calls, summaries) + JSON export                    │
+└────────────────────────────────────────────────────────────────────────┘
+       ▲                    ▲                            ▲
+┌──────┴───────────┐ ┌──────┴──────────────┐ ┌───────────┴───────────┐
+│  Skill registry  │ │  Target client      │ │  pydantic-ai core     │
+│  skill dirs      │ │  scoped HTTP client │ │  Agent, TestModel,    │
+│  (data) + entry- │ │  scope gate, capture│ │  FunctionModel,       │
+│  point checks    │ │  rate limiting      │ │  pydantic_clai2       │
+└──────────────────┘ └─────────────────────┘ └───────────────────────┘
+```
+
+Layer rules:
+
+| Layer | Owns | Never does |
+|---|---|---|
+| Engine | validation, evidence registration, check execution, verification orchestration, persistence, export | import or execute skill content; build prompts |
+| Registry | discover checks (entry points) and skills (directories), join by `check_id` | contain testing logic |
+| Target client | scope enforcement, request execution, evidence capture, rate limiting | decide what to request; bypass scope for any caller |
+| Browser harness (M7) | browser-driven capture and probing into `RunStore`; role contexts; route-interception scope gate | intercept network traffic (MITM); serve as the client for checks or verification (they stay on the scoped client) |
+| Agent adapter | agent construction, scoped tools, CLAI2 wiring, `--auto` loop | mutate run state; construct raw HTTP outside the scoped tool |
+| Checks (passive) | deterministic review logic over validated evidence | I/O, network, model calls, storage access |
+| Checks (active) | probe logic expressed through the target client | construct their own HTTP stack; write storage |
+
+The scope gate lives **only** in the target client, and the target client is the **only**
+module that opens sockets directly. The M7 browser capture harness (§15) is the sanctioned
+exception: it attaches to (or, for credential-free discovery and CI, launches) a browser
+process that opens its own sockets, and its scope is enforced at the automation layer's
+route hook — out-of-scope navigations and requests are aborted before send and recorded on
+the run — never by prompt. Checks, the verification runner, and the agent's HTTP tool all
+receive a
+client handle scoped to one engagement; a request that fails scope is a hard error before it
+reaches the network.
+
+## 3. Package layout
+
+The package lives at the **root of this repository** (not inside the `pydantic-ai` uv
+workspace; see §3.1). The repository root is the uv project; `skills/` and `fixtures/` stay at
+the root where they already are:
+
+```text
+<repo root>/
+  pyproject.toml
+  README.md  PLAN.md  RUNTIME.md  ...   # planning docs stay at the root
+  src/partex/
+    __init__.py            # version, public re-exports
+    __main__.py            # console entry point
+    cli.py                 # argparse surface (engage/review/test/verify/runs/show/summarize/checks/agent/chat)
+    models.py              # Engagement, Scope, ReviewBundle, Evidence, HttpExchange,
+                           # ConfigExcerpt, Finding, Verification, ReviewSummary
+    bundle.py              # bundle load + validation (passive mode input)
+    engagement.py          # engagement load + validation, authorization attestation
+    scope.py               # Scope model + matching (hosts, path prefixes, exclusions, ports)
+    ids.py                 # content-hash IDs, canonical JSON encoding (sorted keys,
+                           #   ensure_ascii, compact separators)
+    models_config.py       # role-based ModelRouter, fallback/retry/concurrency wrappers,
+                           #   per-role ModelSettings (thinking, cache, timeouts)
+    errors.py              # PartexError, ValidationFailed (rule code), ScopeViolation, BudgetExhausted
+    registry.py            # check/skill discovery and join
+    surface.py             # deterministic surface graph population (nodes/edges) from evidence
+    checks/
+      __init__.py          # PassiveCheck / ActiveCheck / TargetClient protocols, FindingDraft,
+                           #   VerificationRecipe, draft validation
+      builtin.py           # re-exports the built-in checks below (entry-point targets)
+      header_security.py   # header-security (passive)
+      version_disclosure.py  # version-disclosure (active probe + verify_recipe)
+    har.py                 # import-har: HAR file -> passive bundle, scope-filtered (M3)
+    browser.py             # M7 browser capture harness (Playwright; sanctioned socket exception)
+    target.py              # scoped HTTP client (the only engine socket-opening module), capture
+                           #   (httpx2, follow_redirects=False, pinned resolver + SNI)
+    verify.py              # verification runner: minimal PoC replay, verdict, evidence
+    engine.py              # run lifecycle, ordered execution, failure policy, single writer
+    storage.py             # SQLite RunStore, schema, migrations
+    export.py              # JSON export with default secret redaction
+    summarize.py           # model-backed ReviewSummary generation + reference validation
+    agent_adapter/         # the only package that imports pydantic_clai2
+      __init__.py          # AgentDeps, build helpers, public entry points
+      tools.py             # shared run-scoped read tools, redaction + untrusted-data envelope
+      reviewer.py          # partex_reviewer_agent (chat <run-id>), CodeMode wiring
+      tester.py            # partex_tester_agent, scoped live tools, audit hooks
+      auto.py              # --auto loop via agent.run()/agent.iter(), StepPersistence
+  skills/                  # built-in skills (data); shipped in the wheel as partex/skills/
+    header-review/
+      SKILL.md             # frontmatter: name, description, modes, checks: [header-security]
+      reference/*.md
+    version-disclosure/
+      SKILL.md
+    api-inventory/  authorization-testing/  auth-session-controls/   # staged (§10)
+  fixtures/
+    bundles/valid/         # valid passive fixture bundle
+    bundles/malformed/     # one dir per failure mode (§13)
+    target_app/            # deliberately vulnerable fixture app (stdlib http.server, localhost)
+    skills/banner-leak/    # fixture skill
+  tests/
+    conftest.py            # model-call blocking, non-localhost network blocking, tmp stores
+    test_bundle.py  test_engagement.py  test_scope.py  test_ids.py  test_registry.py
+    test_target.py         # scope gate: in-scope allowed, out-of-scope refused, redirect handling
+    test_verify.py         # verdicts, replay, evidence capture against fixture app
+    test_engine.py  test_storage.py  test_export.py  test_summarize.py
+    test_agent_tester.py   # tools scoped to engagement+run, out-of-scope tool calls refused,
+                           #   tool_calls audit rows recorded
+    test_agent_reviewer.py # chat() integration: TestModel, Console(StringIO), cancellation
+```
+
+Built-in skills stay at `skills/` in the source tree (one location for drafting and shipping);
+the build backend force-includes them into the wheel at `partex/skills/` and the registry
+loads them through `importlib.resources`. They remain data: nothing under `skills/` is imported
+or executed. `fixtures/` and `tests/` are not shipped.
+
+The module splits above (`errors.py`, `surface.py`, one module per built-in check, and
+`agent_adapter/` as a package) exist so independent work items own disjoint files; the
+architectural boundaries in §2 are unchanged (`agent_adapter` is still the only importer of
+`pydantic_clai2`, `target.py` still the only engine socket-opening module, with the M7
+`browser.py` harness as the one sanctioned exception described in §2).
+
+### 3.1 Environment and dependencies
+
 - Python `>= 3.14` (`requires-python = ">=3.14"`), deliberately above the upstream packages' `>=3.11`
   floor so partex can use current syntax and semantics freely: PEP 695 `type` aliases and
   generic class syntax, and PEP 649 deferred annotations (so `from __future__ import
