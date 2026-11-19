@@ -21,6 +21,7 @@ dependencies = [
 partex = "partex.__main__:main"
 
 [project.entry-points."partex.checks"]
+header-security = "partex.checks.header_security:header_security_check"
 
 # PLAN §3.1: every `pydantic-*` and `pydantic-monty*` resolves from the audited sibling
 # checkouts, never from PyPI. The Monty trio is reached transitively (`pydantic-clai2`
