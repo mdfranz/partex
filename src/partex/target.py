@@ -89,9 +89,11 @@ _CREDENTIAL_REQUEST_HEADERS = frozenset({'authorization', 'proxy-authorization',
 
 
 def _default_resolver(host: str) -> str:
-    """Resolve *host* to an address via getaddrinfo (first result wins)."""
+    """Resolve *host* to an address via getaddrinfo (preferring IPv4 when available)."""
     infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    return str(infos[0][4][0])
+    ipv4 = [info for info in infos if info[0] == socket.AF_INET]
+    chosen = ipv4[0] if ipv4 else infos[0]
+    return str(chosen[4][0])
 
 
 def _header_pairs(headers: httpx2.Headers) -> Headers:
