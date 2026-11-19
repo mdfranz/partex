@@ -458,7 +458,9 @@ def test_logfire_flag_configures_before_instrumenting(
 ) -> None:
     assert run(capsys, 'checks', '--logfire')[0] == cli.EXIT_OK
     assert [name for name, _ in logfire_calls] == ['configure', 'instrument_pydantic_ai']
-    assert logfire_calls[0][1] == {'service_name': 'partex', 'service_version': engine.engine_version()}
+    config = logfire_calls[0][1]
+    assert config['service_name'] == 'partex' and config['service_version'] == engine.engine_version()
+    assert config['send_to_logfire'] == 'if-token-present' and config['additional_span_processors'] == []
 
 
 def test_logfire_env_var(
@@ -467,6 +469,25 @@ def test_logfire_env_var(
     monkeypatch.setenv('PARTEX_LOGFIRE', '1')
     run(capsys, 'checks')
     assert [name for name, _ in logfire_calls] == ['configure', 'instrument_pydantic_ai']
+
+
+def test_log_file_is_local_only_and_on_for_live_commands(
+    capsys: pytest.CaptureFixture[str], logfire_calls: list[tuple[str, dict[str, Any]]], tmp_path: Path, db: Path
+) -> None:
+    log = tmp_path / 'trace.jsonl'
+    run(capsys, 'test', str(VALID_BUNDLE), '--db', str(db), '--log-file', str(log))  # no --logfire
+    assert [name for name, _ in logfire_calls] == ['configure', 'instrument_pydantic_ai']
+    config = logfire_calls[0][1]
+    assert config['send_to_logfire'] is False and len(config['additional_span_processors']) == 1
+    assert log.exists()
+
+
+def test_log_file_off_and_read_only_commands_do_not_configure(
+    capsys: pytest.CaptureFixture[str], logfire_calls: list[Any], tmp_path: Path, db: Path
+) -> None:
+    run(capsys, 'runs', '--db', str(db))
+    run(capsys, 'checks', '--log-file', 'off')
+    assert logfire_calls == []
 
 
 def test_cli_never_instruments_httpx(capsys: pytest.CaptureFixture[str], logfire_calls: list[Any]) -> None:

@@ -976,6 +976,13 @@ async def summarize_run(run_id: str, store: RunStore, model: Model | str) -> Rev
   **once at process startup before** `logfire.instrument_pydantic_ai()`. Without `--logfire`,
   no network exporter is configured so offline runs and the hermetic test suite never open
   external telemetry sockets.
+- **Local trace log by default**: `review`, `test`, `verify`, `chat` and `agent` also write every
+  span (model turns, tool calls, scope refusals) as JSONL to
+  `$XDG_STATE_HOME/partex/logs/<command>-<UTC>-<pid>.jsonl` (mode `0600`), via
+  `telemetry.configure_telemetry` with `send_to_logfire=False` unless `--logfire` is set. This
+  does not change the no-network rule above. `--log-file PATH` overrides the path, `--log-file off`
+  (or `PARTEX_LOG_FILE=off`, which the test suite sets) disables it, and listing/export commands
+  (`runs`, `show`, `report`, `checks`) never log.
 - **No `logfire.instrument_httpx()` on the target client**: global HTTPX instrumentation is
   explicitly forbidden because `target.py` sends real engagement credentials (`PARTEX_CRED_*`)
   that must not bypass `secret_fields` redaction into OpenTelemetry spans. Instead, `target.py`

@@ -29,6 +29,7 @@ from .ids import canonical_json
 from .registry import build_registry
 from .report import gather_report_payload, render_report_text
 from .storage import RunReader, RunRecord, RunStore
+from .telemetry import LOG_FILE_ENV, announce, configure_telemetry, resolve_log_path
 
 DB_ENV = 'PARTEX_DB'
 LOGFIRE_ENV = 'PARTEX_LOGFIRE'
@@ -72,17 +73,6 @@ def _split_checks(raw: str) -> list[str]:
     return [item.strip() for item in raw.split(',') if item.strip()]
 
 
-def _configure_logfire() -> None:
-    """Enable Logfire for this process (§11.1): ``configure`` once, strictly before instrumentation.
-
-    Never ``instrument_httpx()``: the target client carries engagement credentials.
-    """
-    import logfire
-
-    logfire.configure(service_name='partex', service_version=engine.engine_version())
-    logfire.instrument_pydantic_ai()
-
-
 def _finding_rows(findings: Sequence[Any]) -> list[dict[str, Any]]:
     return [
         {
@@ -122,7 +112,15 @@ async def _write_export(store: RunStore, run_id: str, out: str | None) -> None:
 def build_parser() -> argparse.ArgumentParser:
     """The argparse surface (PLAN §8). Every subcommand accepts ``--logfire``; store commands ``--db``."""
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument('--logfire', action='store_true', help=f'enable Logfire observability (or set {LOGFIRE_ENV}=1)')
+    common.add_argument(
+        '--logfire', action='store_true', help=f'also send telemetry to Logfire (or set {LOGFIRE_ENV}=1)'
+    )
+    common.add_argument(
+        '--log-file',
+        default=None,
+        help=f'JSONL trace log (default for review/test/verify/chat/agent: a new file in the user state dir; '
+        f"'off' disables; or set {LOG_FILE_ENV})",
+    )
     with_db = argparse.ArgumentParser(add_help=False, parents=[common])
     with_db.add_argument('--db', default=None, help=f'database path (default: ${DB_ENV} or the user data dir)')
 
@@ -569,8 +567,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     handler: Callable[[argparse.Namespace], int] = args.handler
     try:
-        if args.logfire or os.environ.get(LOGFIRE_ENV) == '1':
-            _configure_logfire()
+        remote = args.logfire or os.environ.get(LOGFIRE_ENV) == '1'
+        log_path = resolve_log_path(args.command, args.log_file)
+        if remote or log_path is not None:
+            configure_telemetry(log_path=log_path, remote=remote, service_version=engine.engine_version())
+            if args.command in {'chat', 'agent'}:
+                announce(log_path)
         return handler(args)
     except CheckSelectionError as exc:
         print(f'partex: {exc.rule_code}: {exc}', file=sys.stderr)
