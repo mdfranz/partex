@@ -5,10 +5,13 @@ outside the engine.  Check code loads only from installed distributions via
 the ``partex.checks`` entry point.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from ..models import Evidence, Finding, FindingDraft, HttpEvidence, VerificationRecipe
+
+type HeaderInput = Mapping[str, str] | Sequence[tuple[str, str]]
+"""Request headers a caller may pass: a mapping, or ``(name, value)`` pairs (repeats allowed)."""
 
 # ── Target client protocol ────────────────────────────────────────────────────
 
@@ -16,13 +19,12 @@ from ..models import Evidence, Finding, FindingDraft, HttpEvidence, Verification
 class TargetClient(Protocol):
     """What checks, the verification runner, and the agent see of the scoped client.
 
-    The real implementation is ``target.py`` — the only engine module that opens
-    sockets.  Every outbound request is scope-validated at send time (§4.2).
-    Checks receive this handle; they never construct their own HTTP stack.
+    The real implementation is :class:`partex.target.ScopedHttpClient` — the only engine module
+    that opens sockets.  Every outbound request is scope-validated at send time (§4.2).  Checks
+    receive this handle; they never construct their own HTTP stack.
 
-    Aligned with the shipped client (issue #20): a request returns the
-    captured exchange as evidence — checks need the ``ev_*`` id to cite in
-    drafts — and the scope gate needs the full URL, not a bare path.
+    A request returns the captured exchange as evidence — checks need the ``ev_*`` id to cite
+    in drafts — and the scope gate needs the full URL, not a bare path (#20, #39).
     """
 
     async def request(
@@ -30,16 +32,16 @@ class TargetClient(Protocol):
         method: str,
         url: str,
         *,
-        headers: dict[str, str] | None = None,
+        headers: HeaderInput | None = None,
         body: str | None = None,
     ) -> HttpEvidence:
-        """Send a scoped request and return the captured exchange as evidence.
+        """Send a scoped request to absolute *url* and return the captured exchange as evidence.
 
-        Scope violation, budget exhaustion, and transport errors raise through
-        the engine's error taxonomy (§9); ``secret_fields`` are already marked
-        on the returned record.
+        A check cites ``evidence.id`` in its drafts; ``secret_fields`` are already marked on the
+        returned record.  Scope violation, budget exhaustion, and transport errors raise through
+        the engine's error taxonomy (§9).
         """
-        raise NotImplementedError  # Protocol — only for static typing
+        ...
 
 
 # ── Check protocols ───────────────────────────────────────────────────────────

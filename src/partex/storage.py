@@ -9,6 +9,8 @@ Every model is re-validated on read, so schema drift between engine versions sur
 ``store-load`` error instead of silently wrong data. A database whose ``PRAGMA user_version`` is not
 :data:`SCHEMA_VERSION` is refused (``store-version``); it is never migrated in place.
 
+Schema version 2 adds ``findings.subject`` (#39); a version-1 store is refused like any unknown version.
+
 Deviations from the PLAN §7 DDL, both required by existing contracts:
 
 - ``evidence.seq`` records registration order (export lists evidence "by registration order").
@@ -30,7 +32,7 @@ import anyio.to_thread
 from pydantic import TypeAdapter, ValidationError
 
 from .errors import PartexError
-from .ids import canonical_json, sha256_hex
+from .ids import canonical_json, engagement_id, sha256_hex
 from .models import (
     CoverageEntry,
     Engagement,
@@ -42,7 +44,7 @@ from .models import (
     Verification,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: findings.subject (#39)
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 
 type RunState = Literal['created', 'invalid', 'checks_complete', 'checks_failed', 'complete']
@@ -102,6 +104,7 @@ CREATE TABLE findings (
   check_id TEXT NOT NULL,
   check_version TEXT NOT NULL,
   severity TEXT NOT NULL,
+  subject TEXT NOT NULL,
   title TEXT NOT NULL,
   description TEXT NOT NULL,
   evidence_ids TEXT NOT NULL,
@@ -457,7 +460,7 @@ _RUN_SELECT = (
     '(SELECT COUNT(*) FROM findings f WHERE f.run_id = r.id) FROM runs r'
 )
 _FINDING_SELECT = (
-    'SELECT finding_id, check_id, check_version, severity, title, description, evidence_ids, remediation, status, '
+    'SELECT finding_id, check_id, check_version, severity, subject, title, description, evidence_ids, remediation, status, '
     'verification_id FROM findings'
 )
 
@@ -514,7 +517,7 @@ def _run_from_row(row: tuple[Any, ...]) -> RunRecord:
 
 
 def _finding_from_row(row: tuple[Any, ...]) -> Finding:
-    fid, check_id, version, severity, title, description, evidence_ids, remediation, status, vid = row
+    fid, check_id, version, severity, subject, title, description, evidence_ids, remediation, status, vid = row
     return _load(
         Finding.model_validate,
         {
@@ -522,6 +525,7 @@ def _finding_from_row(row: tuple[Any, ...]) -> Finding:
             'check_id': check_id,
             'check_version': version,
             'severity': severity,
+            'subject': subject,
             'title': title,
             'description': description,
             'evidence_ids': json.loads(evidence_ids),
@@ -761,15 +765,14 @@ class RunStore(_Reads):
 
     async def record_engagement(self, engagement: Engagement) -> str:
         """Store *engagement* (idempotent) and return its ``eng_`` ID."""
-        content = engagement.model_dump(mode='json')
-        engagement_id = 'eng_' + sha256_hex(canonical_json(content))[:16]
+        eng_id = engagement_id(engagement)
 
         def write(conn: sqlite3.Connection) -> None:
             conn.execute(
                 'INSERT OR IGNORE INTO engagements (id, name, base_url, scope, attestation, operator, created_at) '
                 'VALUES (?, ?, ?, ?, ?, ?, ?)',
                 (
-                    engagement_id,
+                    eng_id,
                     engagement.target.name,
                     engagement.target.base_url,
                     engagement.scope.model_dump_json(),
@@ -780,7 +783,7 @@ class RunStore(_Reads):
             )
 
         await self._db.run(lambda conn: _transaction(conn, write))
-        return engagement_id
+        return eng_id
 
     async def record_tool_call(self, run_id: str, tool: str, args: Any, result: Any) -> str:
         """Append a tool invocation to the audit log. Callers redact secrets first."""
@@ -985,14 +988,15 @@ def _insert_findings(conn: sqlite3.Connection, run_id: str, findings: Sequence[F
     for finding in findings:
         _require_evidence(conn, run_id, finding.evidence_ids, f'finding {finding.id}')
         conn.execute(
-            'INSERT INTO findings (run_id, finding_id, check_id, check_version, severity, title, description, '
-            'evidence_ids, remediation, status, verification_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO findings (run_id, finding_id, check_id, check_version, severity, subject, title, '
+            'description, evidence_ids, remediation, status, verification_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             (
                 run_id,
                 finding.id,
                 finding.check_id,
                 finding.check_version,
                 finding.severity,
+                finding.subject,
                 finding.title,
                 finding.description,
                 _json(finding.evidence_ids),

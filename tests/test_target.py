@@ -11,7 +11,7 @@ import pytest
 
 from partex.engagement import Engagement
 from partex.errors import BudgetExhausted, ScopeViolation
-from partex.models import HttpEvidence, redact
+from partex.models import HttpEvidence, get_all, get_header, redact
 from partex.target import DEFAULT_SOURCE, ScopedHttpClient, TokenBucket
 
 pytest_plugins = ['plugins.target_server']
@@ -79,7 +79,7 @@ async def test_post_body_and_headers_sent(target_server: object) -> None:
     assert sent['method'] == 'POST'
     assert sent['body'] == '{"sku": "A-1"}'
     assert evidence.http.request.body == '{"sku": "A-1"}'
-    assert evidence.http.request.headers['x-test'] == '1'
+    assert get_header(evidence.http.request.headers, 'X-Test') == '1'
 
 
 async def test_binary_body_refused_not_stored(target_server: object) -> None:
@@ -88,7 +88,7 @@ async def test_binary_body_refused_not_stored(target_server: object) -> None:
     async with ScopedHttpClient(engagement) as client:
         evidence = await client.request('GET', f'{base_url}/binary')
     assert evidence.http.response.body is None
-    assert evidence.http.response.headers['content-type'] == 'application/octet-stream'
+    assert get_header(evidence.http.response.headers, 'Content-Type') == 'application/octet-stream'
 
 
 # ── Scope gate: refused before any bytes hit the wire ─────────────────────────
@@ -154,7 +154,7 @@ async def test_redirect_captured_not_followed_automatically(target_server: objec
     async with ScopedHttpClient(engagement) as client:
         evidence = await client.request('GET', f'{base_url}/redirect?to=/api/next')
     assert evidence.http.response.status_code == 302
-    assert evidence.http.response.headers['location'] == '/api/next'
+    assert get_header(evidence.http.response.headers, 'Location') == '/api/next'
     assert len(target_server.requests) == 1  # pyright: ignore[reportAttributeAccessIssue]
 
 
@@ -288,6 +288,33 @@ async def test_pin_sets_sni_and_connects_to_pinned_address(target_server: object
     assert request.extensions['sni_hostname'] == 'fixture.test'  # SNI + cert identity
 
 
+async def test_pinned_capture_records_hostname_and_follows_relative_redirect(target_server: object) -> None:
+    """Evidence keeps the requested hostname, not the pinned IP, so a relative redirect stays in scope."""
+    port = target_server.port  # pyright: ignore[reportAttributeAccessIssue]
+    engagement = engagement_for(target_server, hosts=['fixture.test'], ports=[port])
+    async with ScopedHttpClient(engagement, resolver=lambda host: '127.0.0.1') as client:
+        redirect = await client.request('GET', f'http://fixture.test:{port}/redirect?to=/api/next')
+        followed = await client.follow_redirect(redirect)
+    assert redirect.http.request.url == f'http://fixture.test:{port}/redirect?to=/api/next'
+    assert followed.http.request.url == f'http://fixture.test:{port}/api/next'
+    assert followed.http.response.status_code == 200
+
+
+async def test_repeated_response_headers_are_preserved(target_server: object) -> None:
+    """Each Set-Cookie stays its own pair with its wire casing; nothing is comma-joined."""
+    port = target_server.port  # pyright: ignore[reportAttributeAccessIssue]
+    engagement = engagement_for(target_server, hosts=['fixture.test'], ports=[port])
+
+    class CookieTransport(httpx2.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(200, headers=[('Set-Cookie', 'a=1; Secure'), ('Set-Cookie', 'sid=2')], text='ok')
+
+    async with ScopedHttpClient(engagement, resolver=lambda host: '127.0.0.1', transport=CookieTransport()) as client:
+        evidence = await client.request('GET', f'http://fixture.test:{port}/api/x')
+    assert get_all(evidence.http.response.headers, 'set-cookie') == ['a=1; Secure', 'sid=2']
+    assert ('Set-Cookie', 'sid=2') in evidence.http.response.headers
+
+
 async def test_ip_literal_scope_host_needs_no_resolution(target_server: object) -> None:
     port = target_server.port  # pyright: ignore[reportAttributeAccessIssue]
     engagement = engagement_for(target_server, hosts=['127.0.0.1'], ports=[port])
@@ -313,10 +340,14 @@ async def test_secret_fields_marked_and_redacted(target_server: object) -> None:
             headers={'Authorization': 'Bearer sekrit-token'},
             body='password=sekrit-token',
         )
-    # httpx2 lowercases header names; the redaction path navigates the same keys.
-    assert evidence.secret_fields == ['$.http.request.headers.authorization', '$.http.request.body']
+    # Header secrets are addressed by index, so casing on the wire cannot defeat redaction (#39).
+    names = [name.lower() for name, _ in evidence.http.request.headers]
+    index = names.index('authorization')
+    assert evidence.secret_fields == [f'$.http.request.headers[{index}][1]', '$.http.request.body']
     redacted = redact(evidence)
-    assert redacted.http.request.headers['authorization'] == '<redacted>'
+    assert isinstance(redacted, HttpEvidence)
+    assert get_header(redacted.http.request.headers, 'authorization') == '<redacted>'
     assert redacted.http.request.body == '<redacted>'
+    assert len(redacted.http.request.headers) == len(evidence.http.request.headers)
     # The canonical id excludes secret_fields, so redaction does not change identity.
-    assert evidence.http.request.headers['authorization'] == 'Bearer sekrit-token'
+    assert get_header(evidence.http.request.headers, 'Authorization') == 'Bearer sekrit-token'

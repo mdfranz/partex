@@ -5,6 +5,7 @@ or the hash inputs is caught as a test failure.
 """
 
 import hashlib
+from typing import Any
 
 from partex.ids import (
     canonical_json,
@@ -18,6 +19,7 @@ from partex.ids import (
 from partex.models import (
     ConfigEvidence,
     ConfigExcerpt,
+    Engagement,
     HttpEvidence,
     HttpExchange,
     HttpRequest,
@@ -81,8 +83,8 @@ def test_sha256_hex_known():
 
 def test_evidence_id_prefix():
     ex = HttpExchange(
-        request=HttpRequest(method='GET', url='https://example.test/', headers={}),
-        response=HttpResponse(status_code=200, headers={}),
+        request=HttpRequest(method='GET', url='https://example.test/', headers=[]),
+        response=HttpResponse(status_code=200, headers=[]),
     )
     ev = HttpEvidence(id='ignored', source='f1', http=ex)
     eid = evidence_id(ev)
@@ -93,22 +95,22 @@ def test_evidence_id_prefix():
 def test_evidence_id_excludes_id_source_secret_fields():
     """Evidence ID must not vary with id, source, or secret_fields."""
     ex = HttpExchange(
-        request=HttpRequest(method='GET', url='https://example.test/', headers={}),
-        response=HttpResponse(status_code=200, headers={}),
+        request=HttpRequest(method='GET', url='https://example.test/', headers=[]),
+        response=HttpResponse(status_code=200, headers=[]),
     )
     a = HttpEvidence(id='ev_a', source='bundle/a.json', http=ex, secret_fields=[])
-    b = HttpEvidence(id='ev_b', source='capture:0', http=ex, secret_fields=['$.http.request.headers.Auth'])
+    b = HttpEvidence(id='ev_b', source='capture:0', http=ex, secret_fields=['$.http.request.url'])
     assert evidence_id(a) == evidence_id(b)
 
 
 def test_evidence_id_differs_on_content():
     ex1 = HttpExchange(
-        request=HttpRequest(method='GET', url='https://example.test/a', headers={}),
-        response=HttpResponse(status_code=200, headers={}),
+        request=HttpRequest(method='GET', url='https://example.test/a', headers=[]),
+        response=HttpResponse(status_code=200, headers=[]),
     )
     ex2 = HttpExchange(
-        request=HttpRequest(method='POST', url='https://example.test/a', headers={}),
-        response=HttpResponse(status_code=200, headers={}),
+        request=HttpRequest(method='POST', url='https://example.test/a', headers=[]),
+        response=HttpResponse(status_code=200, headers=[]),
     )
     a = HttpEvidence(id='ev_a', source='f', http=ex1)
     b = HttpEvidence(id='ev_a', source='f', http=ex2)
@@ -126,8 +128,8 @@ def test_evidence_id_config():
 def test_evidence_id_deterministic():
     """Same content → same ID across instantiations."""
     ex = HttpExchange(
-        request=HttpRequest(method='GET', url='https://example.test/x', headers={}),
-        response=HttpResponse(status_code=200, headers={}),
+        request=HttpRequest(method='GET', url='https://example.test/x', headers=[]),
+        response=HttpResponse(status_code=200, headers=[]),
     )
     ids = {evidence_id(HttpEvidence(id=f'ev_{i}', source=f's{i}', http=ex)) for i in range(10)}
     assert len(ids) == 1
@@ -137,33 +139,45 @@ def test_evidence_id_deterministic():
 
 
 def test_finding_id_prefix():
-    fid = finding_id('check', 'title', ['ev_01'])
+    fid = finding_id('check', 'subject', 'title', ['ev_01'])
     assert fid.startswith('fn_')
     assert len(fid) == 3 + 16
 
 
 def test_finding_id_uses_sorted_evidence_ids():
     """Finding ID should be identical regardless of evidence_ids ordering."""
-    a = finding_id('check', 'title', ['ev_c', 'ev_a', 'ev_b'])
-    b = finding_id('check', 'title', ['ev_a', 'ev_b', 'ev_c'])
+    a = finding_id('check', 'subject', 'title', ['ev_c', 'ev_a', 'ev_b'])
+    b = finding_id('check', 'subject', 'title', ['ev_a', 'ev_b', 'ev_c'])
     assert a == b
 
 
 def test_finding_id_differs_on_check_id():
-    a = finding_id('check-a', 'title', ['ev_01'])
-    b = finding_id('check-b', 'title', ['ev_01'])
+    a = finding_id('check-a', 'subject', 'title', ['ev_01'])
+    b = finding_id('check-b', 'subject', 'title', ['ev_01'])
     assert a != b
 
 
+def test_finding_id_differs_on_subject():
+    """Two cookies on one response share title and evidence; subject keeps them apart (#39)."""
+    a = finding_id('check', 'cookie:session', 'Weak Set-Cookie attributes', ['ev_01'])
+    b = finding_id('check', 'cookie:remember_token', 'Weak Set-Cookie attributes', ['ev_01'])
+    assert a != b
+
+
+def test_finding_id_fields_are_delimited():
+    """Moving text between subject and title changes the ID (NUL separators)."""
+    assert finding_id('c', 'ab', 'c', ['ev_01']) != finding_id('c', 'a', 'bc', ['ev_01'])
+
+
 def test_finding_id_differs_on_title():
-    a = finding_id('check', 'title A', ['ev_01'])
-    b = finding_id('check', 'title B', ['ev_01'])
+    a = finding_id('check', 'subject', 'title A', ['ev_01'])
+    b = finding_id('check', 'subject', 'title B', ['ev_01'])
     assert a != b
 
 
 def test_finding_id_differs_on_evidence():
-    a = finding_id('check', 'title', ['ev_01'])
-    b = finding_id('check', 'title', ['ev_01', 'ev_02'])
+    a = finding_id('check', 'subject', 'title', ['ev_01'])
+    b = finding_id('check', 'subject', 'title', ['ev_01', 'ev_02'])
     assert a != b
 
 
@@ -185,10 +199,31 @@ def test_verification_id_differs_on_requests():
 # ── engagement_id ──────────────────────────────────────────────────────────────
 
 
+def _engagement(**overrides: Any) -> Engagement:
+    data: dict[str, Any] = {
+        'schema_version': 1,
+        'target': {'name': 'app', 'base_url': 'https://app.example.test/'},
+        'scope': {'hosts': ['app.example.test']},
+        'authorization': {'attestation': 'SOW-1', 'operator': 'op'},
+    }
+    return Engagement.model_validate(data | overrides)
+
+
 def test_engagement_id_prefix():
-    eid = engagement_id(b'{"a":1}')
+    eid = engagement_id(_engagement())
     assert eid.startswith('eng_')
     assert len(eid) == 4 + 16
+
+
+def test_engagement_id_ignores_manifest_formatting():
+    """Hashing the validated model: key order and explicit defaults don't change the ID."""
+    explicit = _engagement(credentials={}, roles={}, suggested_checks=[])
+    assert engagement_id(explicit) == engagement_id(_engagement())
+
+
+def test_engagement_id_differs_on_content():
+    other = _engagement(target={'name': 'other', 'base_url': 'https://app.example.test/'})
+    assert engagement_id(other) != engagement_id(_engagement())
 
 
 # ── normalized_operation_key ───────────────────────────────────────────────────
@@ -209,17 +244,17 @@ def test_normalized_operation_key_already_uppercase():
 def test_evidence_id_golden():
     ex = HttpExchange(
         request=HttpRequest(
-            method='GET', url='https://example.test/api/v1/users', headers={'Accept': 'application/json'}
+            method='GET', url='https://example.test/api/v1/users', headers=[('Accept', 'application/json')]
         ),
-        response=HttpResponse(status_code=200, headers={'Content-Type': 'application/json'}, body='[{"id":1}]'),
+        response=HttpResponse(status_code=200, headers=[('Content-Type', 'application/json')], body='[{"id":1}]'),
     )
     ev = HttpEvidence(id='placeholder', source='bundle/evidence/0001.json', http=ex)
-    assert evidence_id(ev) == 'ev_1d77f13e67285dd3'
+    assert evidence_id(ev) == 'ev_38fe45c20d3d584d'
 
 
 def test_finding_id_golden():
-    fid = finding_id('header-security', 'Missing HSTS header', ['ev_abc', 'ev_def'])
-    assert fid == 'fn_bd331b2018fce1c8'
+    fid = finding_id('header-security', 'header:strict-transport-security', 'Missing HSTS header', ['ev_abc', 'ev_def'])
+    assert fid == 'fn_d7854dcdcf6cc27f'
 
 
 def test_verification_id_golden():

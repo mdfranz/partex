@@ -18,7 +18,7 @@ from partex.bundle import (
 )
 from partex.errors import ValidationFailed
 from partex.ids import evidence_id
-from partex.models import ConfigEvidence, HttpEvidence
+from partex.models import ConfigEvidence, HttpEvidence, get_header
 
 FIXTURES = Path(__file__).resolve().parents[1] / 'fixtures' / 'bundles'
 VALID = FIXTURES / 'valid'
@@ -29,13 +29,13 @@ MALFORMED = sorted(p for p in (FIXTURES / 'malformed').iterdir() if p.is_dir())
 
 
 def _exchange(
-    *, url: str = 'https://app.example.test/', headers: dict[str, str] | None = None, body: str = 'ok'
+    *, url: str = 'https://app.example.test/', headers: list[list[str]] | None = None, body: str = 'ok'
 ) -> dict[str, Any]:
     return {
         'kind': 'http_exchange',
         'http': {
-            'request': {'method': 'GET', 'url': url, 'headers': {'Host': 'app.example.test'}},
-            'response': {'status_code': 200, 'headers': headers or {'Content-Type': 'text/html'}, 'body': body},
+            'request': {'method': 'GET', 'url': url, 'headers': [['Host', 'app.example.test']]},
+            'response': {'status_code': 200, 'headers': headers or [['Content-Type', 'text/html']], 'body': body},
         },
     }
 
@@ -80,7 +80,7 @@ def test_valid_fixture_loads():
 def test_valid_fixture_redaction_markers_are_accepted():
     clean = load_bundle(VALID).evidence[0]
     assert isinstance(clean, HttpEvidence)
-    assert clean.http.request.headers['Authorization'] == '<redacted>'
+    assert get_header(clean.http.request.headers, 'Authorization') == '<redacted>'
 
 
 def test_valid_fixture_openapi_excerpt_keeps_revision():
@@ -104,9 +104,21 @@ def test_evidence_id_ignores_source(tmp_path: Path):
 
 
 def test_secret_fields_are_carried(tmp_path: Path):
-    record = _exchange() | {'secret_fields': ['$.http.request.headers.Host']}
+    record = _exchange() | {'secret_fields': ['$.http.request.headers[0][1]']}
     loaded = load_bundle(_write_bundle(tmp_path, {'e.json': record}))
-    assert loaded.evidence[0].secret_fields == ['$.http.request.headers.Host']
+    assert loaded.evidence[0].secret_fields == ['$.http.request.headers[0][1]']
+
+
+@pytest.mark.parametrize(
+    'path',
+    ['$.http.request.headers.Host', '$.http.request.headers[5][1]', '$.http.request.headers[0]', '$.nope', 'http'],
+)
+def test_unresolvable_secret_field_is_evidence_invalid(tmp_path: Path, path: str):
+    """A secret marking that names no string value is refused at load, never skipped at redaction."""
+    record = _exchange() | {'secret_fields': [path]}
+    with pytest.raises(ValidationFailed) as excinfo:
+        load_bundle(_write_bundle(tmp_path, {'e.json': record}))
+    assert excinfo.value.rule_code == 'evidence-invalid'
 
 
 def test_empty_evidence_list_is_valid(tmp_path: Path):
@@ -262,7 +274,7 @@ def test_body_at_cap_is_accepted(tmp_path: Path):
             id='request-body',
         ),
         pytest.param(_exchange(url='https://app.example.test/' + 'a' * MAX_URL_BYTES), id='url'),
-        pytest.param(_exchange(headers={f'X-{i}': 'v' for i in range(MAX_HEADERS + 1)}), id='response-headers'),
+        pytest.param(_exchange(headers=[[f'X-{i}', 'v'] for i in range(MAX_HEADERS + 1)]), id='response-headers'),
         pytest.param(
             {
                 'kind': 'config_excerpt',
@@ -280,7 +292,7 @@ def test_content_caps(tmp_path: Path, record: dict[str, Any]):
 
 def test_request_header_cap(tmp_path: Path):
     record = _exchange()
-    record['http']['request']['headers'] = {f'X-{i}': 'v' for i in range(MAX_HEADERS + 1)}
+    record['http']['request']['headers'] = [[f'X-{i}', 'v'] for i in range(MAX_HEADERS + 1)]
     with pytest.raises(ValidationFailed, match='request has') as exc:
         load_bundle(_write_bundle(tmp_path, {'e.json': record}))
     assert _rule(exc) == 'evidence-too-large'

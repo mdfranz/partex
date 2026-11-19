@@ -16,7 +16,7 @@ import re
 from collections.abc import Sequence
 from urllib.parse import urlsplit
 
-from ..models import Evidence, FindingDraft, HttpEvidence
+from ..models import Evidence, FindingDraft, HttpEvidence, get_header
 from . import TargetClient
 
 CHECK_ID = 'version-disclosure'
@@ -88,13 +88,14 @@ class VersionDisclosureCheck:
         response = exchange.http.response
         request = exchange.http.request
         for header in BANNER_HEADERS:
-            value = response.headers.get(header)
+            value = get_header(response.headers, header)
             if value and _VERSION_DIGITS.search(value):
                 drafts.append(
                     FindingDraft(
                         check_id=CHECK_ID,
                         check_version=CHECK_VERSION,
                         severity='low',
+                        subject=f'header:{header}',
                         title=f'Version banner disclosed via {header} header',
                         description=(
                             f'{request.method} {request.url} exposes {header}: {value!r}, an explicit '
@@ -115,6 +116,7 @@ class VersionDisclosureCheck:
                     check_id=CHECK_ID,
                     check_version=CHECK_VERSION,
                     severity='medium',
+                    subject='error-page',
                     title='Verbose error page discloses stack trace or internal paths',
                     description=(
                         f'The error response for {request.method} {request.url} exposes runtime '

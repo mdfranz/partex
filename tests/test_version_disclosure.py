@@ -21,14 +21,14 @@ def exchange(
     path: str = '/',
     *,
     status: int = 200,
-    headers: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,  # one value per name; converted to pairs below
     body: str | None = None,
 ) -> HttpEvidence:
     """A canned captured exchange with a stable synthetic evidence id."""
-    request = HttpRequest(method='GET', url=f'{BASE_URL}{path}', headers={'host': 'fixture.test:8443'})
+    request = HttpRequest(method='GET', url=f'{BASE_URL}{path}', headers=[('host', 'fixture.test:8443')])
     response = HttpResponse(
         status_code=status,
-        headers={'content-type': 'text/plain'} | (headers or {}),
+        headers=list(({'content-type': 'text/plain'} | (headers or {})).items()),
         body=body if body is not None else 'ok',
     )
     evidence = HttpEvidence(id='', source='capture:test', http=HttpExchange(request=request, response=response))

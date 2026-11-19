@@ -26,6 +26,9 @@ from partex.models import (
     Verification,
     VerificationRecipe,
     VerificationRequest,
+    get_all,
+    get_header,
+    parse_secret_path,
     redact,
 )
 
@@ -33,8 +36,8 @@ from partex.models import (
 
 
 def test_http_exchange_round_trip():
-    req = HttpRequest(method='GET', url='https://example.test/', headers={'Host': 'example.test'})
-    resp = HttpResponse(status_code=200, headers={'Content-Type': 'text/html'}, body='<html>ok</html>')
+    req = HttpRequest(method='GET', url='https://example.test/', headers=[('Host', 'example.test')])
+    resp = HttpResponse(status_code=200, headers=[('Content-Type', 'text/html')], body='<html>ok</html>')
     exchange = HttpExchange(request=req, response=resp)
     assert exchange.request.method == 'GET'
     assert exchange.response.status_code == 200
@@ -44,19 +47,19 @@ def test_http_exchange_round_trip():
 def test_http_exchange_forbids_extra():
     with pytest.raises(ValidationError):
         HttpExchange(
-            request=HttpRequest(method='GET', url='https://example.test/', headers={}),
-            response=HttpResponse(status_code=200, headers={}),
+            request=HttpRequest(method='GET', url='https://example.test/', headers=[]),
+            response=HttpResponse(status_code=200, headers=[]),
             bogus=1,
         )
 
 
 def test_http_request_optional_body():
-    req = HttpRequest(method='GET', url='https://example.test/', headers={})
+    req = HttpRequest(method='GET', url='https://example.test/', headers=[])
     assert req.body is None
 
 
 def test_http_response_optional_body():
-    resp = HttpResponse(status_code=204, headers={})
+    resp = HttpResponse(status_code=204, headers=[])
     assert resp.body is None
 
 
@@ -78,10 +81,10 @@ def test_config_excerpt_default_revision():
 
 def test_http_evidence_model():
     ex = HttpExchange(
-        request=HttpRequest(method='GET', url='https://example.test/', headers={}),
-        response=HttpResponse(status_code=200, headers={}),
+        request=HttpRequest(method='GET', url='https://example.test/', headers=[]),
+        response=HttpResponse(status_code=200, headers=[]),
     )
-    ev = HttpEvidence(id='ev_abc', source='file1.json', http=ex, secret_fields=['$.http.request.headers.Authorization'])
+    ev = HttpEvidence(id='ev_abc', source='file1.json', http=ex, secret_fields=['$.http.request.url'])
     assert ev.kind == 'http_exchange'
     assert ev.id == 'ev_abc'
 
@@ -95,8 +98,8 @@ def test_config_evidence_model():
 
 def test_evidence_type_adapter_round_trip_http():
     ex = HttpExchange(
-        request=HttpRequest(method='POST', url='https://example.test/a', headers={'Accept': 'application/json'}),
-        response=HttpResponse(status_code=201, headers={'Location': '/a/1'}),
+        request=HttpRequest(method='POST', url='https://example.test/a', headers=[('Accept', 'application/json')]),
+        response=HttpResponse(status_code=201, headers=[('Location', '/a/1')]),
     )
     original = HttpEvidence(id='ev_abc', source='file1.json', http=ex)
     serialised = original.model_dump(mode='json')
@@ -129,10 +132,25 @@ def test_finding_draft_requires_non_empty_evidence_ids():
             check_id='header-security',
             check_version='1.0',
             severity='medium',
+            subject='test',
             title='Missing HSTS',
             description='...',
             evidence_ids=[],
             remediation='...',
+        )
+
+
+def test_finding_draft_requires_non_empty_subject():
+    with pytest.raises(ValidationError, match='subject'):
+        FindingDraft(
+            check_id='c',
+            check_version='1.0',
+            severity='low',
+            subject='',
+            title='t',
+            description='d',
+            evidence_ids=['ev_abc'],
+            remediation='r',
         )
 
 
@@ -141,6 +159,7 @@ def test_finding_draft_minimal():
         check_id='test-check',
         check_version='1.0',
         severity='info',
+        subject='test',
         title='Test',
         description='desc',
         evidence_ids=['ev_abc'],
@@ -156,6 +175,7 @@ def test_finding_draft_rejects_extra():
             check_id='test-check',
             check_version='1.0',
             severity='info',
+            subject='test',
             title='Test',
             description='desc',
             evidence_ids=['ev_abc'],
@@ -173,6 +193,7 @@ def test_finding_minimal():
         check_id='test-check',
         check_version='1.0',
         severity='high',
+        subject='test',
         title='Test',
         description='desc',
         evidence_ids=['ev_abc'],
@@ -189,6 +210,7 @@ def test_finding_with_verification():
         check_id='test-check',
         check_version='1.0',
         severity='high',
+        subject='test',
         title='Test',
         description='desc',
         evidence_ids=['ev_abc'],
@@ -206,6 +228,7 @@ def test_finding_invalid_severity():
             check_id='test',
             check_version='1.0',
             severity='unknown',  # type: ignore[arg-type]
+            subject='test',
             title='Test',
             description='desc',
             evidence_ids=['ev_abc'],
@@ -339,111 +362,135 @@ def test_scope_max_requests_positive():
         Scope(hosts=['example.test'], max_requests=0)
 
 
+# ── Headers ────────────────────────────────────────────────────────────────────
+
+
+def test_headers_preserve_repeats_order_and_casing():
+    resp = HttpResponse(status_code=200, headers=[('Set-Cookie', 'a=1'), ('set-cookie', 'b=2'), ('X-A', 'v')])
+    assert get_all(resp.headers, 'SET-COOKIE') == ['a=1', 'b=2']
+    assert get_header(resp.headers, 'set-cookie') == 'a=1'
+    assert get_header(resp.headers, 'x-a') == 'v'
+    assert get_header(resp.headers, 'missing') is None
+    assert get_all(resp.headers, 'missing') == []
+    assert [name for name, _ in resp.headers] == ['Set-Cookie', 'set-cookie', 'X-A']
+
+
+def test_headers_serialize_as_pairs():
+    resp = HttpResponse(status_code=200, headers=[('A', '1'), ('A', '2')])
+    assert resp.model_dump(mode='json')['headers'] == [['A', '1'], ['A', '2']]
+    assert HttpResponse.model_validate_json(resp.model_dump_json()) == resp
+
+
+def test_headers_reject_mapping():
+    with pytest.raises(ValidationError):
+        HttpResponse.model_validate({'status_code': 200, 'headers': {'A': '1'}})
+
+
+# ── Secret paths ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ('path', 'parts'),
+    [
+        ('$.http.request.body', ('http', 'request', 'body')),
+        ('$.http.request.headers[2][1]', ('http', 'request', 'headers', 2, 1)),
+        ('$.config.content', ('config', 'content')),
+    ],
+)
+def test_parse_secret_path(path: str, parts: tuple[str | int, ...]):
+    assert parse_secret_path(path) == parts
+
+
+@pytest.mark.parametrize('path', ['', '$', 'http.request.body', '$.http..body', '$.headers[x]', '$.a[-1]', '$.a.b-c'])
+def test_parse_secret_path_rejects_malformed(path: str):
+    with pytest.raises(ValueError):
+        parse_secret_path(path)
+
+
+def _exchange(*, request_headers: list[tuple[str, str]] | None = None, **response: object) -> HttpExchange:
+    return HttpExchange(
+        request=HttpRequest(
+            method='POST', url='https://example.test/', headers=request_headers or [], body='token=abc'
+        ),
+        response=HttpResponse.model_validate({'status_code': 200, 'headers': []} | response),
+    )
+
+
+@pytest.mark.parametrize(
+    'path',
+    [
+        '$.http.request.headers.Authorization',  # names are never path steps
+        '$.http.request.headers[0][1]',  # no header 0
+        '$.http.request',  # not a string leaf
+        '$.http.response.body',  # body is None
+        '$.http.response.status_code',  # not a string
+        '$.nonexistent.path',
+        '$.kind',  # outside the payload
+        '$.source',
+        'garbage',
+    ],
+)
+def test_unresolvable_secret_field_is_rejected(path: str):
+    """Fail closed: a secret marking that cannot be applied is a construction error."""
+    with pytest.raises(ValidationError, match='secret_fields'):
+        HttpEvidence(id='ev_01', source='f', http=_exchange(), secret_fields=[path])
+
+
 # ── Redaction ──────────────────────────────────────────────────────────────────
 
 
 def test_redact_no_secrets():
-    ex = HttpExchange(
-        request=HttpRequest(method='GET', url='https://example.test/', headers={}),
-        response=HttpResponse(status_code=200, headers={}),
-    )
-    ev = HttpEvidence(id='ev_01', source='f', http=ex, secret_fields=[])
-    result = redact(ev)
-    assert isinstance(result, HttpEvidence)
-    assert result.http.response.status_code == 200  # unchanged
+    ev = HttpEvidence(id='ev_01', source='f', http=_exchange())
+    assert redact(ev) is ev
 
 
-def test_redact_single_secret_header():
-    ex = HttpExchange(
-        request=HttpRequest(
-            method='GET',
-            url='https://example.test/',
-            headers={'Authorization': 'Bearer secret-token', 'Accept': 'application/json'},
-        ),
-        response=HttpResponse(status_code=200, headers={}),
-    )
+def test_redact_header_value_by_index_keeps_name():
     ev = HttpEvidence(
         id='ev_01',
         source='f',
-        http=ex,
-        secret_fields=['$.http.request.headers.Authorization'],
+        http=_exchange(request_headers=[('authorization', 'Bearer secret'), ('Accept', 'application/json')]),
+        secret_fields=['$.http.request.headers[0][1]'],
     )
     result = redact(ev)
     assert isinstance(result, HttpEvidence)
-    assert result.http.request.headers['Authorization'] == '<redacted>'
-    assert result.http.request.headers['Accept'] == 'application/json'
+    assert result.http.request.headers == [('authorization', '<redacted>'), ('Accept', 'application/json')]
 
 
-def test_redact_multiple_secret_fields():
-    ex = HttpExchange(
-        request=HttpRequest(
-            method='GET',
-            url='https://example.test/',
-            headers={'Cookie': 'session=abc', 'Authorization': 'Bearer xyz'},
-        ),
-        response=HttpResponse(status_code=200, headers={'Set-Cookie': 'session=abc'}),
-    )
+def test_redact_is_casing_and_dot_agnostic():
+    """The #35 failure modes: lowercase names and dotted names redact like any other."""
     ev = HttpEvidence(
         id='ev_01',
         source='f',
-        http=ex,
-        secret_fields=[
-            '$.http.request.headers.Cookie',
-            '$.http.request.headers.Authorization',
-        ],
+        http=_exchange(request_headers=[('authorization', 'Bearer s1'), ('X.Api.Key', 'k2')]),
+        secret_fields=['$.http.request.headers[0][1]', '$.http.request.headers[1][1]'],
     )
     result = redact(ev)
     assert isinstance(result, HttpEvidence)
-    assert result.http.request.headers['Cookie'] == '<redacted>'
-    assert result.http.request.headers['Authorization'] == '<redacted>'
+    assert [value for _, value in result.http.request.headers] == ['<redacted>', '<redacted>']
+    assert len(result.http.request.headers) == 2  # nothing added
 
 
-def test_redact_response_header():
-    ex = HttpExchange(
-        request=HttpRequest(method='GET', url='https://example.test/', headers={}),
-        response=HttpResponse(status_code=200, headers={'Set-Cookie': 'token=secret; Secure'}),
-    )
+def test_redact_one_of_repeated_set_cookie():
     ev = HttpEvidence(
         id='ev_01',
         source='f',
-        http=ex,
-        secret_fields=['$.http.response.headers.Set-Cookie'],
+        http=_exchange(headers=[('Set-Cookie', 'sid=secret; Secure'), ('Set-Cookie', 'theme=dark')]),
+        secret_fields=['$.http.response.headers[0][1]'],
     )
     result = redact(ev)
     assert isinstance(result, HttpEvidence)
-    assert result.http.response.headers['Set-Cookie'] == '<redacted>'
+    assert get_all(result.http.response.headers, 'set-cookie') == ['<redacted>', 'theme=dark']
 
 
 def test_redact_request_body_secret():
-    ex = HttpExchange(
-        request=HttpRequest(
-            method='POST',
-            url='https://example.test/login',
-            headers={'Content-Type': 'application/json'},
-            body='{"password": "hunter2", "username": "admin"}',
-        ),
-        response=HttpResponse(status_code=200, headers={}),
-    )
-    ev = HttpEvidence(id='ev_01', source='f', http=ex, secret_fields=['$.http.request.body'])
+    ev = HttpEvidence(id='ev_01', source='f', http=_exchange(), secret_fields=['$.http.request.body'])
     result = redact(ev)
     assert isinstance(result, HttpEvidence)
     assert result.http.request.body == '<redacted>'
 
 
-def test_redact_missing_path_is_noop():
-    """A secret_field path that doesn't resolve is silently skipped."""
-    ex = HttpExchange(
-        request=HttpRequest(method='GET', url='https://example.test/', headers={}),
-        response=HttpResponse(status_code=200, headers={}),
-    )
-    ev = HttpEvidence(id='ev_01', source='f', http=ex, secret_fields=['$.nonexistent.path'])
-    result = redact(ev)
-    assert isinstance(result, HttpEvidence)
-    assert result.http.response.status_code == 200
-
-
 def test_redact_config_evidence():
-    cfg = ConfigExcerpt(path='settings.ini', format='config', content='password=secret\napi_key=abc')
+    cfg = ConfigExcerpt(path='app.env', format='config', content='DB_PASSWORD=hunter2')
     ev = ConfigEvidence(id='ev_01', source='f', config=cfg, secret_fields=['$.config.content'])
     result = redact(ev)
     assert isinstance(result, ConfigEvidence)
@@ -452,15 +499,19 @@ def test_redact_config_evidence():
 
 def test_redact_preserves_input():
     """redact returns a new object without mutating the original."""
-    ex = HttpExchange(
-        request=HttpRequest(
-            method='GET',
-            url='https://example.test/',
-            headers={'Authorization': 'Bearer token'},
-        ),
-        response=HttpResponse(status_code=200, headers={}),
+    ev = HttpEvidence(
+        id='ev_01',
+        source='f',
+        http=_exchange(request_headers=[('Authorization', 'Bearer token')]),
+        secret_fields=['$.http.request.headers[0][1]'],
     )
-    ev = HttpEvidence(id='ev_01', source='f', http=ex, secret_fields=['$.http.request.headers.Authorization'])
     result = redact(ev)
-    assert result.http.request.headers['Authorization'] == '<redacted>'
-    assert ev.http.request.headers['Authorization'] == 'Bearer token'  # original untouched
+    assert isinstance(result, HttpEvidence)
+    assert result.http.request.headers == [('Authorization', '<redacted>')]
+    assert ev.http.request.headers == [('Authorization', 'Bearer token')]
+
+
+def test_redacted_evidence_still_validates():
+    """Redacted output keeps its secret_fields and still satisfies the resolve rule."""
+    ev = HttpEvidence(id='ev_01', source='f', http=_exchange(), secret_fields=['$.http.request.body'])
+    assert EvidenceAdapter.validate_python(redact(ev).model_dump(mode='json')) == redact(ev)

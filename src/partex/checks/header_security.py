@@ -6,7 +6,7 @@ model or storage access.  Registered via ``partex.checks`` entry point.
 
 from collections.abc import Sequence
 
-from ..models import Evidence, FindingDraft, HttpEvidence, Severity
+from ..models import Evidence, FindingDraft, HttpEvidence, Severity, get_all, get_header
 
 # ── Check metadata ────────────────────────────────────────────────────────────
 
@@ -46,7 +46,7 @@ SESSION_COOKIE_PATTERNS = (
 
 def _is_html(exchange: HttpEvidence) -> bool:
     """Return True if the response is an HTML document."""
-    ct = exchange.http.response.headers.get('Content-Type', '')
+    ct = (get_header(exchange.http.response.headers, 'Content-Type') or '').lower()
     return 'text/html' in ct or 'application/xhtml+xml' in ct
 
 
@@ -79,18 +79,7 @@ def _parse_set_cookie(header_value: str) -> tuple[str, dict[str, str]]:
     else:
         name = name_value.strip()
 
-    attributes: dict[str, str] = {}
-    for attr in attr_parts:
-        if '=' in attr:
-            key, val = attr.split('=', 1)
-            attributes[key.strip().lower()] = val.strip()
-        else:
-            attributes[attr.strip()] = ''
-
-    # Extract HttpOnly and Secure (can appear without =)
-    # They're already captured in attr_parts; normalize keys
     lower_attrs: dict[str, str] = {}
-    # Re-process attributes more carefully
     for attr in attr_parts:
         if '=' in attr:
             key, val = attr.split('=', 1)
@@ -127,12 +116,13 @@ def _check_hsts(exchange: HttpEvidence) -> FindingDraft | None:
     if not _is_https(url):
         return None
 
-    hsts = exchange.http.response.headers.get('Strict-Transport-Security', '')
+    hsts = get_header(exchange.http.response.headers, 'Strict-Transport-Security') or ''
     if not hsts:
         return FindingDraft(
             check_id=CHECK_ID,
             check_version=CHECK_VERSION,
             severity='low',
+            subject='header:strict-transport-security',
             title='Missing HSTS header',
             description=f'HTTPS response from {url} (status {exchange.http.response.status_code}) '
             'lacks a Strict-Transport-Security header, allowing downgrade attacks.',
@@ -166,6 +156,7 @@ def _check_hsts(exchange: HttpEvidence) -> FindingDraft | None:
         check_id=CHECK_ID,
         check_version=CHECK_VERSION,
         severity=severity,
+        subject='header:strict-transport-security',
         title='Weak HSTS policy',
         description=f'HTTPS response from {url} (status {exchange.http.response.status_code}): {detail}',
         evidence_ids=[exchange.id],
@@ -178,12 +169,13 @@ def _check_csp(exchange: HttpEvidence) -> FindingDraft | None:
     if not _is_html(exchange) or exchange.http.response.status_code >= 300:
         return None
 
-    csp = exchange.http.response.headers.get('Content-Security-Policy', '')
+    csp = get_header(exchange.http.response.headers, 'Content-Security-Policy') or ''
     if not csp:
         return FindingDraft(
             check_id=CHECK_ID,
             check_version=CHECK_VERSION,
             severity='medium',
+            subject='header:content-security-policy',
             title='Missing Content-Security-Policy header',
             description=f'HTML response from {exchange.http.request.url} '
             f'(status {exchange.http.response.status_code}) lacks a Content-Security-Policy header.',
@@ -210,6 +202,7 @@ def _check_csp(exchange: HttpEvidence) -> FindingDraft | None:
                 check_id=CHECK_ID,
                 check_version=CHECK_VERSION,
                 severity='medium',
+                subject='header:content-security-policy',
                 title='Unsafe Content-Security-Policy',
                 description=f'HTML response from {exchange.http.request.url} '
                 f'(status {exchange.http.response.status_code}) has CSP `{csp}` '
@@ -228,12 +221,13 @@ def _check_x_content_type_options(exchange: HttpEvidence) -> FindingDraft | None
     if status >= 300 or status == 204:
         return None
 
-    xcto = exchange.http.response.headers.get('X-Content-Type-Options', '')
+    xcto = get_header(exchange.http.response.headers, 'X-Content-Type-Options') or ''
     if xcto.lower() != 'nosniff':
         return FindingDraft(
             check_id=CHECK_ID,
             check_version=CHECK_VERSION,
             severity='low',
+            subject='header:x-content-type-options',
             title='Missing X-Content-Type-Options header',
             description=f'Response from {exchange.http.request.url} '
             f'(status {exchange.http.response.status_code}) lacks '
@@ -250,20 +244,8 @@ def _check_set_cookie(exchange: HttpEvidence) -> list[FindingDraft]:
     findings: list[FindingDraft] = []
     is_https_exchange = _is_https(exchange.http.request.url)
 
-    # Set-Cookie may appear multiple times — model serializes as a single comma-joined
-    # string when collapsed, so iterate the raw value carefully.
-    set_cookie_values = exchange.http.response.headers.get('Set-Cookie', '')
-    if not set_cookie_values:
-        return []
-
-    # Handle multiple cookies: they might already be concatenated
-    # The model stores as a single string; try to split on '\n' or by detecting individual cookies
-    # A simpler approach: parse each possible Set-Cookie value
-    cookie_headers = [set_cookie_values]
-    # Try to detect if multiple cookies are joined
-    # Common case: they're stored as one value; handle gracefully
-
-    for header_value in cookie_headers:
+    # Each Set-Cookie header is its own (name, value) pair; findings are keyed by cookie name.
+    for header_value in get_all(exchange.http.response.headers, 'Set-Cookie'):
         if not header_value.strip():
             continue
         cookie_name, attrs = _parse_set_cookie(header_value)
@@ -273,10 +255,10 @@ def _check_set_cookie(exchange: HttpEvidence) -> list[FindingDraft]:
 
         missing: list[str] = []
 
-        if is_https_exchange and 'secure' not in attrs and 'secure' not in [k for k in attrs]:
+        if is_https_exchange and 'secure' not in attrs:
             missing.append('Secure')
 
-        if 'httponly' not in attrs and 'httponly' not in [k for k in attrs]:
+        if 'httponly' not in attrs:
             missing.append('HttpOnly')
 
         samesite_found = False
@@ -302,6 +284,7 @@ def _check_set_cookie(exchange: HttpEvidence) -> list[FindingDraft]:
                 check_id=CHECK_ID,
                 check_version=CHECK_VERSION,
                 severity='low' if len(missing) <= 1 else 'medium',
+                subject=f'cookie:{cookie_name}',
                 title='Weak Set-Cookie attributes',
                 description=f'Session cookie `{cookie_name}` set by {evidence_url} '
                 f'(status {exchange.http.response.status_code}) is missing: '
@@ -319,8 +302,8 @@ def _check_set_cookie(exchange: HttpEvidence) -> list[FindingDraft]:
 def _check_cors(exchange: HttpEvidence) -> FindingDraft | None:
     """Check for permissive CORS with credentials."""
     headers = exchange.http.response.headers
-    acao = headers.get('Access-Control-Allow-Origin', '')
-    acac = headers.get('Access-Control-Allow-Credentials', '')
+    acao = get_header(headers, 'Access-Control-Allow-Origin') or ''
+    acac = get_header(headers, 'Access-Control-Allow-Credentials') or ''
 
     if not acao:
         return None
@@ -330,6 +313,7 @@ def _check_cors(exchange: HttpEvidence) -> FindingDraft | None:
             check_id=CHECK_ID,
             check_version=CHECK_VERSION,
             severity='high',
+            subject='header:access-control-allow-origin',
             title='Permissive CORS with credentials',
             description=f'Response from {exchange.http.request.url} '
             f'(status {exchange.http.response.status_code}) sets '

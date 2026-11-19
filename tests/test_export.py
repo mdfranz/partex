@@ -44,8 +44,8 @@ async def store(tmp_path: Path) -> AsyncIterator[RunStore]:
 def _make_http_evidence(
     path: str,
     *,
-    headers: dict[str, str] | None = None,
-    response_headers: dict[str, str] | None = None,
+    headers: list[tuple[str, str]] | None = None,
+    response_headers: list[tuple[str, str]] | None = None,
     secret_fields: list[str] | None = None,
     source: str = 'capture:0',
 ) -> HttpEvidence:
@@ -56,11 +56,11 @@ def _make_http_evidence(
             request=HttpRequest(
                 method='GET',
                 url=f'https://app.example.test{path}',
-                headers=headers or {},
+                headers=headers or [],
             ),
             response=HttpResponse(
                 status_code=200,
-                headers=response_headers or {'Content-Type': 'text/html'},
+                headers=response_headers or [('Content-Type', 'text/html')],
                 body=f'<p>{path}</p>',
             ),
         ),
@@ -97,10 +97,11 @@ def _make_finding(
     ev_ids = [item.id for item in evidence]
     return Finding.model_validate(
         {
-            'id': finding_id(check_id, title, ev_ids),
+            'id': finding_id(check_id, f'test:{title}', title, ev_ids),
             'check_id': check_id,
             'check_version': '1.0.0',
             'severity': severity,
+            'subject': f'test:{title}',
             'title': title,
             'description': f'Detail for {title}',
             'evidence_ids': ev_ids,
@@ -131,12 +132,12 @@ async def _seed_full_run(store: RunStore) -> tuple[str, str]:
     """Create a complete run containing evidence with secrets, findings, verification, coverage, tool call, summary."""
     ev_http = _make_http_evidence(
         '/admin',
-        headers={'Authorization': SECRET_AUTH, 'Cookie': SECRET_COOKIE},
-        response_headers={'Content-Type': 'text/html', 'Set-Cookie': SECRET_SET_COOKIE},
+        headers=[('Authorization', SECRET_AUTH), ('Cookie', SECRET_COOKIE)],
+        response_headers=[('Content-Type', 'text/html'), ('Set-Cookie', SECRET_SET_COOKIE)],
         secret_fields=[
-            '$.http.request.headers.Authorization',
-            '$.http.request.headers.Cookie',
-            '$.http.response.headers.Set-Cookie',
+            '$.http.request.headers[0][1]',
+            '$.http.request.headers[1][1]',
+            '$.http.response.headers[1][1]',
         ],
         source='bundle/evidence/0001.json',
     )
@@ -207,7 +208,7 @@ async def test_export_redacted_snapshot(store: RunStore) -> None:
     assert call_id not in exported
     assert 'created_at' not in exported
     assert exported == snapshot(
-        '{"coverage":[{"evidence_ids":["ev_f72d8d5b10f08d9a"],"goal_attempts":1,"outcome":"reported","reason":"HSTS missing","risk_area":"transport-security","source":"check_observed","surface":"GET /admin"}],"evidence":[{"http":{"request":{"body":null,"headers":{"Authorization":"<redacted>","Cookie":"<redacted>"},"method":"GET","url":"https://app.example.test/admin"},"response":{"body":"<p>/admin</p>","headers":{"Content-Type":"text/html","Set-Cookie":"<redacted>"},"status_code":200}},"id":"ev_f72d8d5b10f08d9a","kind":"http_exchange","secret_fields":["$.http.request.headers.Authorization","$.http.request.headers.Cookie","$.http.response.headers.Set-Cookie"],"source":"bundle/evidence/0001.json"},{"config":{"content":"<redacted>","format":"config","path":"config.ini","revision":"rev1"},"id":"ev_7d9d00d79ffc0227","kind":"config_excerpt","secret_fields":["$.config.content"],"source":"bundle/config.ini"}],"findings":[{"check_id":"header-security","check_version":"1.0.0","description":"Detail for Missing HSTS","evidence_ids":["ev_f72d8d5b10f08d9a"],"id":"fn_c0b12e0a4760a2d6","remediation":"Fix Missing HSTS","severity":"high","status":"verified","title":"Missing HSTS","verification_id":"vf_12eeaacb52939a97"},{"check_id":"version-disclosure","check_version":"1.0.0","description":"Detail for Banner disclosed","evidence_ids":["ev_7d9d00d79ffc0227"],"id":"fn_dceb8ce6a82a20f1","remediation":"Fix Banner disclosed","severity":"low","status":"reported","title":"Banner disclosed","verification_id":null}],"run":{"authorized":false,"engine_version":"0.1.0","error":null,"findings_count":2,"input_kind":"bundle","input_ref":"fixtures/bundles/valid","input_sha256":"abc123def456","model":null,"requests_spent":0,"scope_snapshot":null,"selected_checks":["header-security","version-disclosure"],"state":"complete","summary_error":null},"summary":{"finding_ids":["fn_c0b12e0a4760a2d6","fn_dceb8ce6a82a20f1"],"narrative":"Confirmed missing HSTS (high) and reported banner disclosure (low)."},"tool_calls":[{"args":{"evidence_id":"ev_f72d8d5b10f08d9a"},"result":{"status":"ok"},"tool":"lookup_evidence"}],"verifications":[{"check_id":"header-security","counterevidence":"None observed","detail":"Reproduced deterministically","finding_id":"fn_c0b12e0a4760a2d6","id":"vf_12eeaacb52939a97","replayable":true,"requests":["ev_f72d8d5b10f08d9a"],"verdict":"confirmed"}]}'
+        '{"coverage":[{"evidence_ids":["ev_55250b92b421f7c8"],"goal_attempts":1,"outcome":"reported","reason":"HSTS missing","risk_area":"transport-security","source":"check_observed","surface":"GET /admin"}],"evidence":[{"http":{"request":{"body":null,"headers":[["Authorization","<redacted>"],["Cookie","<redacted>"]],"method":"GET","url":"https://app.example.test/admin"},"response":{"body":"<p>/admin</p>","headers":[["Content-Type","text/html"],["Set-Cookie","<redacted>"]],"status_code":200}},"id":"ev_55250b92b421f7c8","kind":"http_exchange","secret_fields":["$.http.request.headers[0][1]","$.http.request.headers[1][1]","$.http.response.headers[1][1]"],"source":"bundle/evidence/0001.json"},{"config":{"content":"<redacted>","format":"config","path":"config.ini","revision":"rev1"},"id":"ev_7d9d00d79ffc0227","kind":"config_excerpt","secret_fields":["$.config.content"],"source":"bundle/config.ini"}],"findings":[{"check_id":"header-security","check_version":"1.0.0","description":"Detail for Missing HSTS","evidence_ids":["ev_55250b92b421f7c8"],"id":"fn_dfdbda97e91b6119","remediation":"Fix Missing HSTS","severity":"high","status":"verified","subject":"test:Missing HSTS","title":"Missing HSTS","verification_id":"vf_fa50835f7bdd12a0"},{"check_id":"version-disclosure","check_version":"1.0.0","description":"Detail for Banner disclosed","evidence_ids":["ev_7d9d00d79ffc0227"],"id":"fn_21efcc7c32c90e9d","remediation":"Fix Banner disclosed","severity":"low","status":"reported","subject":"test:Banner disclosed","title":"Banner disclosed","verification_id":null}],"run":{"authorized":false,"engine_version":"0.1.0","error":null,"findings_count":2,"input_kind":"bundle","input_ref":"fixtures/bundles/valid","input_sha256":"abc123def456","model":null,"requests_spent":0,"scope_snapshot":null,"selected_checks":["header-security","version-disclosure"],"state":"complete","summary_error":null},"summary":{"finding_ids":["fn_dfdbda97e91b6119","fn_21efcc7c32c90e9d"],"narrative":"Confirmed missing HSTS (high) and reported banner disclosure (low)."},"tool_calls":[{"args":{"evidence_id":"ev_55250b92b421f7c8"},"result":{"status":"ok"},"tool":"lookup_evidence"}],"verifications":[{"check_id":"header-security","counterevidence":"None observed","detail":"Reproduced deterministically","finding_id":"fn_dfdbda97e91b6119","id":"vf_fa50835f7bdd12a0","replayable":true,"requests":["ev_55250b92b421f7c8"],"verdict":"confirmed"}]}'
     )
 
 
@@ -227,7 +228,7 @@ async def test_export_include_secrets_snapshot(store: RunStore) -> None:
     assert call_id not in exported
     assert 'created_at' not in exported
     assert exported == snapshot(
-        '{"coverage":[{"evidence_ids":["ev_f72d8d5b10f08d9a"],"goal_attempts":1,"outcome":"reported","reason":"HSTS missing","risk_area":"transport-security","source":"check_observed","surface":"GET /admin"}],"evidence":[{"http":{"request":{"body":null,"headers":{"Authorization":"Bearer top-secret-jwt-token","Cookie":"session=super-secret-cookie-val"},"method":"GET","url":"https://app.example.test/admin"},"response":{"body":"<p>/admin</p>","headers":{"Content-Type":"text/html","Set-Cookie":"sid=fresh-secret-cookie; HttpOnly; Secure"},"status_code":200}},"id":"ev_f72d8d5b10f08d9a","kind":"http_exchange","secret_fields":["$.http.request.headers.Authorization","$.http.request.headers.Cookie","$.http.response.headers.Set-Cookie"],"source":"bundle/evidence/0001.json"},{"config":{"content":"db_password=hunter2\\napi_key=sk-test-12345","format":"config","path":"config.ini","revision":"rev1"},"id":"ev_7d9d00d79ffc0227","kind":"config_excerpt","secret_fields":["$.config.content"],"source":"bundle/config.ini"}],"findings":[{"check_id":"header-security","check_version":"1.0.0","description":"Detail for Missing HSTS","evidence_ids":["ev_f72d8d5b10f08d9a"],"id":"fn_c0b12e0a4760a2d6","remediation":"Fix Missing HSTS","severity":"high","status":"verified","title":"Missing HSTS","verification_id":"vf_12eeaacb52939a97"},{"check_id":"version-disclosure","check_version":"1.0.0","description":"Detail for Banner disclosed","evidence_ids":["ev_7d9d00d79ffc0227"],"id":"fn_dceb8ce6a82a20f1","remediation":"Fix Banner disclosed","severity":"low","status":"reported","title":"Banner disclosed","verification_id":null}],"run":{"authorized":false,"engine_version":"0.1.0","error":null,"findings_count":2,"input_kind":"bundle","input_ref":"fixtures/bundles/valid","input_sha256":"abc123def456","model":null,"requests_spent":0,"scope_snapshot":null,"selected_checks":["header-security","version-disclosure"],"state":"complete","summary_error":null},"summary":{"finding_ids":["fn_c0b12e0a4760a2d6","fn_dceb8ce6a82a20f1"],"narrative":"Confirmed missing HSTS (high) and reported banner disclosure (low)."},"tool_calls":[{"args":{"evidence_id":"ev_f72d8d5b10f08d9a"},"result":{"status":"ok"},"tool":"lookup_evidence"}],"verifications":[{"check_id":"header-security","counterevidence":"None observed","detail":"Reproduced deterministically","finding_id":"fn_c0b12e0a4760a2d6","id":"vf_12eeaacb52939a97","replayable":true,"requests":["ev_f72d8d5b10f08d9a"],"verdict":"confirmed"}]}'
+        '{"coverage":[{"evidence_ids":["ev_55250b92b421f7c8"],"goal_attempts":1,"outcome":"reported","reason":"HSTS missing","risk_area":"transport-security","source":"check_observed","surface":"GET /admin"}],"evidence":[{"http":{"request":{"body":null,"headers":[["Authorization","Bearer top-secret-jwt-token"],["Cookie","session=super-secret-cookie-val"]],"method":"GET","url":"https://app.example.test/admin"},"response":{"body":"<p>/admin</p>","headers":[["Content-Type","text/html"],["Set-Cookie","sid=fresh-secret-cookie; HttpOnly; Secure"]],"status_code":200}},"id":"ev_55250b92b421f7c8","kind":"http_exchange","secret_fields":["$.http.request.headers[0][1]","$.http.request.headers[1][1]","$.http.response.headers[1][1]"],"source":"bundle/evidence/0001.json"},{"config":{"content":"db_password=hunter2\\napi_key=sk-test-12345","format":"config","path":"config.ini","revision":"rev1"},"id":"ev_7d9d00d79ffc0227","kind":"config_excerpt","secret_fields":["$.config.content"],"source":"bundle/config.ini"}],"findings":[{"check_id":"header-security","check_version":"1.0.0","description":"Detail for Missing HSTS","evidence_ids":["ev_55250b92b421f7c8"],"id":"fn_dfdbda97e91b6119","remediation":"Fix Missing HSTS","severity":"high","status":"verified","subject":"test:Missing HSTS","title":"Missing HSTS","verification_id":"vf_fa50835f7bdd12a0"},{"check_id":"version-disclosure","check_version":"1.0.0","description":"Detail for Banner disclosed","evidence_ids":["ev_7d9d00d79ffc0227"],"id":"fn_21efcc7c32c90e9d","remediation":"Fix Banner disclosed","severity":"low","status":"reported","subject":"test:Banner disclosed","title":"Banner disclosed","verification_id":null}],"run":{"authorized":false,"engine_version":"0.1.0","error":null,"findings_count":2,"input_kind":"bundle","input_ref":"fixtures/bundles/valid","input_sha256":"abc123def456","model":null,"requests_spent":0,"scope_snapshot":null,"selected_checks":["header-security","version-disclosure"],"state":"complete","summary_error":null},"summary":{"finding_ids":["fn_dfdbda97e91b6119","fn_21efcc7c32c90e9d"],"narrative":"Confirmed missing HSTS (high) and reported banner disclosure (low)."},"tool_calls":[{"args":{"evidence_id":"ev_55250b92b421f7c8"},"result":{"status":"ok"},"tool":"lookup_evidence"}],"verifications":[{"check_id":"header-security","counterevidence":"None observed","detail":"Reproduced deterministically","finding_id":"fn_dfdbda97e91b6119","id":"vf_fa50835f7bdd12a0","replayable":true,"requests":["ev_55250b92b421f7c8"],"verdict":"confirmed"}]}'
     )
 
 
@@ -251,7 +252,7 @@ async def test_export_summary_is_null_when_absent(store: RunStore) -> None:
 
 async def test_passive_exports_byte_identical_across_fresh_stores(tmp_path: Path) -> None:
     ev1 = _make_http_evidence(
-        '/one', headers={'Authorization': 'Bearer s1'}, secret_fields=['$.http.request.headers.Authorization']
+        '/one', headers=[('Authorization', 'Bearer s1')], secret_fields=['$.http.request.headers[0][1]']
     )
     ev2 = _make_http_evidence('/two')
     f_high = _make_finding('header-security', 'high', 'Missing HSTS', [ev1])
@@ -430,8 +431,8 @@ async def test_export_unknown_run_raises_store_error(store: RunStore) -> None:
 async def test_redacted_export_does_not_mutate_stored_secrets(store: RunStore) -> None:
     ev = _make_http_evidence(
         '/secret',
-        headers={'Authorization': SECRET_AUTH},
-        secret_fields=['$.http.request.headers.Authorization'],
+        headers=[('Authorization', SECRET_AUTH)],
+        secret_fields=['$.http.request.headers[0][1]'],
     )
     run_id = await store.create_run(
         input_kind='bundle',
@@ -443,8 +444,8 @@ async def test_redacted_export_does_not_mutate_stored_secrets(store: RunStore) -
     await store.commit_passive(run_id, [ev], [])
 
     redacted_payload = await export_run_data(store, run_id, include_secrets=False)
-    assert redacted_payload['evidence'][0]['http']['request']['headers']['Authorization'] == '<redacted>'
+    assert redacted_payload['evidence'][0]['http']['request']['headers'] == [['Authorization', '<redacted>']]
 
     with pytest.warns(IncludeSecretsWarning):
         unredacted_payload = await export_run_data(store, run_id, include_secrets=True)
-    assert unredacted_payload['evidence'][0]['http']['request']['headers']['Authorization'] == SECRET_AUTH
+    assert unredacted_payload['evidence'][0]['http']['request']['headers'] == [['Authorization', SECRET_AUTH]]

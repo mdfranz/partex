@@ -1,17 +1,17 @@
 {
   "http": {
     "request": {
-      "headers": {
-        "Host": "app.example.test"
-      },
+      "headers": [
+        ["Host", "app.example.test"]
+      ],
       "method": "GET",
       "url": "https://app.example.test/api/health"
     },
     "response": {
       "body": "{\"status\":\"ok\"}",
-      "headers": {
-        "Content-Type": "application/json"
-      },
+      "headers": [
+        ["Content-Type", "application/json"]
+      ],
       "status_code": 200
     }
   },

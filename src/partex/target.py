@@ -39,10 +39,11 @@ from urllib.parse import urljoin
 import anyio
 import httpx2
 
+from partex.checks import HeaderInput
 from partex.engagement import Engagement
 from partex.errors import BudgetExhausted, PartexError
 from partex.ids import evidence_id
-from partex.models import HttpEvidence, HttpExchange, HttpRequest, HttpResponse
+from partex.models import Headers, HttpEvidence, HttpExchange, HttpRequest, HttpResponse, get_header
 from partex.scope import check_url, parse_scoped_url
 
 type Resolver = Callable[[str], str]
@@ -62,6 +63,11 @@ def _default_resolver(host: str) -> str:
     """Resolve *host* to an address via getaddrinfo (first result wins)."""
     infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     return str(infos[0][4][0])
+
+
+def _header_pairs(headers: httpx2.Headers) -> Headers:
+    """Headers as wire-order ``(name, value)`` pairs, original casing and repeats preserved."""
+    return [(key.decode(headers.encoding), value.decode(headers.encoding)) for key, value in headers.raw]
 
 
 def _decode_body(content: bytes) -> str | None:
@@ -192,7 +198,7 @@ class ScopedHttpClient:
         method: str,
         url: str,
         *,
-        headers: Mapping[str, str] | None = None,
+        headers: HeaderInput | None = None,
         body: str | None = None,
     ) -> HttpEvidence:
         """Send one request through the scope gate and return captured evidence.
@@ -203,16 +209,20 @@ class ScopedHttpClient:
         check_url(self._engagement.scope, url)  # rules 1–3, before resolution
         await self._acquire_budget()  # rule 5
         await self._pin_host(url)  # rule 2: resolve once per run
+        header_list = list(headers.items()) if isinstance(headers, Mapping) else list(headers or ())
         http_request = httpx2.Request(
-            method.upper(), url, headers=dict(headers) if headers else None, content=body.encode() if body else None
+            method.upper(), url, headers=header_list or None, content=body.encode() if body else None
         )
+        # The pinned transport rewrites ``request.url`` to the resolved address; evidence
+        # records the URL as requested (hostname, not IP) so redirects and re-import stay in scope.
+        requested_url = str(http_request.url)
         try:
             response = await self._client.send(http_request, follow_redirects=False)
             await response.aread()
         except httpx2.HTTPError as exc:
             raise PartexError(f'request to {url} failed: {exc}') from exc
         self._sent += 1
-        return await self._capture(http_request, response, body)
+        return await self._capture(http_request, requested_url, response, body)
 
     async def follow_redirect(self, evidence: HttpEvidence) -> HttpEvidence:
         """Follow a captured redirect after re-validating its location.
@@ -226,7 +236,7 @@ class ScopedHttpClient:
         response = evidence.http.response
         if not 300 <= response.status_code < 400:
             raise PartexError(f'not a redirect: status {response.status_code}')
-        location = response.headers.get('location')
+        location = get_header(response.headers, 'location')
         if location is None:
             raise PartexError('redirect response has no Location header')
         absolute = urljoin(evidence.http.request.url, location)
@@ -240,13 +250,13 @@ class ScopedHttpClient:
             body=evidence.http.request.body,
         )
 
-    def _forwardable_headers(self, evidence: HttpEvidence) -> dict[str, str]:
+    def _forwardable_headers(self, evidence: HttpEvidence) -> Headers:
         """Recorded request headers, minus per-target fields recomputed on send."""
-        return {
-            key: value
-            for key, value in evidence.http.request.headers.items()
+        return [
+            (key, value)
+            for key, value in evidence.http.request.headers
             if key.lower() not in {'host', 'content-length'}
-        }
+        ]
 
     async def _acquire_budget(self) -> None:
         async with self._budget_lock:
@@ -279,17 +289,19 @@ class ScopedHttpClient:
                 raise PartexError(f'DNS resolution failed for {host}: {exc}') from exc
             self._pins[host] = resolved
 
-    async def _capture(self, request: httpx2.Request, response: httpx2.Response, body: str | None) -> HttpEvidence:
+    async def _capture(
+        self, request: httpx2.Request, url: str, response: httpx2.Response, body: str | None
+    ) -> HttpEvidence:
         """Build the ``ev_`` record for a sent exchange, mark secrets, commit via callback."""
         request_model = HttpRequest(
             method=request.method,
-            url=str(request.url),
-            headers=dict(request.headers.items()),
+            url=url,
+            headers=_header_pairs(request.headers),
             body=body,
         )
         response_model = HttpResponse(
             status_code=response.status_code,
-            headers=dict(response.headers.items()),
+            headers=_header_pairs(response.headers),
             body=_decode_body(response.content),
         )
         evidence = HttpEvidence(
@@ -308,9 +320,9 @@ class ScopedHttpClient:
         if not self._secrets:
             return []
         paths: list[str] = []
-        for name, value in request.headers.items():
+        for index, (_, value) in enumerate(request.headers):
             if any(secret in value for secret in self._secrets):
-                paths.append(f'$.http.request.headers.{name}')
+                paths.append(f'$.http.request.headers[{index}][1]')
         if body is not None and any(secret in body for secret in self._secrets):
             paths.append('$.http.request.body')
         return paths

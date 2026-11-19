@@ -24,6 +24,7 @@ from partex.models import (
     ReviewSummary,
     Scope,
     Verification,
+    get_header,
 )
 from partex.storage import SCHEMA_VERSION, RunReader, RunStore, StoreError, surface_node_id
 
@@ -35,10 +36,12 @@ def _http(path: str = '/', *, secret: bool = False) -> HttpEvidence:
         id='',
         source=f'capture:{path}',
         http=HttpExchange(
-            request=HttpRequest(method='GET', url=f'https://app.example.test{path}', headers={'Cookie': 'session=abc'}),
-            response=HttpResponse(status_code=200, headers={'Content-Type': 'text/html'}, body=f'<p>{path}</p>'),
+            request=HttpRequest(
+                method='GET', url=f'https://app.example.test{path}', headers=[('Cookie', 'session=abc')]
+            ),
+            response=HttpResponse(status_code=200, headers=[('Content-Type', 'text/html')], body=f'<p>{path}</p>'),
         ),
-        secret_fields=['$.http.request.headers.Cookie'] if secret else [],
+        secret_fields=['$.http.request.headers[0][1]'] if secret else [],
     )
     return item.model_copy(update={'id': evidence_id(item)})
 
@@ -55,10 +58,11 @@ def _config() -> ConfigEvidence:
 def _finding(*evidence: Evidence, title: str = 'Missing HSTS') -> Finding:
     ids = [e.id for e in evidence]
     return Finding(
-        id=finding_id('header-security', title, ids),
+        id=finding_id('header-security', 'header:strict-transport-security', title, ids),
         check_id='header-security',
         check_version='1',
         severity='medium',
+        subject='header:strict-transport-security',
         title=title,
         description='d',
         evidence_ids=ids,
@@ -358,8 +362,8 @@ async def test_add_evidence_is_per_capture_and_idempotent(tmp_store: RunStore):
 
     stored = await tmp_store.evidence(run_id)
     assert stored == [first, second]
-    assert stored[0].secret_fields == ['$.http.request.headers.Cookie']  # cleartext + markers kept for replay
-    assert isinstance(stored[0], HttpEvidence) and stored[0].http.request.headers['Cookie'] == 'session=abc'
+    assert stored[0].secret_fields == ['$.http.request.headers[0][1]']  # cleartext + markers kept for replay
+    assert isinstance(stored[0], HttpEvidence) and get_header(stored[0].http.request.headers, 'Cookie') == 'session=abc'
 
 
 async def test_evidence_is_scoped_to_its_run(tmp_store: RunStore):

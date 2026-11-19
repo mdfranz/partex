@@ -5,7 +5,7 @@ Tests comply with the hermetic rule: no I/O, network, model, or storage access �
 the check is a pure function over validated evidence.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from partex.checks.header_security import (
     CHECK_ID,
@@ -13,7 +13,7 @@ from partex.checks.header_security import (
     HeaderSecurityCheck,
     _is_session_cookie,
 )
-from partex.ids import evidence_id
+from partex.ids import evidence_id, finding_id
 from partex.models import (
     ConfigEvidence,
     ConfigExcerpt,
@@ -27,18 +27,26 @@ from partex.models import (
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
+type _HeaderArg = Mapping[str, str] | list[tuple[str, str]] | None
+
+
+def _pairs(headers: _HeaderArg) -> list[tuple[str, str]]:
+    """Test convenience: a mapping for one-value-per-name cases, pairs for repeats."""
+    return list(headers.items()) if isinstance(headers, Mapping) else list(headers or [])
+
+
 def _http_evidence(
     method: str = 'GET',
     url: str = 'https://example.test/',
-    req_headers: dict[str, str] | None = None,
+    req_headers: _HeaderArg = None,
     status: int = 200,
-    resp_headers: dict[str, str] | None = None,
+    resp_headers: _HeaderArg = None,
     resp_body: str | None = '<html><body>OK</body></html>',
     source: str = 'test',
 ) -> HttpEvidence:
     """Build an HttpEvidence record with computed ID."""
-    req = HttpRequest(method=method, url=url, headers=req_headers or {})
-    resp = HttpResponse(status_code=status, headers=resp_headers or {}, body=resp_body)
+    req = HttpRequest(method=method, url=url, headers=_pairs(req_headers))
+    resp = HttpResponse(status_code=status, headers=_pairs(resp_headers), body=resp_body)
     ex = HttpExchange(request=req, response=resp)
     ev = HttpEvidence(id='placeholder', source=source, http=ex)
     # Assign the real evidence ID
@@ -698,3 +706,59 @@ def test_all_findings_have_valid_severity():
         assert len(f.title) > 0
         assert len(f.description) > 0
         assert len(f.remediation) > 0
+
+
+# ── Header representation (#39) ───────────────────────────────────────────────
+
+
+def test_lowercase_header_names_are_recognized():
+    """HTTP/2, HAR exports, and httpx2 lowercase names; a compliant response yields nothing."""
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'content-type': 'text/html',
+            'strict-transport-security': 'max-age=31536000; includeSubDomains',
+            'content-security-policy': "default-src 'self'",
+            'x-content-type-options': 'nosniff',
+        },
+    )
+    assert HeaderSecurityCheck().review([ev]) == []
+
+
+def test_each_set_cookie_is_reviewed_with_distinct_subjects():
+    """Two weak cookies on one response: same title and evidence, distinct subjects and IDs."""
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers=[
+            ('Content-Type', 'application/json'),
+            ('X-Content-Type-Options', 'nosniff'),
+            ('Strict-Transport-Security', 'max-age=31536000'),
+            ('Set-Cookie', 'session=a; Path=/'),
+            ('Set-Cookie', 'theme=dark'),
+            ('Set-Cookie', 'remember_token=b; Path=/'),
+        ],
+    )
+    findings = HeaderSecurityCheck().review([ev])
+    assert [f.subject for f in findings] == ['cookie:session', 'cookie:remember_token']
+    ids = {finding_id(f.check_id, f.subject, f.title, f.evidence_ids) for f in findings}
+    assert len(ids) == 2
+
+
+def test_every_finding_has_a_subject():
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Set-Cookie': 'sessionid=x',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Credentials': 'true',
+        },
+    )
+    subjects = {f.subject for f in HeaderSecurityCheck().review([ev])}
+    assert subjects == {
+        'header:strict-transport-security',
+        'header:content-security-policy',
+        'header:x-content-type-options',
+        'cookie:sessionid',
+        'header:access-control-allow-origin',
+    }
