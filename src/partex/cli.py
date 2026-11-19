@@ -15,6 +15,7 @@ import os
 import sys
 import warnings
 from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -165,6 +166,26 @@ def build_parser() -> argparse.ArgumentParser:
     checks = subparsers.add_parser('checks', parents=[common], help='list installed checks')
     checks.add_argument('--json', action='store_true', help='JSON output even on a TTY')
     checks.set_defaults(handler=_cmd_checks)
+
+    chat = subparsers.add_parser(
+        'chat', parents=[with_db], help='read-only review chat over a saved run (CLAI2 terminal, no plugins)'
+    )
+    chat.add_argument('run_id', help='run id (run_…)')
+    chat.add_argument(
+        '--model',
+        required=True,
+        help='pydantic-ai model string (e.g. gateway/anthropic:claude-sonnet-5-5), or a bare model name with '
+        '--gateway-route',
+    )
+    chat.add_argument(
+        '--gateway-route',
+        default=None,
+        help='Pydantic AI Gateway route serving a bare --model, e.g. doubleword for zai-org/GLM-5.3',
+    )
+    chat.add_argument(
+        '--no-briefing', action='store_true', help='open the chat without the opening model summary of the run'
+    )
+    chat.set_defaults(handler=_cmd_chat)
     return parser
 
 
@@ -388,6 +409,25 @@ def _cmd_checks(args: argparse.Namespace) -> int:
     else:
         for row in rows:
             print(f'{row["check_id"]:<24} {row["kind"]:<15} {row["version"]:<8} {row["title"]}')
+    return EXIT_OK
+
+
+# ── chat ──────────────────────────────────────────────────────────────────────
+
+
+def _cmd_chat(args: argparse.Namespace) -> int:
+    from .agent_adapter import run_chat
+    from .models_config import resolve_model
+
+    db_path = resolve_db_path(args.db)
+
+    async def check_run() -> None:
+        async with await RunReader.open(db_path) as reader:
+            await reader.get_run(args.run_id)
+
+    anyio.run(check_run)  # unknown store or run: exit 1 before a model is built or the terminal opens
+    model = resolve_model(args.model, gateway_route=args.gateway_route)
+    anyio.run(partial(run_chat, args.run_id, db_path, model, briefing=not args.no_briefing))
     return EXIT_OK
 
 
