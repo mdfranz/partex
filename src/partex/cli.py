@@ -27,6 +27,7 @@ from .errors import PartexError
 from .export import IncludeSecretsWarning, export_run_data, write_run_export
 from .ids import canonical_json
 from .registry import build_registry
+from .report import gather_report_payload, render_report_text
 from .storage import RunReader, RunRecord, RunStore
 
 DB_ENV = 'PARTEX_DB'
@@ -156,6 +157,12 @@ def build_parser() -> argparse.ArgumentParser:
     runs = subparsers.add_parser('runs', parents=[with_db], help='list runs')
     runs.add_argument('--json', action='store_true', help='JSON output even on a TTY')
     runs.set_defaults(handler=_cmd_runs)
+
+    report = subparsers.add_parser(
+        'report', parents=[with_db], help='cross-run rollup of findings, model spend, and tool calls'
+    )
+    report.add_argument('--json', action='store_true', help='JSON output even on a TTY')
+    report.set_defaults(handler=_cmd_report)
 
     show = subparsers.add_parser('show', parents=[with_db], help='export a run (secrets redacted by default)')
     show.add_argument('run_id', help='run id (run_…)')
@@ -332,6 +339,21 @@ def _cmd_runs(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_report(args: argparse.Namespace) -> int:
+    db_path = resolve_db_path(args.db)
+
+    async def go() -> dict[str, Any]:
+        async with await RunReader.open(db_path) as reader:
+            return await gather_report_payload(reader)
+
+    payload = anyio.run(go)
+    if _wants_json(args.json):
+        _print_json(payload)
+    else:
+        sys.stdout.write(render_report_text(payload))
+    return EXIT_OK
+
+
 # ── show ──────────────────────────────────────────────────────────────────────
 
 
@@ -347,6 +369,11 @@ def _render_text(payload: dict[str, Any], run_id: str) -> str:
         lines.append(f'requests spent: {run["requests_spent"]}  authorized: {run["authorized"]}')
     if run['error']:
         lines.append(f'error: {run["error"]}')
+    usage: list[dict[str, Any]] = payload['llm_usage']
+    if usage:
+        in_tok = sum(u['input_tokens'] for u in usage)
+        out_tok = sum(u['output_tokens'] for u in usage)
+        lines.append(f'model turns: {len(usage)}  tokens in/out: {in_tok}/{out_tok}')
     findings: list[dict[str, Any]] = payload['findings']
     lines.append(f'findings: {len(findings)}')
     for finding in findings:
