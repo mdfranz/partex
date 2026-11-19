@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# tmobile.sh: open a `partex agent` session on a target: baseline + version-disclosure, a briefing, then
+# probe.sh: open a `partex agent` session on a target: baseline + version-disclosure, a briefing, then
 # the CLAI2 terminal where you direct further GET/HEAD/OPTIONS probes and checks (model via the Gateway).
 #
-#   PARTEX_ATTESTATION='I own 192.168.12.1 and authorize this test, 2026-11-19' ./tmobile.sh
+#   PARTEX_ATTESTATION='I own 192.168.12.1 and authorize this test, 2026-11-19' ./probe.sh http://192.168.12.1/home
 #
+# Usage: ./probe.sh <target-url>   (not needed with CHAT_ONLY=1)
 # Required: PARTEX_ATTESTATION; PYDANTIC_AI_GATEWAY_API_KEY for the chat step.
-# Optional: TARGET_URL (default http://192.168.12.1/home), PARTEX_MODEL (default zai-org/GLM-5.3),
+# Optional: PARTEX_MODEL (default zai-org/GLM-5.3),
 #           PARTEX_GATEWAY_ROUTE (default doubleword; set empty when PARTEX_MODEL is a full model
 #           string such as gateway/anthropic:claude-sonnet-5-5), PARTEX_DB (default ./partex-probe.db),
 #           RUN_ID=run_… to let the session read an earlier run (--from), CHAT_ONLY=1 with RUN_ID to review
@@ -17,10 +18,10 @@
 set -euo pipefail
 export PYDANTIC_AI_NO_BANNER=${PYDANTIC_AI_NO_BANNER:-1}  # skip pydantic-ai's startup banner between findings and briefing
 
-TARGET_URL=${TARGET_URL:-http://192.168.12.1/home}
+TARGET_URL=${1:-}
 MODEL=${PARTEX_MODEL:-zai-org/GLM-5.3}
 ROUTE=${PARTEX_GATEWAY_ROUTE-doubleword}
-DB=${PARTEX_DB:-$PWD/partex-probe.db}
+DB=$(realpath -m "${PARTEX_DB:-partex-probe.db}")  # absolute, before the cd below
 cd "$(dirname "${BASH_SOURCE[0]}")"
 partex() { uv run --quiet partex "$@"; }
 
@@ -29,6 +30,7 @@ if [[ -n ${CHAT_ONLY:-} ]]; then  # review an earlier run read-only: no traffic
   exec uv run --quiet partex chat "$RUN_ID" --db "$DB" --model "$MODEL" ${ROUTE:+--gateway-route "$ROUTE"}
 fi
 
+[[ -n $TARGET_URL ]] || { echo "usage: $0 <target-url>" >&2; exit 2; }
 : "${PARTEX_ATTESTATION:?set PARTEX_ATTESTATION to who authorized testing $TARGET_URL}"
 [[ $TARGET_URL =~ ^(https?)://([^/:]+)(:([0-9]+))?(/.*)?$ ]] || { echo "bad TARGET_URL: $TARGET_URL" >&2; exit 1; }
 host=${BASH_REMATCH[2]} port=${BASH_REMATCH[4]:-$([[ ${BASH_REMATCH[1]} == https ]] && echo 443 || echo 80)}

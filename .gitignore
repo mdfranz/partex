@@ -11,11 +11,14 @@ __pycache__/
 *~
 
 # Local engagement/probe databases (SQLite + WAL sidecars) and per-machine MCP config.
-*.db
-*.db-shm
-*.db-wal
-*.db-journal
+/*.db
+/*.db-shm
+/*.db-wal
+/*.db-journal
 .mcp.json
+.env
+.env.*
+*.log
 
 # Tool caches and build output (top-level dirs are no longer allowlisted).
 .venv/
@@ -27,3 +30,17 @@ __pycache__/
 build/
 dist/
 node_modules/
+.venv*/
+.tox/
+.nox/
+htmlcov/
+.worktrees/
+.idea/
+.vscode/
+
+# Local reference clones (pydantic-ai, CLAI2, ...) and sibling worktrees.
+/pydantic-ai/
+/pydantic-ai-*/
+/clai2/
+/pydantic-clai2/
+/pydantic-monty*/
