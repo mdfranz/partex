@@ -33,6 +33,9 @@ While working:
 - `pydantic-*` and `pydantic-monty*` come only from sibling checkouts `../pydantic-ai` and
   `../monty` (PLAN §3.1), at the revisions pinned in DEPS.md (pins land with #1). Never add them from PyPI and
   never point `pyproject.toml` at another path — symlink the checkouts instead.
+- uv enforces a **2-day cool-off** (`[tool.uv] exclude-newer = "2 days"` in `pyproject.toml`):
+  nothing uploaded to PyPI in the last 48 hours can enter `uv.lock`. Don't remove it or set a
+  global override; an urgent fix gets a reviewed per-package `exclude-newer-package` entry.
 - Python floor is **3.14**: use modern syntax (PEP 695 `type` aliases and generics); never add
   `from __future__ import annotations`.
 - Style: ruff, single quotes, 120 columns; pyright strict.
