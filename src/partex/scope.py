@@ -9,10 +9,20 @@ is ambiguous under RFC 3986 vs WHATWG semantics (backslashes, userinfo,
 percent-encoded hosts, control characters, unbracketed IPv6), refuse rather
 than guess — a refusal costs one blocked request, a wrong guess costs scope
 bypass.  A URL is in scope only when *every* interpretation a server might
-apply (raw, percent-decoded, dot-segment-resolved) is in scope.
+apply is in scope: raw, percent-decoded, dot segments resolved, repeated
+slashes collapsed, ``;`` matrix parameters stripped, and trailing dots/spaces
+stripped from segments (IIS/Windows), in every combination.
+
+Matching is on path-segment boundaries: ``/api`` covers ``/api`` and
+``/api/...`` but not ``/apix``; a prefix ending in ``/`` covers only its
+children.  Exclusions match case-insensitively (any casing is excluded);
+prefixes stay case-sensitive, so a differently-cased path is refused rather
+than allowed.  A path still percent-encoded after one decode (double encoding)
+or containing control/format characters once decoded is refused outright.
 """
 
 import ipaddress
+import re
 import unicodedata
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
@@ -108,6 +118,10 @@ def normalize_host(host: str) -> str:
     return host
 
 
+_DOUBLE_ENCODED = re.compile(r'%[0-9A-Fa-f]{2}')
+_REPEATED_SLASHES = re.compile(r'/{2,}')
+
+
 def _remove_dot_segments(path: str) -> str:
     """Resolve ``.`` and ``..`` segments per RFC 3986 §5.2.4 (conservative form)."""
     output: list[str] = []
@@ -119,10 +133,42 @@ def _remove_dot_segments(path: str) -> str:
                 output.pop()
             continue
         output.append(segment)
-    result = '/'.join(output) or '/'
-    if not result.startswith('/'):
-        result = '/' + result
-    return result
+    return '/'.join(output) or '/'  # output[0] is the empty segment before the leading '/', never popped
+
+
+def _collapse_slashes(path: str) -> str:
+    """``//`` and longer runs → ``/`` (most servers and frameworks normalize this way)."""
+    return _REPEATED_SLASHES.sub('/', path)
+
+
+def _strip_matrix_params(path: str) -> str:
+    """Drop ``;param`` suffixes from every segment (Java servlet containers ignore them when routing)."""
+    return '/'.join(segment.split(';', 1)[0] for segment in path.split('/'))
+
+
+def _strip_trailing_dots_and_spaces(path: str) -> str:
+    """Strip trailing ``.`` and space from every segment except ``.``/``..`` (IIS and Windows file APIs do)."""
+    return '/'.join(segment if segment in ('.', '..') else segment.rstrip('. ') for segment in path.split('/'))
+
+
+_PATH_INTERPRETATIONS = (
+    _remove_dot_segments,
+    _collapse_slashes,
+    _strip_matrix_params,
+    _strip_trailing_dots_and_spaces,
+)
+
+
+def _interpretations(*paths: str) -> frozenset[str]:
+    """Every path reachable from *paths* by any sequence of the normalizations a server might apply."""
+    seen: set[str] = set()
+    pending = list(paths)
+    while pending:
+        path = pending.pop()
+        if path not in seen:
+            seen.add(path)
+            pending.extend(normalize(path) for normalize in _PATH_INTERPRETATIONS)
+    return frozenset(seen)  # every normalization keeps the leading '/' the raw path is required to have
 
 
 def parse_scoped_url(url: str) -> ScopedUrl:
@@ -149,11 +195,11 @@ def parse_scoped_url(url: str) -> ScopedUrl:
         raise _refuse('userinfo in authority')
     if netloc.startswith('['):
         close = netloc.find(']')
-        if close == -1:
+        if close == -1:  # pragma: no cover -- urlsplit already raises 'Invalid IPv6 URL'; kept as a backstop
             raise _refuse('malformed IPv6 authority')
         host_part, port_part = netloc[: close + 1], netloc[close + 1 :]
         if port_part:
-            if not port_part.startswith(':'):
+            if not port_part.startswith(':'):  # pragma: no cover -- urlsplit already raises; kept as a backstop
                 raise _refuse(f'garbage after IPv6 literal {port_part!r}')
             port_part = port_part[1:]
     elif netloc.count(':') > 1:
@@ -170,26 +216,42 @@ def parse_scoped_url(url: str) -> ScopedUrl:
     else:
         port = _DEFAULT_PORTS[scheme]
     raw_path = parts.path or '/'
-    if not raw_path.startswith('/'):
+    if not raw_path.startswith('/'):  # pragma: no cover -- RFC 3986: a path after an authority is empty or absolute
         raise _refuse(f'path {raw_path!r} is not absolute')
     decoded_path = unquote(raw_path)
-    candidate_paths = frozenset(
-        {raw_path, decoded_path, _remove_dot_segments(raw_path), _remove_dot_segments(decoded_path)}
-    )
+    if _DOUBLE_ENCODED.search(decoded_path):
+        raise _refuse(f'path {raw_path!r} is still percent-encoded after one decode (double encoding)')
+    for char in decoded_path:
+        if ord(char) < 0x20 or ord(char) == 0x7F or unicodedata.category(char) in ('Cc', 'Cf'):
+            raise _refuse(f'control or format character in decoded path ({char!r})')
+    candidate_paths = _interpretations(raw_path, decoded_path)
     return ScopedUrl(scheme=scheme, host=host, port=port, path=raw_path, candidate_paths=candidate_paths)
+
+
+def path_under(path: str, prefix: str) -> bool:
+    """Whether *path* is *prefix* or lies under it, on a path-segment boundary.
+
+    ``/api`` covers ``/api``, ``/api/`` and ``/api/users`` but not ``/apix``; a prefix that ends
+    in ``/`` (including ``/`` itself) covers exactly the paths that start with it.
+    """
+    if prefix.endswith('/'):
+        return path.startswith(prefix)
+    return path == prefix or path.startswith(prefix + '/')
 
 
 def _path_allowed(scope: Scope, path: str) -> bool:
     """Return whether *path* matches an allowed prefix and no exclusion.
 
-    Exclusions win over prefixes (PLAN §4.2 rule 3).
+    Exclusions win over prefixes (PLAN §4.2 rule 3) and ignore case, so no casing of an
+    excluded path gets through; prefixes are case-sensitive, so an unusual casing is refused.
     """
+    folded = path.casefold()
     for exclusion in scope.exclusions:
-        if path.startswith(exclusion):
+        if path_under(folded, exclusion.casefold()):
             return False
     if not scope.path_prefixes:
         return True
-    return any(path.startswith(prefix) for prefix in scope.path_prefixes)
+    return any(path_under(path, prefix) for prefix in scope.path_prefixes)
 
 
 def check_url(scope: Scope, url: str) -> None:
@@ -230,7 +292,7 @@ def validate_scope(scope: Scope) -> list[str]:
             if not entry or not entry.startswith('/'):
                 problems.append(f'{field_name} entry {entry!r} must be an absolute path')
     for exclusion in scope.exclusions:
-        if scope.path_prefixes and not any(exclusion.startswith(p) for p in scope.path_prefixes):
+        if scope.path_prefixes and not any(path_under(exclusion, p) for p in scope.path_prefixes):
             problems.append(f'exclusion {exclusion!r} is not within any path prefix')
     if scope.max_rps > MAX_RPS_CEILING:
         problems.append(f'max_rps {scope.max_rps} exceeds ceiling {MAX_RPS_CEILING}')
