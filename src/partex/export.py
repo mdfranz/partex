@@ -7,7 +7,7 @@ from typing import Any
 
 from .ids import canonical_json
 from .models import CoverageEntry, Evidence, Finding, ReviewSummary, Severity, Verification, redact
-from .storage import RunReader, RunRecord, RunStore, ToolCallRecord
+from .storage import LlmUsageRecord, RunReader, RunRecord, RunStore, ToolCallRecord
 
 __all__ = [
     'SEVERITY_RANK',
@@ -63,6 +63,20 @@ def _serialize_tool_call(call: ToolCallRecord) -> dict[str, Any]:
     }
 
 
+def _serialize_llm_usage(usage: LlmUsageRecord) -> dict[str, Any]:
+    """Serialize one model turn without the non-deterministic ``created_at`` timestamp."""
+    return {
+        'cache_read_tokens': usage.cache_read_tokens,
+        'cache_write_tokens': usage.cache_write_tokens,
+        'input_tokens': usage.input_tokens,
+        'latency_ms': usage.latency_ms,
+        'model': usage.model,
+        'output_tokens': usage.output_tokens,
+        'role': usage.role,
+        'status': usage.status,
+    }
+
+
 def _finding_sort_key(finding: Finding) -> tuple[int, str, str]:
     """Sort findings by (severity rank desc, check_id asc, finding_id asc)."""
     return (-SEVERITY_RANK[finding.severity], finding.check_id, finding.id)
@@ -73,6 +87,7 @@ def build_export_payload(
     *,
     evidence: Sequence[Evidence] = (),
     findings: Sequence[Finding] = (),
+    llm_usage: Sequence[LlmUsageRecord] = (),
     verifications: Sequence[Verification] = (),
     coverage: Sequence[CoverageEntry] = (),
     tool_calls: Sequence[ToolCallRecord] = (),
@@ -98,6 +113,7 @@ def build_export_payload(
         'coverage': [entry.model_dump(mode='json') for entry in sorted_coverage],
         'evidence': serialized_evidence,
         'findings': [finding.model_dump(mode='json') for finding in sorted_findings],
+        'llm_usage': [_serialize_llm_usage(u) for u in llm_usage],
         'run': _serialize_run(run),
         'summary': None if summary is None else summary.model_dump(mode='json'),
         'tool_calls': [_serialize_tool_call(call) for call in tool_calls],
@@ -118,11 +134,13 @@ async def export_run_data(
     verifications = await store.verifications(run_id)
     coverage = await store.coverage(run_id)
     tool_calls = await store.tool_calls(run_id)
+    llm_usage = await store.llm_usage(run_id)
     summary = await store.summary(run_id)
     return build_export_payload(
         run,
         evidence=evidence,
         findings=findings,
+        llm_usage=llm_usage,
         verifications=verifications,
         coverage=coverage,
         tool_calls=tool_calls,

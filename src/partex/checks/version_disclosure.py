@@ -9,14 +9,23 @@ Findings per ``skills/version-disclosure/SKILL.md``: a header that discloses a
 product/runtime identifier **with explicit version digits** (``info``/``low``),
 and an error body exposing stack traces or absolute paths (``medium``).  Generic
 product names without version digits are the skill's non-finding rule — they do
-not become drafts.  No ``verify_recipe`` yet: #22 adds the single-request replay.
+not become drafts.  ``verify_recipe``/#22: the single-request replay and the
+same-class matcher live here (``skills/.../verification-criteria.md`` §3).
 """
 
 import re
 from collections.abc import Sequence
 from urllib.parse import urlsplit
 
-from ..models import Evidence, FindingDraft, HttpEvidence, get_header
+from ..models import (
+    Evidence,
+    Finding,
+    FindingDraft,
+    HttpEvidence,
+    VerificationRecipe,
+    VerificationRequest,
+    get_header,
+)
 from . import TargetClient
 
 CHECK_ID = 'version-disclosure'
@@ -128,9 +137,37 @@ class VersionDisclosureCheck:
             )
         return drafts
 
-    def verify_recipe(self, finding: object) -> None:
-        """No recipe yet — findings stay ``reported`` until #22 adds the replay."""
-        return
+    def verify_recipe(self, finding: Finding, evidence: Sequence[Evidence]) -> VerificationRecipe | None:
+        """The single-request replay: re-send the exact exchange that produced the finding."""
+        captured = [item for item in evidence if isinstance(item, HttpEvidence)]
+        if not captured:
+            return None
+        original = captured[0]
+        return VerificationRecipe(
+            description=(
+                f'Replay {original.http.request.method} {original.http.request.url} and re-test '
+                f'the {finding.subject} finding ({finding.title}).'
+            ),
+            requests=[
+                VerificationRequest(
+                    method=original.http.request.method,
+                    # Full URL, not a bare path: the runner's scope gate needs
+                    # scheme/host/port, and the recipe must replay the exact target.
+                    path=original.http.request.url,
+                )
+            ],
+        )
+
+    def verify_match(self, finding: Finding, original: HttpEvidence, replay: HttpEvidence) -> bool:
+        """Confirmed iff the replay still exhibits the finding's class (skill §3)."""
+        if finding.subject.startswith('header:'):
+            header = finding.subject.removeprefix('header:')
+            value = get_header(replay.http.response.headers, header)
+            return value is not None and bool(_VERSION_DIGITS.search(value))
+        if finding.subject == 'error-page':
+            body = replay.http.response.body or ''
+            return any(marker in body for marker in STACK_MARKERS)
+        return False
 
 
 version_disclosure_check = VersionDisclosureCheck()

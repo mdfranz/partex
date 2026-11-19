@@ -26,6 +26,8 @@ from .engine import CheckSelectionError
 from .errors import PartexError
 from .export import IncludeSecretsWarning, export_run_data, write_run_export
 from .ids import canonical_json
+from .registry import build_registry
+from .report import gather_report_payload, render_report_text
 from .storage import RunReader, RunRecord, RunStore
 
 DB_ENV = 'PARTEX_DB'
@@ -156,6 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
     runs.add_argument('--json', action='store_true', help='JSON output even on a TTY')
     runs.set_defaults(handler=_cmd_runs)
 
+    report = subparsers.add_parser(
+        'report', parents=[with_db], help='cross-run rollup of findings, model spend, and tool calls'
+    )
+    report.add_argument('--json', action='store_true', help='JSON output even on a TTY')
+    report.set_defaults(handler=_cmd_report)
+
     show = subparsers.add_parser('show', parents=[with_db], help='export a run (secrets redacted by default)')
     show.add_argument('run_id', help='run id (run_…)')
     show.add_argument('--format', choices=('json', 'text'), default=None, help='default: text on a TTY, json otherwise')
@@ -165,7 +173,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     checks = subparsers.add_parser('checks', parents=[common], help='list installed checks')
     checks.add_argument('--json', action='store_true', help='JSON output even on a TTY')
+    checks.add_argument(
+        '--skill-dir', action='append', default=[], metavar='DIR', help='extra skill root (data only; repeatable)'
+    )
     checks.set_defaults(handler=_cmd_checks)
+
+    verify = subparsers.add_parser(
+        'verify', parents=[with_db], help='(re)run the verification replay for one finding (requires --authorized)'
+    )
+    verify.add_argument('run_id', help='the run holding the finding')
+    verify.add_argument('finding_id', help='the finding to re-verify')
+    verify.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
+    verify.add_argument('--json', action='store_true', help='JSON output even on a TTY')
+    verify.set_defaults(handler=_cmd_verify)
 
     chat = subparsers.add_parser(
         'chat', parents=[with_db], help='read-only review chat over a saved run (CLAI2 terminal, no plugins)'
@@ -348,6 +368,21 @@ def _cmd_runs(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_report(args: argparse.Namespace) -> int:
+    db_path = resolve_db_path(args.db)
+
+    async def go() -> dict[str, Any]:
+        async with await RunReader.open(db_path) as reader:
+            return await gather_report_payload(reader)
+
+    payload = anyio.run(go)
+    if _wants_json(args.json):
+        _print_json(payload)
+    else:
+        sys.stdout.write(render_report_text(payload))
+    return EXIT_OK
+
+
 # ── show ──────────────────────────────────────────────────────────────────────
 
 
@@ -363,6 +398,11 @@ def _render_text(payload: dict[str, Any], run_id: str) -> str:
         lines.append(f'requests spent: {run["requests_spent"]}  authorized: {run["authorized"]}')
     if run['error']:
         lines.append(f'error: {run["error"]}')
+    usage: list[dict[str, Any]] = payload['llm_usage']
+    if usage:
+        in_tok = sum(u['input_tokens'] for u in usage)
+        out_tok = sum(u['output_tokens'] for u in usage)
+        lines.append(f'model turns: {len(usage)}  tokens in/out: {in_tok}/{out_tok}')
     findings: list[dict[str, Any]] = payload['findings']
     lines.append(f'findings: {len(findings)}')
     for finding in findings:
@@ -412,15 +452,16 @@ def _check_kind(check: Any) -> str:
 
 
 def _cmd_checks(args: argparse.Namespace) -> int:
-    registry = engine.installed_checks()
+    registry = build_registry(args.skill_dir)
     rows = [
         {
             'check_id': check_id,
             'kind': _check_kind(check),
             'version': str(getattr(check, 'version', '')),
             'title': str(getattr(check, 'title', '')),
+            'skills': registry.skills_for(check_id),
         }
-        for check_id, check in registry.items()
+        for check_id, check in registry.checks.items()
     ]
     if _wants_json(args.json):
         _print_json(rows)
@@ -428,8 +469,11 @@ def _cmd_checks(args: argparse.Namespace) -> int:
         print('no checks installed')
     else:
         for row in rows:
-            print(f'{row["check_id"]:<24} {row["kind"]:<15} {row["version"]:<8} {row["title"]}')
-    return EXIT_OK
+            skills = ','.join(row['skills']) or '-'
+            print(f'{row["check_id"]:<24} {row["kind"]:<15} {row["version"]:<8} {row["title"]}  [skills: {skills}]')
+    for diagnostic in registry.diagnostics:
+        print(f'partex: {diagnostic.render()}', file=sys.stderr)
+    return EXIT_FATAL if registry.errors else EXIT_OK
 
 
 # ── chat ──────────────────────────────────────────────────────────────────────
@@ -485,6 +529,38 @@ def _cmd_agent(args: argparse.Namespace) -> int:
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    from .verify import VerifyResult, run_verification
+
+    db_path = resolve_db_path(args.db)
+
+    async def go() -> VerifyResult:
+        async with await RunStore.open(db_path) as store:
+            return await run_verification(args.run_id, args.finding_id, store, authorized=bool(args.authorized))
+
+    result = anyio.run(go)  # PartexError → main() prints `partex: <rule>: <msg>` and exits 1
+    if _wants_json(args.json):
+        _print_json(
+            {
+                'run_id': result.run_id,
+                'finding_id': result.finding_id,
+                'verification_id': result.verification_id,
+                'verdict': result.verdict,
+                'finding_status': result.finding_status,
+                'requests_spent': result.requests_spent,
+                'replay_evidence_ids': list(result.replay_evidence_ids),
+                'detail': result.detail,
+                'counterevidence': result.counterevidence,
+            }
+        )
+    else:
+        print(f'finding {result.finding_id}: {result.verdict} (now {result.finding_status})')
+        print(f'detail: {result.detail}')
+        print(f'counterevidence: {result.counterevidence}')
+    # A recorded verdict is a completed command (§6): confirmed, not_reproduced and inconclusive all exit 0.
+    return EXIT_OK
 
 
 def main(argv: Sequence[str] | None = None) -> int:
