@@ -1,4 +1,4 @@
-"""Run lifecycle — passive path (PLAN §6, §6.1, §7.1).
+"""Run lifecycle — passive and live paths (PLAN §6, §6.1, §7.1).
 
 ``run_review`` turns an offline bundle into committed, evidence-backed findings::
 
@@ -13,9 +13,11 @@
 
 The engine is the only writer: checks receive validated evidence and return drafts; they never see
 the store. Results are assembled in selection order, so worker count and completion order never
-change what is stored. No model, socket, or network call happens on this path.
+change what is stored. The passive path makes no model, socket, or network call; the live path
+opens sockets only through the scoped target client.
 """
 
+import hashlib
 import importlib.metadata
 import os
 from collections.abc import Mapping, Sequence
@@ -29,10 +31,12 @@ from pydantic import ValidationError
 
 from .bundle import load_bundle
 from .checks import PassiveCheck
-from .errors import PartexError, ValidationFailed
+from .engagement import MANIFEST_NAME, check_credentials_available, load_engagement
+from .errors import BudgetExhausted, PartexError, ScopeViolation, ValidationFailed
 from .ids import finding_id
-from .models import Evidence, Finding, FindingDraft
+from .models import Evidence, Finding, FindingDraft, HttpEvidence
 from .storage import RunState, RunStore
+from .target import ScopedHttpClient
 
 ENTRY_POINT_GROUP = 'partex.checks'
 MAX_DRAFTS_PER_CHECK = 1000
@@ -262,3 +266,178 @@ def _validate_draft(check: PassiveCheck, position: int, raw: Any) -> FindingDraf
             check.check_id, f'draft {position} claims check_version {draft.check_version!r}, check is {check.version!r}'
         )
     return draft
+
+
+# ── Live run (issue #21; PLAN §6.1 live policy, §4.2 rule 5) ───────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class TestResult:
+    """Outcome of :func:`run_test`. ``findings`` is empty unless ``state == 'checks_complete'``."""
+
+    run_id: str
+    state: RunState
+    selected_checks: tuple[str, ...]
+    findings: tuple[Finding, ...] = ()
+    requests_spent: int = 0
+    authorized: bool = False
+    evidence_count: int = 0
+    error: str | None = None
+    """Diagnostic for ``invalid`` (prefixed with the rule code) or ``checks_failed``."""
+    rule_code: str | None = None
+    failed_check: str | None = None
+    skipped_checks: tuple[str, ...] = field(default=())
+    """Selected checks that did not run: ``applies_to`` false, or cut short by budget."""
+    budget_exhausted: bool = field(default=False)
+    """True when ``max_requests`` ended active work cleanly (``checks_complete``, not failure)."""
+
+
+def select_active_checks(registry: Mapping[str, Any], selection: Sequence[str]) -> list[Any]:
+    """Resolve *selection* (ordered, de-duplicated) to active checks, or raise :class:`CheckSelectionError`."""
+    ordered = list(dict.fromkeys(selection))
+    if not ordered:
+        raise CheckSelectionError('no checks selected', rule_code='empty-selection')
+    unknown = [check_id for check_id in ordered if check_id not in registry]
+    if unknown:
+        available = ', '.join(sorted(registry)) or '(none installed)'
+        raise CheckSelectionError(
+            f'unknown check(s): {", ".join(unknown)}; available: {available}', rule_code='unknown-check'
+        )
+    not_active = [check_id for check_id in ordered if not callable(getattr(registry[check_id], 'probe', None))]
+    if not_active:
+        raise CheckSelectionError(
+            f'not active check(s), cannot run on a live target: {", ".join(not_active)}', rule_code='not-active'
+        )
+    return [registry[check_id] for check_id in ordered]
+
+
+def _manifest_fingerprint(engagement_path: str | Path) -> str:
+    """sha256 over the engagement manifest file bytes (dir or file path both accepted)."""
+    path = Path(engagement_path)
+    if path.is_dir():
+        path = path / MANIFEST_NAME
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+async def run_test(
+    engagement_path: str | Path,
+    store: RunStore,
+    checks: Sequence[str],
+    *,
+    authorized: bool,
+    registry: Mapping[str, Any] | None = None,
+) -> TestResult:
+    """Run the live path against the engagement at *engagement_path*.
+
+    Order of gates, all before any socket: check selection, the ``--authorized``
+    flag (E2 CLI half), engagement validation (E1–E7), and credential presence
+    (E4/E7 run-start half). Then: baseline capture, active checks in selection
+    order, evidence committed **at capture time** and findings **per check** —
+    a crash or budget exhaustion keeps everything already paid for (§6.1).
+    """
+    registry = installed_checks() if registry is None else registry
+    selected = select_active_checks(registry, checks)
+    selected_ids = tuple(check.check_id for check in selected)
+
+    async def invalid(rule_code: str, error: str) -> TestResult:
+        run_id = await store.create_run(
+            input_kind='engagement',
+            input_ref=str(engagement_path),
+            input_sha256='',
+            engine_version=engine_version(),
+            selected_checks=selected_ids,
+        )
+        message = f'{rule_code}: {error}'
+        await store.set_state(run_id, 'invalid', error=message)
+        return TestResult(run_id, 'invalid', selected_ids, error=message, rule_code=rule_code)
+
+    if not authorized:
+        return await invalid('unauthorized', '--authorized is required for every live command')
+
+    try:
+        engagement = await anyio.to_thread.run_sync(load_engagement, engagement_path)
+    except ValidationFailed as exc:
+        return await invalid(exc.rule_code or 'engagement-invalid', str(exc))
+
+    missing = check_credentials_available(engagement)
+    if missing:
+        return await invalid('credential-missing', f'credential env vars not set: {", ".join(missing)}')
+
+    run_id = await store.create_run(
+        input_kind='engagement',
+        input_ref=str(engagement_path),
+        input_sha256=_manifest_fingerprint(engagement_path),
+        engine_version=engine_version(),
+        selected_checks=selected_ids,
+        authorized=True,
+        scope_snapshot=engagement.scope,
+    )
+
+    captured: list[Evidence] = []
+    findings: list[Finding] = []
+    skipped: list[str] = []
+    done: set[str] = set()
+    budget_exhausted = False
+
+    async def on_capture(evidence: HttpEvidence) -> None:
+        # Capture-time commit: one small transaction per exchange (§6.1), so a
+        # mid-run crash discards nothing already sent or received.
+        await store.add_evidence(run_id, evidence)
+        await store.add_requests_spent(run_id, 1)
+        captured.append(evidence)
+
+    client = ScopedHttpClient(engagement, source=f'capture:{run_id}', on_capture=on_capture)
+    try:
+        try:
+            await client.request('GET', engagement.target.base_url)
+            for check in selected:
+                if not check.applies_to(captured):
+                    skipped.append(check.check_id)
+                    done.add(check.check_id)
+                    continue
+                try:
+                    drafts = await check.probe(captured, client)
+                except BudgetExhausted:
+                    # Rule 5: exhaustion ends active work cleanly, not as failure.
+                    budget_exhausted = True
+                    break
+                except ScopeViolation as exc:
+                    raise CheckFailed(check.check_id, f'probe left the engagement scope: {exc}') from exc
+                except PartexError as exc:
+                    raise CheckFailed(check.check_id, f'probe failed: {exc}') from exc
+                except Exception as exc:
+                    raise CheckFailed(check.check_id, f'raised {type(exc).__name__}: {exc}') from exc
+                committed = _finalize([check], [drafts], captured)
+                await store.commit_findings(run_id, committed)
+                findings.extend(committed)
+                done.add(check.check_id)
+        except CheckFailed as exc:
+            await store.set_state(run_id, 'checks_failed', error=str(exc))
+            return TestResult(
+                run_id,
+                'checks_failed',
+                selected_ids,
+                findings=tuple(findings),
+                requests_spent=client.requests_spent,
+                authorized=True,
+                evidence_count=len(captured),
+                error=str(exc),
+                rule_code=exc.rule_code,
+                failed_check=exc.check_id,
+                skipped_checks=tuple(skipped),
+            )
+        skipped.extend(check.check_id for check in selected if check.check_id not in done)
+        await store.set_state(run_id, 'checks_complete')
+        return TestResult(
+            run_id,
+            'checks_complete',
+            selected_ids,
+            findings=tuple(findings),
+            requests_spent=client.requests_spent,
+            authorized=True,
+            evidence_count=len(captured),
+            skipped_checks=tuple(skipped),
+            budget_exhausted=budget_exhausted,
+        )
+    finally:
+        await client.aclose()

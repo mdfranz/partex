@@ -22,6 +22,9 @@ class TargetClient(Protocol):
     The real implementation is :class:`partex.target.ScopedHttpClient` — the only engine module
     that opens sockets.  Every outbound request is scope-validated at send time (§4.2).  Checks
     receive this handle; they never construct their own HTTP stack.
+
+    A request returns the captured exchange as evidence — checks need the ``ev_*`` id to cite
+    in drafts — and the scope gate needs the full URL, not a bare path (#20, #39).
     """
 
     async def request(
@@ -32,11 +35,11 @@ class TargetClient(Protocol):
         headers: HeaderInput | None = None,
         body: str | None = None,
     ) -> HttpEvidence:
-        """Send a scoped request to absolute *url* and return the captured exchange.
+        """Send a scoped request to absolute *url* and return the captured exchange as evidence.
 
-        The returned evidence is already committed by the engine, so a check cites
-        ``evidence.id`` in its drafts.  Scope violation, budget exhaustion, and transport
-        errors raise through the engine's error taxonomy (§9).
+        A check cites ``evidence.id`` in its drafts; ``secret_fields`` are already marked on the
+        returned record.  Scope violation, budget exhaustion, and transport errors raise through
+        the engine's error taxonomy (§9).
         """
         ...
 
@@ -60,6 +63,7 @@ class PassiveCheck(Protocol):
 class ActiveCheck(Protocol):
     """Live probe check — sends traffic through the scoped ``TargetClient``.
 
+    ``probe`` is async because the client is (anyio); the engine awaits it.
     Active checks produce findings that may carry a ``verify_recipe`` for later
     replayable verification.
     """
