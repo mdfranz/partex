@@ -371,6 +371,7 @@ def test_show_text_includes_error_verifications_and_summary() -> None:
         },
         'evidence': [],
         'findings': [],
+        'llm_usage': [],
         'verifications': [{'id': 'vf_1', 'verdict': 'confirmed', 'finding_id': 'fn_1'}],
         'summary': {'narrative': 'All good.'},
     }
@@ -600,3 +601,26 @@ def test_chat_bare_model_without_route_exits_1(
 
 def test_chat_requires_model(capsys: pytest.CaptureFixture[str], db: Path) -> None:
     assert run(capsys, 'chat', 'run_x', '--db', str(db))[0] == cli.EXIT_USAGE
+
+
+def test_report_empty_store_exits_ok(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    async def create() -> None:
+        async with await RunStore.open(db):
+            pass
+
+    anyio.run(create)
+    code, out, _ = run(capsys, 'report', '--db', str(db))
+    assert code == cli.EXIT_OK
+    payload = json.loads(out)
+    assert payload['runs']['total'] == 0
+    assert payload['findings']['total'] == 0
+
+
+def test_report_rolls_up_a_reviewed_run(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    assert review_run_id(capsys, db, VALID_BUNDLE)  # seed one reviewed run
+    code, out, _ = run(capsys, 'report', '--db', str(db))
+    assert code == cli.EXIT_OK
+    payload = json.loads(out)
+    assert payload['runs']['total'] == 1
+    assert payload['findings']['total'] >= 1
+    assert any(check['check_id'] == 'header-security' for check in payload['findings']['by_check'])
