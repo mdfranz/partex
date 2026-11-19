@@ -144,6 +144,7 @@ def block_telemetry_export() -> Generator[None]:
     mp = pytest.MonkeyPatch()
     mp.delenv('LOGFIRE_TOKEN', raising=False)
     mp.delenv('LOGFIRE_SEND_TO_LOGFIRE', raising=False)
+    mp.setenv('PARTEX_LOG_FILE', 'off')  # tests never write the default per-process trace log
     real_configure(send_to_logfire=False, console=False)
     mp.setattr(logfire, 'configure', guarded_configure)
     try:
