@@ -8,8 +8,9 @@
 # Usage: ./partex.sh [options] <target-url>   |   ./partex.sh list [-d DB]       (flags override the environment variables in [])
 #   -a, --attestation TEXT   who authorized testing the target [PARTEX_ATTESTATION]; prompted for if unset
 #   -m, --model NAME         model [PARTEX_MODEL, default zai-org/GLM-5.3]
-#   -r, --route NAME         gateway route [PARTEX_GATEWAY_ROUTE, default doubleword]; --route '' when the
-#                            model is a full string such as gateway/anthropic:claude-sonnet-5-5
+#   -r, --route NAME         gateway route for a bare model name [PARTEX_GATEWAY_ROUTE, default doubleword]. A
+#                            full model string (anything with a ':', e.g. openai:gpt-5 or
+#                            gateway/anthropic:claude-sonnet-5-5) uses no route unless you pass one.
 #   -d, --db PATH            database [PARTEX_DB, default ./partex-probe.db]
 #   -f, --from RUN_ID        let the new session read an earlier run [RUN_ID]
 #       --resume [RUN_ID]    read-only chat on an earlier run, no traffic and no target URL needed; the
@@ -17,7 +18,8 @@
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
 #       --no-tui             run `partex test` + show only [NO_TUI=1]
 #   -h, --help
-# Required: PYDANTIC_AI_GATEWAY_API_KEY for the chat step.
+# Required for the chat step: PYDANTIC_AI_GATEWAY_API_KEY when the model goes through the Gateway (a bare model
+# name, or gateway/...); a direct provider string such as openai:... needs that provider's own key (OPENAI_API_KEY).
 #
 # Traffic: the session opens with 3 GETs (TARGET_URL, /robots.txt, /partex-nonexistent-probe-0); after that
 # only what you ask for in the chat (GET/HEAD/OPTIONS). 2 req/s, budget 50 per session, host and port locked
@@ -29,6 +31,7 @@ usage() { sed -n '/^# Usage:/,/^#   -h/s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 TARGET_URL=
 MODEL=${PARTEX_MODEL:-zai-org/GLM-5.3}
 ROUTE=${PARTEX_GATEWAY_ROUTE-doubleword}
+ROUTE_SET=${PARTEX_GATEWAY_ROUTE+1}
 DB=${PARTEX_DB:-partex-probe.db}
 ATTESTATION=${PARTEX_ATTESTATION:-}
 LIST=
@@ -39,7 +42,7 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     -a|--attestation) ATTESTATION=${2?$1 needs a value}; shift 2 ;;
     -m|--model) MODEL=${2?$1 needs a value}; shift 2 ;;
-    -r|--route) ROUTE=${2?$1 needs a value}; shift 2 ;;
+    -r|--route) ROUTE=${2?$1 needs a value}; ROUTE_SET=1; shift 2 ;;
     -d|--db) DB=${2?$1 needs a value}; shift 2 ;;
     -f|--from) RUN_ID=${2?$1 needs a value}; shift 2 ;;
     --resume) RESUME=1; shift; if [[ ${1:-} == run_* ]]; then RUN_ID=$1; shift; fi ;;
@@ -53,6 +56,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ $# -eq 0 || -n $TARGET_URL ]] || TARGET_URL=$1
+[[ -n $ROUTE_SET || $MODEL != *:* ]] || ROUTE=  # a full model string is not routed through a Gateway route
 case $DB in /*) ;; *) DB=$PWD/$DB ;; esac  # absolute, before the cd below (BSD realpath has no -m)
 cd "$(dirname "${BASH_SOURCE[0]}")"
 partex() { uv run --quiet partex "$@"; }
@@ -113,7 +117,8 @@ if [[ -n $NO_TUI ]]; then
   exit $(( rc == 3 ? 0 : rc ))
 fi
 
-if [[ -z ${PYDANTIC_AI_GATEWAY_API_KEY:-} ]]; then  # explicit: bash 3.2 loses ${:?}'s status in the EXIT trap
+if [[ -n $ROUTE || $MODEL == gateway/* || $MODEL != *:* ]] && [[ -z ${PYDANTIC_AI_GATEWAY_API_KEY:-} ]]; then
+  # explicit check: bash 3.2 loses ${:?}'s status in the EXIT trap. Only Gateway models need this key.
   echo 'set PYDANTIC_AI_GATEWAY_API_KEY (or NO_TUI=1 to skip the session)' >&2
   exit 1
 fi
