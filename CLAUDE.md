@@ -52,7 +52,7 @@ While working:
 
 ## Git notes
 
-- Commits may be SSH-signed; if signing prompts for a passphrase you can't supply, stop and
-  ask the operator. Never disable signing.
+- Commits in this repo are **not** signed: set `git config --local commit.gpgsign false` in
+  your clone (global signing settings stay as they are). Don't block on a signing prompt.
 - If SSH push/fetch fails, use the gh credential helper over HTTPS:
   `git -c credential.helper= -c credential.helper='!gh auth git-credential' push https://github.com/mdfranz/partex.git <branch>`
