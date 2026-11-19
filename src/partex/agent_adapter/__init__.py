@@ -7,6 +7,7 @@ network beyond the model provider.
 
 from pathlib import Path
 
+import anyio.to_thread
 from pydantic_ai.exceptions import AgentRunError
 from pydantic_ai.models import Model
 
@@ -50,5 +51,9 @@ async def run_chat(
         await reader.get_run(run_id)  # unknown run → StoreError(run-not-found) before any model call or UI
         deps = ReviewDeps(run_id=run_id, reader=reader)
         summary = await brief(model, deps, console) if briefing else None
+        if summary is not None and console.is_terminal:
+            # CLAI2 takes over the screen and shows only its own transcript; let the operator read the
+            # briefing first. It stays in the terminal's scrollback above the session.
+            await anyio.to_thread.run_sync(lambda: console.input('[dim]Press Enter to open the chat…[/]'))
         agent = build_reviewer_agent(model, briefing=summary)
         await chat(agent, deps=deps, load_plugins=False, console=console)

@@ -318,3 +318,31 @@ async def test_failed_briefing_still_opens_the_chat(
     assert 'briefing unavailable' in buffer.getvalue()
     (call,) = calls
     assert 'already gave the operator' not in call['instructions']
+
+
+async def test_terminal_waits_for_enter_after_the_briefing(
+    seeded: tuple[RunReader, str, str, HttpEvidence, HttpEvidence, Finding], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CLAI2 takes over the screen, so a terminal pauses on the briefing before the chat opens."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from partex.agent_adapter import run_chat
+
+    reader, run_id, _, _, _, _ = seeded
+    order: list[str] = []
+    import partex.agent_adapter
+
+    async def fake_chat(agent: Agent[ReviewDeps, str], **kwargs: Any) -> None:
+        order.append('chat')
+
+    monkeypatch.setattr(partex.agent_adapter, 'chat', fake_chat)
+    console = Console(file=StringIO(), force_terminal=True, width=100)
+    monkeypatch.setattr(console, 'input', lambda prompt='': order.append('enter') or '')
+    await run_chat(run_id, reader.path, TestModel(), console=console)
+    assert order == ['enter', 'chat']
+
+    order.clear()
+    await run_chat(run_id, reader.path, TestModel(), console=console, briefing=False)
+    assert order == ['chat']  # nothing to read, no pause
