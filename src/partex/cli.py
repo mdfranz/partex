@@ -15,6 +15,7 @@ import os
 import sys
 import warnings
 from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -180,6 +181,9 @@ def build_parser() -> argparse.ArgumentParser:
         '--gateway-route',
         default=None,
         help='Pydantic AI Gateway route serving a bare --model, e.g. doubleword for zai-org/GLM-5.3',
+    )
+    chat.add_argument(
+        '--no-briefing', action='store_true', help='open the chat without the opening model summary of the run'
     )
     chat.set_defaults(handler=_cmd_chat)
     return parser
@@ -423,7 +427,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
     anyio.run(check_run)  # unknown store or run: exit 1 before a model is built or the terminal opens
     model = resolve_model(args.model, gateway_route=args.gateway_route)
-    anyio.run(run_chat, args.run_id, db_path, model)
+    anyio.run(partial(run_chat, args.run_id, db_path, model, briefing=not args.no_briefing))
     return EXIT_OK
 
 

@@ -20,6 +20,8 @@ from ..models import Finding, redact
 from ..storage import RunReader
 
 UNTRUSTED_TAG = register_tag('partex_untrusted_data')
+# The opening briefing is model output written from untrusted data, so it is framed (and escaped) too.
+BRIEFING_TAG = register_tag('partex_briefing')
 
 
 @dataclass(frozen=True, slots=True)

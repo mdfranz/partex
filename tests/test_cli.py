@@ -504,14 +504,20 @@ def test_review_text_reports_invalid_bundle(
 # ── chat (#49) — the CLAI2 terminal is replaced; nothing interactive starts ───
 
 
+briefings: list[bool] = []
+
+
 @pytest.fixture
 def chat_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Path, object]]:
     import partex.agent_adapter
 
+    briefings.clear()
+
     calls: list[tuple[str, Path, object]] = []
 
-    async def fake_run_chat(run_id: str, db_path: Path, model: object) -> None:
+    async def fake_run_chat(run_id: str, db_path: Path, model: object, *, briefing: bool) -> None:
         calls.append((run_id, db_path, model))
+        briefings.append(briefing)
 
     monkeypatch.setattr(partex.agent_adapter, 'run_chat', fake_run_chat)
     return calls
@@ -524,6 +530,15 @@ def test_chat_opens_the_run_with_the_resolved_model(
     code, _, err = run(capsys, 'chat', run_id, '--model', 'test', '--db', str(db))
     assert (code, err) == (cli.EXIT_OK, '')
     assert chat_calls == [(run_id, db, 'test')]
+    assert briefings == [True]
+
+
+def test_chat_no_briefing_flag(
+    capsys: pytest.CaptureFixture[str], db: Path, chat_calls: list[tuple[str, Path, object]]
+) -> None:
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    assert run(capsys, 'chat', run_id, '--model', 'test', '--db', str(db), '--no-briefing')[0] == cli.EXIT_OK
+    assert briefings == [False]
 
 
 def test_chat_routes_a_bare_model_through_the_gateway(
