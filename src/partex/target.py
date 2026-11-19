@@ -29,16 +29,18 @@ headers and bodies marked in ``secret_fields``, handed to the engine's commit
 callback.  ``target.py`` never writes storage.
 """
 
+import codecs
 import ipaddress
 import socket
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Self
+from typing import Literal, Self
 from urllib.parse import urljoin
 
 import anyio
 import httpx2
 
+from partex.bundle import MAX_CONTENT_BYTES
 from partex.checks import HeaderInput
 from partex.engagement import Engagement
 from partex.errors import BudgetExhausted, PartexError
@@ -58,6 +60,15 @@ DEFAULT_TIMEOUT = httpx2.Timeout(30.0)
 # stored; Content-Type is a hint, not the arbiter).
 _NON_PRINTABLE_LIMIT = 0.3
 
+MAX_BODY_BYTES = MAX_CONTENT_BYTES
+"""Decoded response bytes kept per exchange (the bundle cap, so a capture always re-imports). The body is
+streamed and reading stops one byte past the cap: a hostile or huge response, or a decompression bomb,
+never lands in memory, storage, or a model's context whole."""
+
+# Request headers that carry credentials whatever their value (PLAN §5): marked secret on every
+# capture, as is every Set-Cookie the target issues (redacted value-only, attributes stay visible).
+_CREDENTIAL_REQUEST_HEADERS = frozenset({'authorization', 'proxy-authorization', 'cookie'})
+
 
 def _default_resolver(host: str) -> str:
     """Resolve *host* to an address via getaddrinfo (first result wins)."""
@@ -70,16 +81,34 @@ def _header_pairs(headers: httpx2.Headers) -> Headers:
     return [(key.decode(headers.encoding), value.decode(headers.encoding)) for key, value in headers.raw]
 
 
-def _decode_body(content: bytes) -> str | None:
-    """Decode a response body for storage, or return ``None`` to refuse it."""
+def _decode_body(content: bytes, *, truncated: bool) -> tuple[str | None, Literal['truncated', 'refused'] | None]:
+    """Decode a captured body for storage: ``(text, body_note)``.
+
+    Binary or non-UTF-8 content is refused (``(None, 'refused')``). A truncated body may end inside
+    a multi-byte character; the incomplete tail is dropped rather than refusing the whole body.
+    """
+    decoder = codecs.getincrementaldecoder('utf-8')()
     try:
-        text = content.decode('utf-8')
+        text = decoder.decode(content, final=not truncated)
     except UnicodeDecodeError:
-        return None
+        return None, 'refused'
     non_printable = sum(1 for ch in text if ord(ch) < 0x20 and ch not in '\t\n\r')
     if non_printable > _NON_PRINTABLE_LIMIT * max(len(text), 1):
-        return None
-    return text
+        return None, 'refused'
+    return text, 'truncated' if truncated else None
+
+
+async def _read_capped(response: httpx2.Response) -> tuple[bytes, bool]:
+    """Read at most :data:`MAX_BODY_BYTES` of the decoded body: ``(content, truncated)``."""
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.aiter_bytes():
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            break
+    content = b''.join(chunks)
+    return content[:MAX_BODY_BYTES], size > MAX_BODY_BYTES
 
 
 class TokenBucket:
@@ -267,12 +296,15 @@ class ScopedHttpClient:
         # records the URL as requested (hostname, not IP) so redirects and re-import stay in scope.
         requested_url = str(http_request.url)
         try:
-            response = await self._client.send(http_request, follow_redirects=False)
-            await response.aread()
+            response = await self._client.send(http_request, follow_redirects=False, stream=True)
+            try:
+                content, truncated = await _read_capped(response)
+            finally:
+                await response.aclose()
         except httpx2.HTTPError as exc:
             raise PartexError(f'request to {url} failed: {exc}') from exc
         self._budget.record_send()
-        return await self._capture(http_request, requested_url, response, body)
+        return await self._capture(http_request, requested_url, response, body, content, truncated)
 
     async def follow_redirect(self, evidence: HttpEvidence) -> HttpEvidence:
         """Follow a captured redirect after re-validating its location.
@@ -330,7 +362,13 @@ class ScopedHttpClient:
             self._pins[host] = resolved
 
     async def _capture(
-        self, request: httpx2.Request, url: str, response: httpx2.Response, body: str | None
+        self,
+        request: httpx2.Request,
+        url: str,
+        response: httpx2.Response,
+        body: str | None,
+        content: bytes,
+        truncated: bool,
     ) -> HttpEvidence:
         """Build the ``ev_`` record for a sent exchange, mark secrets, commit via callback."""
         request_model = HttpRequest(
@@ -339,30 +377,37 @@ class ScopedHttpClient:
             headers=_header_pairs(request.headers),
             body=body,
         )
+        response_body, body_note = _decode_body(content, truncated=truncated)
         response_model = HttpResponse(
             status_code=response.status_code,
             headers=_header_pairs(response.headers),
-            body=_decode_body(response.content),
+            body=response_body,
+            body_note=body_note,
         )
         evidence = HttpEvidence(
             id='',
             source=self._source,
             http=HttpExchange(request=request_model, response=response_model),
-            secret_fields=self._secret_fields(request_model, body),
+            secret_fields=self._secret_fields(request_model, body, response_model),
         )
         evidence = evidence.model_copy(update={'id': evidence_id(evidence)})
         if self._on_capture is not None:
             await self._on_capture(evidence)
         return evidence
 
-    def _secret_fields(self, request: HttpRequest, body: str | None) -> list[str]:
-        """Mark credential-matched headers and the request body as secret."""
-        if not self._secrets:
-            return []
+    def _secret_fields(self, request: HttpRequest, body: str | None, response: HttpResponse) -> list[str]:
+        """Mark secret: credential request headers (by name) and anything carrying an engagement
+        credential, and every ``Set-Cookie`` the target issued (redaction keeps its attributes)."""
         paths: list[str] = []
-        for index, (_, value) in enumerate(request.headers):
-            if any(secret in value for secret in self._secrets):
+        for index, (name, value) in enumerate(request.headers):
+            if name.lower() in _CREDENTIAL_REQUEST_HEADERS or self._carries_secret(value):
                 paths.append(f'$.http.request.headers[{index}][1]')
-        if body is not None and any(secret in body for secret in self._secrets):
+        if body is not None and self._carries_secret(body):
             paths.append('$.http.request.body')
+        for index, (name, _) in enumerate(response.headers):
+            if name.lower() == 'set-cookie':
+                paths.append(f'$.http.response.headers[{index}][1]')
         return paths
+
+    def _carries_secret(self, text: str) -> bool:
+        return any(secret in text for secret in self._secrets)
