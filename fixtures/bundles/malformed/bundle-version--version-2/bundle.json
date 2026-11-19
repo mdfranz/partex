@@ -1,0 +1,10 @@
+{
+  "evidence_files": [
+    "evidence/0001.json"
+  ],
+  "schema_version": 2,
+  "target": {
+    "base_url": "https://app.example.test",
+    "name": "example-app"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "evidence_files": [
+    "evidence/0001-clean.json",
+    "evidence/0002-missing-headers.json",
+    "evidence/0003-weak-cookie.json",
+    "evidence/0004-cors-wildcard-credentials.json",
+    "evidence/0005-json-api.json",
+    "evidence/0006-openapi.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "header-security"
+  ],
+  "target": {
+    "base_url": "https://app.example.test",
+    "name": "example-app",
+    "notes": "sanitized staging capture (fixture)"
+  }
+}

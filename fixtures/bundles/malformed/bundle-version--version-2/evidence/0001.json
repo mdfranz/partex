@@ -1,0 +1,19 @@
+{
+  "http": {
+    "request": {
+      "headers": {
+        "Host": "app.example.test"
+      },
+      "method": "GET",
+      "url": "https://app.example.test/account"
+    },
+    "response": {
+      "body": "<!doctype html><html><head><title>Account</title></head><body><h1>Account</h1></body></html>",
+      "headers": {
+        "Content-Type": "text/html; charset=utf-8"
+      },
+      "status_code": 200
+    }
+  },
+  "kind": "http_exchange"
+}
