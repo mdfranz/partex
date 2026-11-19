@@ -11,9 +11,11 @@ Each ``http_request`` / ``run_check`` call is recorded in ``tool_calls`` without
 """
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, cast
 from urllib.parse import urljoin
 
+import anyio.to_thread
 from pydantic_ai import Agent, ModelRetry, RunContext, ToolFailed
 from pydantic_ai.framing import wrap
 from pydantic_ai.models import Model
@@ -199,7 +201,10 @@ async def discover_js_assets(ctx: RunContext[TesterDeps]) -> str:
     ``download_asset`` to download an in-scope asset, or ask the operator to extend scope first.
     """
     session = ctx.deps.session
-    discovery = discover_js_urls(session.captured, scope=session.engagement.scope)
+    # Parsing large bundles is CPU-bound; keep it off the event loop so the terminal stays responsive.
+    discovery = await anyio.to_thread.run_sync(
+        partial(discover_js_urls, list(session.captured), scope=session.engagement.scope)
+    )
     await _audit(
         ctx,
         'discover_js_assets',

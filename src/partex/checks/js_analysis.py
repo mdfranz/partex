@@ -5,13 +5,17 @@ Extracts API endpoints, embedded secrets/config (redacted in output), version/bu
 ``sourceMappingURL`` comments, and risky DOM/JS sinks as low-confidence leads.
 """
 
+import hashlib
+import math
 import re
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import tree_sitter
 import tree_sitter_javascript
@@ -47,10 +51,13 @@ _VERSION_KEY_RE = re.compile(
     r'^(?:app_?version|version|build_?version|release_?tag|commit_?sha|git_?commit|build_?id|bundle_?id)$',
     re.IGNORECASE,
 )
-_VERSION_VAL_RE = re.compile(r'(?:\d+(?:\.\d+)+|v\d+|[0-9a-f]{7,40})', re.IGNORECASE)
+_VERSION_VAL_RE = re.compile(r'(?:v?\d+(?:\.\d+)+|v\d+|[0-9a-f]{7,40})', re.IGNORECASE)
 _SOURCEMAP_RE = re.compile(r'//[#@]\s*sourceMappingURL\s*=\s*(\S+)')
 
+_HTTP_METHODS = frozenset({'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'})
 _HTTP_CALL_CALLEES = frozenset({'fetch', 'axios'})
+MAX_LISTED = 20
+"""Occurrences, lines or endpoints listed in one finding; the rest are counted."""
 _AXIOS_METHODS = frozenset({'get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'request'})
 
 
@@ -108,14 +115,49 @@ def _is_html_content_type(content_type: str | None) -> bool:
 
 
 def _is_js_evidence(item: Evidence) -> bool:
+    """A successful, non-HTML response that is JavaScript by content type or URL (a ``/x.js`` 404 page is not)."""
     if isinstance(item, ArtifactEvidence):
-        return _is_js_content_type(item.artifact.content_type) or _is_js_url(item.artifact.url)
-    if isinstance(item, HttpEvidence):
-        if item.http.response.body is None:
+        asset = item.artifact
+        if _is_html_content_type(asset.content_type) or not 200 <= asset.status_code < 300:
             return False
-        ct = get_header(item.http.response.headers, 'content-type')
+        return _is_js_content_type(asset.content_type) or _is_js_url(asset.url)
+    if isinstance(item, HttpEvidence):
+        response = item.http.response
+        if response.body is None or not 200 <= response.status_code < 300:
+            return False
+        ct = get_header(response.headers, 'content-type')
+        if _is_html_content_type(ct):
+            return False
         return _is_js_content_type(ct) or _is_js_url(item.http.request.url)
     return False
+
+
+def _clean_endpoint(url: str) -> str:
+    """An endpoint without userinfo, query string or fragment, so no credential in a URL reaches a finding."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url.split('?', 1)[0].split('#', 1)[0]
+    netloc = parts.netloc.rsplit('@', 1)[-1]
+    return urlunsplit((parts.scheme, netloc, parts.path, '', ''))
+
+
+def _entropy(value: str) -> float:
+    counts = Counter(value)
+    return -sum(n / len(value) * math.log2(n / len(value)) for n in counts.values())
+
+
+def _looks_like_secret(value: str) -> bool:
+    """Value-shape check for a secret-named key: one token (no spaces), long enough, and not a plain word.
+
+    UI strings (``'Enter your password'``), enum words (``'Bearer'``) and short labels do not qualify.
+    """
+    value = value.strip()
+    if not 8 <= len(value) <= 512 or any(ch.isspace() for ch in value) or value.lower() in _PLACEHOLDERS:
+        return False
+    has_digit = any(ch.isdigit() for ch in value)
+    has_alpha = any(ch.isalpha() for ch in value)
+    return (has_digit and has_alpha) or (len(value) >= 16 and _entropy(value) >= 3.5)
 
 
 def _node_text(node: tree_sitter.Node, source: bytes) -> str:
@@ -166,8 +208,17 @@ def _walk_nodes(root: tree_sitter.Node) -> list[tree_sitter.Node]:
     return nodes
 
 
+@lru_cache(maxsize=16)
+def _analyze_cached(digest: str, source: bytes) -> JsAnalysisResult:
+    return _analyze(source)
+
+
 def analyze_js_bytes(source: bytes) -> JsAnalysisResult:
-    """Parse *source* with tree-sitter and extract deterministic, redacted analysis results."""
+    """Parse *source* with tree-sitter and extract deterministic, redacted analysis results (cached by content)."""
+    return _analyze_cached(hashlib.sha256(source).hexdigest(), source)
+
+
+def _analyze(source: bytes) -> JsAnalysisResult:
     parser = tree_sitter.Parser(_JS_LANGUAGE)
     tree = parser.parse(source)
 
@@ -191,9 +242,9 @@ def analyze_js_bytes(source: bytes) -> JsAnalysisResult:
         val = _unquote_string(value_node, source)
         if val is None or not val.strip():
             return
-        if _SECRET_KEY_RE.search(key) and len(val) >= 6 and val.strip().lower() not in _PLACEHOLDERS:
+        if _SECRET_KEY_RE.search(key) and _looks_like_secret(val):
             add_secret(key, line)
-        if _VERSION_KEY_RE.fullmatch(key) and _VERSION_VAL_RE.search(val):
+        if _VERSION_KEY_RE.fullmatch(key) and _VERSION_VAL_RE.fullmatch(val.strip()):
             versions.append((key, val, line))
 
     for node in _walk_nodes(tree.root_node):
@@ -222,10 +273,12 @@ def analyze_js_bytes(source: bytes) -> JsAnalysisResult:
             obj, prop = _callee_parts(fn, source)
             if args and ((obj in _HTTP_CALL_CALLEES and prop is None) or (obj == 'axios' and prop in _AXIOS_METHODS)):
                 if url := _unquote_string(args[0], source):
-                    endpoints.add(url)
-            elif prop == 'open' and len(args) >= 2:
-                if url := _unquote_string(args[1], source):
-                    endpoints.add(url)
+                    endpoints.add(_clean_endpoint(url))
+            elif (
+                prop == 'open' and len(args) >= 2 and (_unquote_string(args[0], source) or '').upper() in _HTTP_METHODS
+            ):
+                if url := _unquote_string(args[1], source):  # XMLHttpRequest.open(method, url); not window.open
+                    endpoints.add(_clean_endpoint(url))
             elif obj in {'import', 'importScripts'} and prop is None and args:
                 if url := _unquote_string(args[0], source):
                     import_urls.append(url)
@@ -258,7 +311,7 @@ def analyze_js_bytes(source: bytes) -> JsAnalysisResult:
 
         elif ntype in {'string', 'template_string'} and (val := _unquote_string(node, source)):
             if _API_PATH_RE.match(val):
-                endpoints.add(val)
+                endpoints.add(_clean_endpoint(val))
             if _SECRET_VALUE_RE.match(val):
                 add_secret('token-literal', line)
 
@@ -273,16 +326,32 @@ def analyze_js_bytes(source: bytes) -> JsAnalysisResult:
     )
 
 
+def _read_artifact(item: ArtifactEvidence) -> tuple[bytes | None, str | None]:
+    """Read a stored artifact only if it is the content-addressed file ``partex`` wrote for it.
+
+    ``file_path`` is not part of the evidence ID, so imported or edited evidence could name any local file.
+    The file must sit in an ``*.artifacts`` directory, be named by the declared sha256, and hash to it.
+    """
+    if item.file_path is None:
+        return None, 'artifact has no local file_path'
+    path = Path(item.file_path)
+    digest = item.artifact.sha256
+    if path.name != digest or not path.parent.name.endswith('.artifacts'):
+        return None, 'artifact file_path is not a partex artifact file'
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return None, f'cannot read artifact file: {exc}'
+    if hashlib.sha256(data).hexdigest() != digest:
+        return None, 'artifact file does not match its recorded sha256'
+    return data, None
+
+
 def _read_js_source(item: Evidence) -> tuple[bytes | None, str, bool, str | None]:
     """Return ``(bytes_or_None, url, truncated, read_error)`` for a JS evidence item."""
     if isinstance(item, ArtifactEvidence):
-        if item.file_path is None:
-            return None, item.artifact.url, False, 'artifact has no local file_path'
-        path = Path(item.file_path)
-        try:
-            return path.read_bytes(), item.artifact.url, False, None
-        except OSError as exc:
-            return None, item.artifact.url, False, f'cannot read artifact file: {exc}'
+        data, error = _read_artifact(item)
+        return data, item.artifact.url, False, error
     assert isinstance(item, HttpEvidence)
     body = item.http.response.body
     assert body is not None
@@ -334,6 +403,12 @@ def extract_js_surface(evidence: Sequence[Evidence]) -> list[dict[str, Any]]:
         for ep in analyze_js_bytes(data).endpoints:
             by_endpoint.setdefault(ep, set()).add(item.id)
     return [{'kind': 'endpoint', 'key': ep, 'evidence_ids': sorted(ids)} for ep, ids in sorted(by_endpoint.items())]
+
+
+def _lines(lines: list[int]) -> str:
+    shown = ', '.join(f'line {n}' for n in sorted(set(lines))[:MAX_LISTED])
+    extra = len(set(lines)) - MAX_LISTED
+    return shown + (f' (+{extra} more)' if extra > 0 else '')
 
 
 class JsAnalysisCheck:
@@ -408,7 +483,10 @@ class JsAnalysisCheck:
                     )
                 )
 
+            secret_lines: dict[str, list[int]] = {}
             for key_or_kind, line in result.secrets:
+                secret_lines.setdefault(key_or_kind, []).append(line)
+            for key_or_kind, lines in sorted(secret_lines.items()):  # one finding per key, however many hits
                 drafts.append(
                     FindingDraft(
                         check_id=CHECK_ID,
@@ -417,8 +495,8 @@ class JsAnalysisCheck:
                         subject=f'js:secret:{key_or_kind}',
                         title='Potential secret or credential embedded in JavaScript',
                         description=(
-                            f'{url} line {line} assigns a non-empty value (<redacted>) to {key_or_kind!r}. '
-                            'Client-side bundles are public to all users.'
+                            f'{url} assigns a secret-shaped value (<redacted>) to {key_or_kind!r} '
+                            f'at {_lines(lines)}. Client-side bundles are public to all users.'
                         ),
                         evidence_ids=[item.id],
                         remediation='Remove credentials/API keys from client-side JavaScript and rotate any exposed secrets.',
@@ -455,7 +533,10 @@ class JsAnalysisCheck:
                     )
                 )
 
+            sink_lines: dict[str, list[int]] = {}
             for sink_name, line in result.sinks:
+                sink_lines.setdefault(sink_name, []).append(line)
+            for sink_name, lines in sorted(sink_lines.items()):  # one finding per sink kind, however many hits
                 drafts.append(
                     FindingDraft(
                         check_id=CHECK_ID,
@@ -464,8 +545,8 @@ class JsAnalysisCheck:
                         subject=f'js:sink:{sink_name}',
                         title=f'Risky DOM/JS sink ({sink_name}) in JavaScript',
                         description=(
-                            f'{url} line {line} uses {sink_name} (low-confidence lead; verify whether '
-                            'attacker-controlled input can reach this sink).'
+                            f'{url} uses {sink_name} {len(lines)} time(s), at {_lines(lines)} (low-confidence lead; '
+                            'verify whether attacker-controlled input can reach this sink).'
                         ),
                         evidence_ids=[item.id],
                         remediation='Ensure untrusted input is sanitized or avoided before reaching DOM/JS execution sinks.',

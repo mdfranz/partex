@@ -487,6 +487,7 @@ class LiveSession:
             source=f'capture:{run_id}',
             on_capture=self._on_capture,
             on_artifact=self._on_artifact,
+            on_failed_send=self._on_failed_send,
         )
 
     async def _on_capture(self, evidence: HttpEvidence) -> None:
@@ -498,6 +499,9 @@ class LiveSession:
         await self._store.add_evidence(self.run_id, evidence)
         await self._store.add_requests_spent(self.run_id, 1)
         self.captured.append(evidence)
+
+    async def _on_failed_send(self) -> None:
+        await self._store.add_requests_spent(self.run_id, 1)
 
     @property
     def requests_spent(self) -> int:

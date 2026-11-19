@@ -1,5 +1,6 @@
 """Tests for full-body JS download, discovery, and tree-sitter js-analysis check/skill (issue #69)."""
 
+import hashlib
 import json
 import stat
 from pathlib import Path
@@ -150,22 +151,32 @@ async def test_download_asset_refuses_out_of_scope_excluded_and_over_ceiling(
 # ── Tree-sitter js-analysis check ─────────────────────────────────────────────
 
 
-def test_js_analysis_fixture_deterministic_and_redacted(tmp_path: Path) -> None:
-    js_bytes = FIXTURE_JS.read_bytes()
+def _stored_artifact(
+    tmp_path: Path, data: bytes, url: str = 'https://app.example.test/static/sample.js'
+) -> ArtifactEvidence:
+    """An artifact stored the way ``download_asset`` stores it: ``<db>.artifacts/<sha256>``."""
+    digest = hashlib.sha256(data).hexdigest()
+    directory = tmp_path / 'run.db.artifacts'
+    directory.mkdir(exist_ok=True)
+    (directory / digest).write_bytes(data)
     artifact = ArtifactEvidence(
         id='',
         source='capture:test',
         artifact=ArtifactAsset(
-            url='https://app.example.test/static/sample.js',
+            url=url,
             status_code=200,
             headers=[('Content-Type', 'application/javascript')],
             content_type='application/javascript',
-            sha256='abc',
-            size_bytes=len(js_bytes),
+            sha256=digest,
+            size_bytes=len(data),
         ),
-        file_path=str(FIXTURE_JS),
+        file_path=str(directory / digest),
     )
-    artifact = artifact.model_copy(update={'id': evidence_id(artifact)})
+    return artifact.model_copy(update={'id': evidence_id(artifact)})
+
+
+def test_js_analysis_fixture_deterministic_and_redacted(tmp_path: Path) -> None:
+    artifact = _stored_artifact(tmp_path, FIXTURE_JS.read_bytes())
 
     assert js_analysis_check.applies_to([artifact]) is True
     drafts = list(js_analysis_check.review([artifact]))
@@ -393,3 +404,110 @@ async def test_agent_download_asset_and_js_analysis_e2e(tmp_store: RunStore, tmp
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+# ── review fixes (PR #75) ─────────────────────────────────────────────────────
+
+
+def test_repeated_sinks_and_secrets_are_aggregated_not_duplicated(tmp_path: Path) -> None:
+    js = (
+        'el.innerHTML = a;\n' + 'x.postMessage(1);\n' * 1500 + 'el.innerHTML = b;\n'
+        'const a = {apiKey: "sk-live-abcdef123456"}; const b = {apiKey: "sk-live-zzzzzz654321"};\n'
+    ).encode()
+    drafts = list(js_analysis_check.review([_stored_artifact(tmp_path, js)]))
+    ids = [finding_id(d.check_id, d.subject, d.title, d.evidence_ids) for d in drafts]
+    assert len(ids) == len(set(ids)) and len(drafts) < 20  # no duplicate IDs, nowhere near the draft cap
+    inner = next(d for d in drafts if d.subject == 'js:sink:innerHTML')
+    assert '2 time(s)' in inner.description and 'line 1' in inner.description
+    post = next(d for d in drafts if d.subject == 'js:sink:postMessage')
+    assert '1500 time(s)' in post.description and 'more' in post.description
+    assert sum(d.subject == 'js:secret:apiKey' for d in drafts) == 1
+
+
+def test_endpoints_never_carry_query_strings_or_userinfo() -> None:
+    js = (
+        b"fetch('/api/v1/export?api_key=sk_live_SECRETVALUE123'); axios.get('https://user:pw@api.test/v1/x#frag');"
+        b"var x = new XMLHttpRequest(); x.open('GET', '/api/v1/y?token=abc12345');"
+    )
+    endpoints = analyze_js_bytes(js).endpoints
+    assert endpoints == ('/api/v1/export', '/api/v1/y', 'https://api.test/v1/x')
+    assert not any(ch in e for e in endpoints for ch in '?#@')
+
+
+def test_window_open_is_not_an_endpoint() -> None:
+    assert analyze_js_bytes(b"window.open('/help', '_blank');").endpoints == ()  # neither arg is an endpoint
+
+
+def test_artifact_must_be_the_content_addressed_file(tmp_path: Path) -> None:
+    good = _stored_artifact(tmp_path, b"fetch('/api/v1/ok');")
+    assert any(d.subject == 'js:endpoints' for d in js_analysis_check.review([good]))
+
+    secret_file = tmp_path / 'credentials.js'  # an unrelated local file named like JS
+    secret_file.write_text("fetch('/api/v1/leak');")
+    forged = good.model_copy(update={'file_path': str(secret_file)})
+    drafts = list(js_analysis_check.review([forged]))
+    assert [d.subject for d in drafts] == ['js:parse-status'] and 'unreadable' in drafts[0].title
+
+    tampered_dir = tmp_path / 'other.db.artifacts'
+    tampered_dir.mkdir()
+    (tampered_dir / good.artifact.sha256).write_text("fetch('/api/v1/tampered');")  # right name, wrong content
+    tampered = good.model_copy(update={'file_path': str(tampered_dir / good.artifact.sha256)})
+    assert [d.subject for d in js_analysis_check.review([tampered])] == ['js:parse-status']
+
+
+def test_ui_strings_and_loose_version_matches_are_not_findings(tmp_path: Path) -> None:
+    js = (
+        b"const t = {passwordLabel: 'Enter your password', tokenType: 'Bearer', secretHint: 'Pick a strong one',"
+        b" releaseTag: 'preview1', version: 'beta-channel', appVersion: '2.4.1', apiKey: 'sk-real-0123456789abcdef'};"
+    )
+    result = analyze_js_bytes(js)
+    assert {key for key, _ in result.secrets} == {'apiKey', 'token-literal'}  # the sk- literal also matches by shape
+    assert [(key, value) for key, value, _ in result.versions] == [('appVersion', '2.4.1')]
+
+
+def test_html_error_page_with_a_js_url_is_not_analyzed() -> None:
+    page = HttpEvidence(
+        id='ev_404',
+        source='capture:1',
+        http=HttpExchange(
+            request=HttpRequest(method='GET', url='https://app.example.test/missing.js', headers=[]),
+            response=HttpResponse(
+                status_code=404, headers=[('Content-Type', 'text/html')], body='<html>Not found</html>'
+            ),
+        ),
+    )
+    ok_but_html = page.model_copy(
+        update={
+            'http': page.http.model_copy(
+                update={'response': page.http.response.model_copy(update={'status_code': 200})}
+            )
+        }
+    )
+    assert js_analysis_check.applies_to([page]) is False and js_analysis_check.applies_to([ok_but_html]) is False
+
+
+async def test_failed_download_still_spends_a_persisted_request(target_server: Any, tmp_path: Path) -> None:
+    spent: list[int] = []
+
+    async def failed_send() -> None:
+        spent.append(1)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return (
+            httpx2.Response(404, text='nope')
+            if request.url.path == '/m.js'
+            else httpx2.Response(200, content=b'a' * 4096)
+        )
+
+    client = ScopedHttpClient(
+        _engagement(target_server.port), transport=httpx2.MockTransport(handler), on_failed_send=failed_send
+    )
+    async with client:
+        port = target_server.port
+        with pytest.raises(PartexError, match='HTTP 404'):
+            await client.download_asset(f'http://127.0.0.1:{port}/m.js', dest_dir=tmp_path / 'a')
+        with pytest.raises(PartexError, match='exceeds max_bytes'):
+            await client.download_asset(f'http://127.0.0.1:{port}/big.js', dest_dir=tmp_path / 'a', max_bytes=1024)
+        with pytest.raises(ScopeViolation):  # refused before any send: nothing spent
+            await client.download_asset(f'http://evil.example.test:{port}/x.js', dest_dir=tmp_path / 'a')
+    assert spent == [1, 1] and client.requests_spent == 2

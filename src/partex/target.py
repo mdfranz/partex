@@ -66,6 +66,8 @@ type Resolver = Callable[[str], str]
 
 CaptureCallback = Callable[[HttpEvidence], Awaitable[None]]
 ArtifactCallback = Callable[[ArtifactEvidence], Awaitable[None]]
+SpendCallback = Callable[[], Awaitable[None]]
+"""Called once for a download that sent a request but stored no artifact (non-2xx, oversize, mid-stream error)."""
 
 DEFAULT_SOURCE = 'capture:local'
 DEFAULT_TIMEOUT = httpx2.Timeout(30.0)
@@ -241,6 +243,7 @@ class ScopedHttpClient:
         source: str = DEFAULT_SOURCE,
         on_capture: CaptureCallback | None = None,
         on_artifact: ArtifactCallback | None = None,
+        on_failed_send: SpendCallback | None = None,
         resolver: Resolver | None = None,
         transport: httpx2.AsyncBaseTransport | None = None,
         timeout: httpx2.Timeout | float = DEFAULT_TIMEOUT,
@@ -252,6 +255,7 @@ class ScopedHttpClient:
         self._source = source
         self._on_capture = on_capture
         self._on_artifact = on_artifact
+        self._on_failed_send = on_failed_send
         self._resolver: Resolver = resolver if resolver is not None else _default_resolver
         # The DNS pin table may be shared across handles (role clients resolve
         # each in-scope host once per engagement, not once per role).  The lock
@@ -364,9 +368,11 @@ class ScopedHttpClient:
         http_request = self._client.build_request('GET', url, headers=header_list or None)
         requested_url = str(http_request.url)
         tmp_path = dest_dir / f'.tmp-{uuid.uuid4().hex}'
+        sent = False
         try:
             response = await self._client.send(http_request, follow_redirects=False, stream=True)
             self._budget.record_send()
+            sent = True
             try:
                 if not 200 <= response.status_code < 300:
                     raise PartexError(f'asset download {url} returned HTTP {response.status_code}')
@@ -395,8 +401,13 @@ class ScopedHttpClient:
                 await response.aclose()
         except httpx2.HTTPError as exc:
             tmp_path.unlink(missing_ok=True)
+            await self._record_failed_send(sent)
             raise PartexError(f'asset download {url} failed: {exc}') from exc
-        except BaseException:
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            await self._record_failed_send(sent)
+            raise
+        except BaseException:  # cancellation: clean up, no further awaits
             tmp_path.unlink(missing_ok=True)
             raise
 
@@ -430,6 +441,11 @@ class ScopedHttpClient:
         if self._on_artifact is not None:
             await self._on_artifact(evidence)
         return evidence
+
+    async def _record_failed_send(self, sent: bool) -> None:
+        """A download that reached the target but stored nothing still spent a request; persist it."""
+        if sent and self._on_failed_send is not None:
+            await self._on_failed_send()
 
     async def follow_redirect(self, evidence: HttpEvidence) -> HttpEvidence:
         """Follow a captured redirect after re-validating its location.
