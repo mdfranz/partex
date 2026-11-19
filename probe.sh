@@ -2,15 +2,21 @@
 # probe.sh: open a `partex agent` session on a target: baseline + version-disclosure, a briefing, then
 # the CLAI2 terminal where you direct further GET/HEAD/OPTIONS probes and checks (model via the Gateway).
 #
-#   PARTEX_ATTESTATION='I own 192.168.12.1 and authorize this test, 2026-11-19' ./probe.sh http://192.168.12.1/home
+#   ./probe.sh http://192.168.12.1/home      # asks who authorized the test
+#   ./probe.sh -a 'I own 192.168.12.1 and authorize this test, 2026-11-19' http://192.168.12.1/home
 #
-# Usage: ./probe.sh <target-url>   (not needed with CHAT_ONLY=1)
-# Required: PARTEX_ATTESTATION; PYDANTIC_AI_GATEWAY_API_KEY for the chat step.
-# Optional: PARTEX_MODEL (default zai-org/GLM-5.3),
-#           PARTEX_GATEWAY_ROUTE (default doubleword; set empty when PARTEX_MODEL is a full model
-#           string such as gateway/anthropic:claude-sonnet-5-5), PARTEX_DB (default ./partex-probe.db),
-#           RUN_ID=run_… to let the session read an earlier run (--from), CHAT_ONLY=1 with RUN_ID to review
-#           that run without new traffic, NO_TUI=1 to run `partex test` + show only.
+# Usage: ./probe.sh [options] <target-url>       (flags override the environment variables in [])
+#   -a, --attestation TEXT   who authorized testing the target [PARTEX_ATTESTATION]; prompted for if unset
+#   -m, --model NAME         model [PARTEX_MODEL, default zai-org/GLM-5.3]
+#   -r, --route NAME         gateway route [PARTEX_GATEWAY_ROUTE, default doubleword]; --route '' when the
+#                            model is a full string such as gateway/anthropic:claude-sonnet-5-5
+#   -d, --db PATH            database [PARTEX_DB, default ./partex-probe.db]
+#   -f, --from RUN_ID        let the new session read an earlier run [RUN_ID]
+#       --resume [RUN_ID]    read-only chat on an earlier run, no traffic and no target URL needed; the
+#                            latest run if RUN_ID is omitted [CHAT_ONLY=1, RUN_ID]
+#       --no-tui             run `partex test` + show only [NO_TUI=1]
+#   -h, --help
+# Required: PYDANTIC_AI_GATEWAY_API_KEY for the chat step.
 #
 # Traffic: the session opens with 3 GETs (TARGET_URL, /robots.txt, /partex-nonexistent-probe-0); after that
 # only what you ask for in the chat (GET/HEAD/OPTIONS). 2 req/s, budget 50 per session, host and port locked
@@ -18,21 +24,53 @@
 set -euo pipefail
 export PYDANTIC_AI_NO_BANNER=${PYDANTIC_AI_NO_BANNER:-1}  # skip pydantic-ai's startup banner between findings and briefing
 
-TARGET_URL=${1:-}
+usage() { sed -n '/^# Usage:/,/^#   -h/s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+TARGET_URL=
 MODEL=${PARTEX_MODEL:-zai-org/GLM-5.3}
 ROUTE=${PARTEX_GATEWAY_ROUTE-doubleword}
 DB=${PARTEX_DB:-partex-probe.db}
+ATTESTATION=${PARTEX_ATTESTATION:-}
+RESUME=${CHAT_ONLY:+1}
+NO_TUI=${NO_TUI:-}
+RUN_ID=${RUN_ID:-}   # with --resume: the run to open; otherwise the run to read (--from)
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -a|--attestation) ATTESTATION=${2?$1 needs a value}; shift 2 ;;
+    -m|--model) MODEL=${2?$1 needs a value}; shift 2 ;;
+    -r|--route) ROUTE=${2?$1 needs a value}; shift 2 ;;
+    -d|--db) DB=${2?$1 needs a value}; shift 2 ;;
+    -f|--from) RUN_ID=${2?$1 needs a value}; shift 2 ;;
+    --resume) RESUME=1; shift; if [[ ${1:-} == run_* ]]; then RUN_ID=$1; shift; fi ;;
+    --no-tui) NO_TUI=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *) [[ -z $TARGET_URL ]] || { echo "unexpected argument: $1" >&2; exit 2; }; TARGET_URL=$1; shift ;;
+  esac
+done
+[[ $# -eq 0 || -n $TARGET_URL ]] || TARGET_URL=$1
 case $DB in /*) ;; *) DB=$PWD/$DB ;; esac  # absolute, before the cd below (BSD realpath has no -m)
 cd "$(dirname "${BASH_SOURCE[0]}")"
 partex() { uv run --quiet partex "$@"; }
 
-if [[ -n ${CHAT_ONLY:-} ]]; then  # review an earlier run read-only: no traffic
-  : "${RUN_ID:?CHAT_ONLY needs RUN_ID=run_…}"
+if [[ -n $RESUME ]]; then  # review an earlier run read-only: no traffic
+  if [[ -z ${RUN_ID:-} ]]; then  # default to the most recent usable run in the DB
+    RUN_ID=$(partex runs --db "$DB" --json | python3 -c 'import json, sys
+runs = [r for r in json.load(sys.stdin) if r["state"] != "invalid"]
+print(runs[-1]["id"] if runs else "")')
+    [[ -n $RUN_ID ]] || { echo "no runs in $DB to resume" >&2; exit 1; }
+    echo "resuming $RUN_ID (pick another with --resume RUN_ID)"
+  fi
   exec uv run --quiet partex chat "$RUN_ID" --db "$DB" --model "$MODEL" ${ROUTE:+--gateway-route "$ROUTE"}
 fi
 
-[[ -n $TARGET_URL ]] || { echo "usage: $0 <target-url>" >&2; exit 2; }
-: "${PARTEX_ATTESTATION:?set PARTEX_ATTESTATION to who authorized testing $TARGET_URL}"
+[[ -n $TARGET_URL ]] || { echo "usage: $0 [options] <target-url>  (-h for options)" >&2; exit 2; }
+if [[ -z $ATTESTATION ]]; then
+  [[ -t 0 ]] || { echo "pass --attestation (or set PARTEX_ATTESTATION): who authorized testing $TARGET_URL" >&2; exit 1; }
+  echo "Testing $TARGET_URL sends live requests; partex needs a written authorization on record."
+  read -r -p "Authorization (e.g. 'I own this host and authorize this test, $(date +%F)'): " ATTESTATION
+  [[ -n $ATTESTATION ]] || { echo "no authorization given; nothing was sent" >&2; exit 1; }
+fi
 [[ $TARGET_URL =~ ^(https?)://([^/:]+)(:([0-9]+))?(/.*)?$ ]] || { echo "bad TARGET_URL: $TARGET_URL" >&2; exit 1; }
 host=${BASH_REMATCH[2]} port=${BASH_REMATCH[4]:-$([[ ${BASH_REMATCH[1]} == https ]] && echo 443 || echo 80)}
 json_str() { python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$1"; }
@@ -51,12 +89,12 @@ cat > "$eng/engagement.json" <<JSON
     "max_rps": 2,
     "max_requests": 50
   },
-  "authorization": {"attestation": $(json_str "$PARTEX_ATTESTATION"), "operator": $(json_str "${USER:-operator}")},
+  "authorization": {"attestation": $(json_str "$ATTESTATION"), "operator": $(json_str "${USER:-operator}")},
   "suggested_checks": ["version-disclosure"]
 }
 JSON
 
-if [[ -n ${NO_TUI:-} ]]; then
+if [[ -n $NO_TUI ]]; then
   rc=0
   result=$(partex test "$eng" --authorized --checks version-disclosure --db "$DB") || rc=$?
   printf '%s\n' "$result"
