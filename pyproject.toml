@@ -17,6 +17,7 @@ dependencies = [
 partex = "partex.__main__:main"
 
 [project.entry-points."partex.checks"]
+header-security = "partex.checks.header_security:header_security_check"
 
 # Supply-chain cool-off: only resolve registry artifacts uploaded at least 2 days ago, so a
 # freshly published (possibly compromised) release can't land in the lockfile before it has
