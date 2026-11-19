@@ -18,6 +18,13 @@ partex = "partex.__main__:main"
 
 [project.entry-points."partex.checks"]
 
+# Supply-chain cool-off: only resolve registry artifacts uploaded at least 2 days ago, so a
+# freshly published (possibly compromised) release can't land in the lockfile before it has
+# had time to be noticed and yanked. Relative span, recorded in uv.lock as exclude-newer-span.
+# Urgent fixes: add a reviewed per-package `exclude-newer-package` override, never drop this.
+[tool.uv]
+exclude-newer = "2 days"
+
 [dependency-groups]
 dev = ["anyio", "inline-snapshot", "pyright", "pytest", "pytest-cov", "ruff"]
 

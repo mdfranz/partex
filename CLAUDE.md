@@ -13,7 +13,7 @@ Several agents work in parallel, often on different machines. Before starting:
    (`gh api repos/mdfranz/partex/issues/<n>/dependencies/blocked_by`). Don't start a blocked issue.
 3. Check nobody else has it: assignees, recent comments, `gh pr list`, and remote branches
    (`gh api repos/mdfranz/partex/branches`).
-4. Claim it: assign yourself and comment `Agent hostname: <output of hostname>`.
+4. Claim it: assign yourself and comment `Agent hostname: <output of hostname>` and `Agent Name: <Claude/codex/opencode/agy>`
 
 While working:
 
@@ -32,6 +32,9 @@ While working:
   `uv run ruff format`, `uv run pyright`. No `pip install`, no ad-hoc venvs in the repo.
 - `pydantic-*` and `pydantic-monty*` resolve from PyPI through `uv.lock` (PLAN §3.1, issue #13);
   never add `[tool.uv.sources]` path overrides, and bump them only as an explicit `uv.lock` change.
+- uv enforces a **2-day cool-off** (`[tool.uv] exclude-newer = "2 days"` in `pyproject.toml`):
+  nothing uploaded to PyPI in the last 48 hours can enter `uv.lock`. Don't remove it or set a
+  global override; an urgent fix gets a reviewed per-package `exclude-newer-package` entry.
 - Python floor is **3.14**: use modern syntax (PEP 695 `type` aliases and generics); never add
   `from __future__ import annotations`.
 - Style: ruff, single quotes, 120 columns; pyright strict.
@@ -51,5 +54,7 @@ While working:
 
 ## Git notes
 
+- Commits in this repo are **not** signed: set `git config --local commit.gpgsign false` in
+  your clone (global signing settings stay as they are). Don't block on a signing prompt.
 - If SSH push/fetch fails, use the gh credential helper over HTTPS:
   `git -c credential.helper= -c credential.helper='!gh auth git-credential' push https://github.com/mdfranz/partex.git <branch>`
