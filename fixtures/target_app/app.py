@@ -36,6 +36,12 @@ class _FixtureApp(http.server.BaseHTTPRequestHandler):
     server_version = 'FixtureTarget/2.3.1'
     sys_version = ''
 
+    def version_string(self) -> str:
+        """The hardened variant (PLAN §13.4): no version digits in the banner."""
+        if getattr(self.server, 'hardened', False):
+            return 'FixtureTarget'
+        return super().version_string()
+
     def do_GET(self) -> None:
         server: _FixtureAppServer = self.server
         server.requests.append({'method': self.command, 'path': self.path})
@@ -46,8 +52,10 @@ class _FixtureApp(http.server.BaseHTTPRequestHandler):
             self._send(200, 'text/plain', 'User-agent: *\nDisallow: /admin/\n')
         else:
             # Unknown paths get the verbose error page — the deliberately
-            # vulnerable default handler (including /admin/shutdown).
-            self._send(404, 'text/plain', STACK_TRACE_BODY)
+            # vulnerable default handler (including /admin/shutdown).  The
+            # hardened variant serves clean errors instead (verify tests, #22).
+            body = 'Not Found' if server.hardened else STACK_TRACE_BODY
+            self._send(404, 'text/plain', body)
 
     def _send(self, code: int, content_type: str, body: str) -> None:
         payload = body.encode()
@@ -67,6 +75,10 @@ class _FixtureAppServer(http.server.ThreadingHTTPServer):
     def __init__(self, *args: object) -> None:
         super().__init__(*args)  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
         self.requests: list[dict[str, str]] = []
+        # Toggled by verification tests (#22) to simulate the target being
+        # fixed between the finding and the replay (PLAN §13.4: the hardened
+        # variant yields `not_reproduced`).
+        self.hardened: bool = False
 
     @property
     def base_url(self) -> str:

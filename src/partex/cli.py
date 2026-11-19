@@ -16,6 +16,7 @@ import anyio
 
 from . import engine
 from .engine import CheckSelectionError
+from .errors import PartexError
 from .storage import RunStore
 
 DB_ENV = 'PARTEX_DB'
@@ -50,6 +51,14 @@ def build_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='skip the model-backed summary (summaries land with M4; nothing summarizes without a model anyway)',
     )
+
+    verify_parser = subparsers.add_parser(
+        'verify', help='(re)run the verification replay for one finding (requires --authorized)'
+    )
+    verify_parser.add_argument('run_id', help='the run holding the finding')
+    verify_parser.add_argument('finding_id', help='the finding to re-verify')
+    verify_parser.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
+    verify_parser.add_argument('--db', default=None, help='database path (default: $PARTEX_DB or user data dir)')
     return parser
 
 
@@ -109,12 +118,53 @@ def _run_test(args: argparse.Namespace) -> int:
     return 3 if result.findings else 0
 
 
+def _run_verify(args: argparse.Namespace) -> int:
+    from .verify import VerifyResult, run_verification
+
+    db_path = Path(args.db) if args.db else _default_db()
+
+    async def go() -> VerifyResult:
+        store = await RunStore.open(db_path)
+        try:
+            return await run_verification(args.run_id, args.finding_id, store, authorized=bool(args.authorized))
+        finally:
+            await store.aclose()
+
+    try:
+        result = anyio.run(go)
+    except PartexError as exc:
+        print(f'{exc.rule_code or "error"}: {exc}', file=sys.stderr)
+        return 1
+    summary = {
+        'run_id': result.run_id,
+        'finding_id': result.finding_id,
+        'verification_id': result.verification_id,
+        'verdict': result.verdict,
+        'finding_status': result.finding_status,
+        'requests_spent': result.requests_spent,
+        'replay_evidence_ids': list(result.replay_evidence_ids),
+        'detail': result.detail,
+        'counterevidence': result.counterevidence,
+    }
+    if sys.stdout.isatty():
+        print(f'finding {result.finding_id}: {result.verdict} (now {result.finding_status})')
+        print(f'detail: {result.detail}')
+        print(f'counterevidence: {result.counterevidence}')
+    else:
+        print(json.dumps(summary, indent=2))
+    # A recorded verdict is a completed command (§6): confirmed, not_reproduced,
+    # and inconclusive all exit 0; the finding is never deleted either way.
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Parse and dispatch; returns the process exit code (§6)."""
     args = build_parser().parse_args(argv)
     try:
         if args.command == 'test':
             return _run_test(args)
+        if args.command == 'verify':
+            return _run_verify(args)
     except CheckSelectionError as exc:
         print(f'{exc.rule_code}: {exc}', file=sys.stderr)
         return 2
