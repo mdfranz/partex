@@ -117,3 +117,21 @@ def test_role_value_must_be_env_var_name() -> None:
             }
         )
     assert excinfo.value.rule_code == 'credential-invalid'
+
+
+@pytest.mark.parametrize('field', ['credentials', 'roles'])
+@pytest.mark.parametrize('env_var', ['GITHUB_TOKEN', 'AWS_SECRET_ACCESS_KEY', 'PATH', 'PARTEX_', 'partex_cred'])
+def test_env_var_must_be_partex_namespaced(field: str, env_var: str) -> None:
+    """E4/E7: an engagement file cannot point partex at an unrelated secret in the environment (#39)."""
+    with pytest.raises(ValidationFailed) as excinfo:
+        validate_engagement(
+            {
+                'schema_version': 1,
+                'target': {'name': 'a', 'base_url': 'https://staging.example.test'},
+                'scope': {'hosts': ['staging.example.test']},
+                'authorization': {'attestation': 'ok', 'operator': 'op'},
+                field: {'x': env_var},
+            }
+        )
+    assert excinfo.value.rule_code == 'credential-invalid'
+    assert 'PARTEX_' in str(excinfo.value)

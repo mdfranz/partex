@@ -10,3 +10,8 @@
 
 Caps that would need very large files (body/excerpt over 256 KiB, URL over 64 KiB, raw file
 over the read cap) are exercised with generated bundles in `tests/test_bundle.py` instead.
+
+Headers are JSON arrays of `[name, value]` pairs in wire order (`[["Set-Cookie", "a=1"],
+["Set-Cookie", "b=2"]]`), so repeated headers and original casing survive; a JSON object is
+rejected. `secret_fields` paths address header values by index (`$.http.request.headers[0][1]`)
+and must resolve, or the file fails `evidence-invalid`.

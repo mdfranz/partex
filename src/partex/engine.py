@@ -244,8 +244,8 @@ def _finalize(
             missing = sorted(set(draft.evidence_ids) - registered)
             if missing:
                 raise CheckFailed(check.check_id, f'draft {position} cites unregistered evidence {missing}')
-            fid = finding_id(draft.check_id, draft.title, draft.evidence_ids)
-            # The same (check, title, evidence) twice is one finding; keep the first.
+            fid = finding_id(draft.check_id, draft.subject, draft.title, draft.evidence_ids)
+            # The same (check, subject, title, evidence) twice is one finding; keep the first.
             findings.setdefault(fid, Finding(id=fid, status='reported', **draft.model_dump()))
     return list(findings.values())
 

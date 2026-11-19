@@ -229,12 +229,15 @@ def _parse_evidence(relative: str, raw: bytes) -> Evidence:
         raise ValidationFailed(f'{relative}: {_first_error(exc)}', rule_code='evidence-invalid') from exc
 
     item: Evidence
-    if isinstance(record, _HttpRecord):
-        _check_http_caps(relative, record.http)
-        item = HttpEvidence(id='', source=relative, http=record.http, secret_fields=record.secret_fields)
-    else:
-        _check_content_cap(relative, 'config.content', record.config.content)
-        item = ConfigEvidence(id='', source=relative, config=record.config, secret_fields=record.secret_fields)
+    try:
+        if isinstance(record, _HttpRecord):
+            _check_http_caps(relative, record.http)
+            item = HttpEvidence(id='', source=relative, http=record.http, secret_fields=record.secret_fields)
+        else:
+            _check_content_cap(relative, 'config.content', record.config.content)
+            item = ConfigEvidence(id='', source=relative, config=record.config, secret_fields=record.secret_fields)
+    except ValidationError as exc:  # a secret_fields path that does not resolve (fail closed)
+        raise ValidationFailed(f'{relative}: {_first_error(exc)}', rule_code='evidence-invalid') from exc
     return item.model_copy(update={'id': evidence_id(item)})
 
 

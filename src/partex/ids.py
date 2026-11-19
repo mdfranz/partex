@@ -7,7 +7,7 @@ import hashlib
 import json
 from typing import Any
 
-from .models import Evidence
+from .models import Engagement, Evidence
 
 
 def canonical_json(obj: Any) -> bytes:
@@ -43,9 +43,13 @@ def evidence_id(evidence: Evidence) -> str:
     return 'ev_' + sha256_hex(canonical_json(d))[:16]
 
 
-def finding_id(check_id: str, title: str, evidence_ids: list[str]) -> str:
-    """Return ``fn_`` + sha256 over ``check_id``, ``title``, and sorted evidence IDs."""
-    payload = check_id + '\0' + title + '\0' + '\0'.join(sorted(evidence_ids))
+def finding_id(check_id: str, subject: str, title: str, evidence_ids: list[str]) -> str:
+    """Return ``fn_`` + sha256 over ``check_id``, ``subject``, ``title``, and sorted evidence IDs.
+
+    ``subject`` keeps findings apart that share a title and evidence (two cookies on one
+    response); identical inputs are the same finding and the engine merges them.
+    """
+    payload = check_id + '\0' + subject + '\0' + title + '\0' + '\0'.join(sorted(evidence_ids))
     return 'fn_' + sha256_hex(payload.encode())[:16]
 
 
@@ -55,9 +59,13 @@ def verification_id(finding_id: str, requests: list[str]) -> str:
     return 'vf_' + sha256_hex(payload.encode())[:16]
 
 
-def engagement_id(engagement_json_bytes: bytes) -> str:
-    """Return ``eng_`` + sha256 over the canonical JSON of the engagement manifest."""
-    return 'eng_' + sha256_hex(engagement_json_bytes)[:16]
+def engagement_id(engagement: Engagement) -> str:
+    """Return ``eng_`` + sha256 over the canonical JSON of the validated engagement manifest.
+
+    Hashing the validated model (not the file bytes) makes whitespace, key order, and defaulted
+    fields irrelevant: two manifests that validate to the same engagement share one ID.
+    """
+    return 'eng_' + sha256_hex(canonical_json(engagement.model_dump(mode='json')))[:16]
 
 
 def normalized_operation_key(method: str, path_template: str) -> str:

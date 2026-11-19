@@ -295,10 +295,10 @@ row is finalized):
 | E1 | manifest parses, `schema_version` is exactly `1` | `engagement-version` |
 | E2 | `authorization.attestation` is present and non-empty; the CLI additionally requires `--authorized` on every live command, and the stored run records both | `unauthorized` |
 | E3 | scope is non-empty: at least one host; every host parses; `exclusions` are within `path_prefixes`; `max_rps` and `max_requests` are positive with hard ceilings (64 rps, 100k requests) | `scope-invalid` |
-| E4 | `credentials` values are environment variable **names** matching `[A-Z0-9_]+`; inline values are rejected. Referenced variables must be set at run start | `credential-invalid` / `credential-missing` |
+| E4 | `credentials` values are environment variable **names** matching `PARTEX_[A-Z0-9_]+` (the namespace keeps an engagement file from naming an unrelated secret such as `GITHUB_TOKEN`); inline values are rejected. Referenced variables must be set at run start | `credential-invalid` / `credential-missing` |
 | E5 | `base_url` host must be inside `scope.hosts` | `scope-invalid` |
 | E6 | `suggested_checks` entries that are not registered are dropped with a warning | - |
-| E7 | `roles` is optional; keys are role names, values are environment variable **names** matching `[A-Z0-9_]+`, validated exactly like `credentials` (E4), each role a distinct variable; referenced variables must be set at run start | `credential-invalid` / `credential-missing` |
+| E7 | `roles` is optional; keys are role names, values are environment variable **names** matching `PARTEX_[A-Z0-9_]+`, validated exactly like `credentials` (E4), each role a distinct variable; referenced variables must be set at run start | `credential-invalid` / `credential-missing` |
 
 `roles` maps role names to credential variables for multi-identity testing: active
 authorization checks and their verification recipes replay the same operation under two roles
@@ -370,13 +370,31 @@ sibling fields:
 ```python
 Severity = Literal['info', 'low', 'medium', 'high', 'critical']
 
+# (name, value) pairs in wire order: original casing and repeated headers (Set-Cookie) preserved.
+# Look up with get_header()/get_all() (case-insensitive), never by position or dict key.
+type Headers = list[tuple[str, str]]
+
+class HttpRequest(BaseModel):
+    method: str
+    url: str                 # as requested (hostname, never the DNS-pinned address)
+    headers: Headers
+    body: str | None
+
+class HttpResponse(BaseModel):
+    status_code: int
+    headers: Headers
+    body: str | None
+
 class HttpEvidence(BaseModel):
     id: str                  # "ev_" + sha256(canonical_json)[:16]  (§12)
     kind: Literal['http_exchange'] = 'http_exchange'
     source: str              # bundle-relative file; "capture:<run-seq>" (client);
                               # "capture:browser:<seq>" (harness, M7)
     http: HttpExchange
-    secret_fields: list[str] # JSON paths marked secret (credential headers/bodies), redacted on export & model return
+    secret_fields: list[str] # paths marked secret, redacted on export & model return: "$" then
+                              # ".key" / "[n]" steps naming a string value, e.g.
+                              # "$.http.request.headers[2][1]" (header 2's value) or "$.http.request.body";
+                              # every path must resolve when the evidence is built (fail closed)
 
 class ConfigEvidence(BaseModel):
     id: str                  # "ev_" + sha256(canonical_json)[:16]  (§12)
@@ -388,10 +406,12 @@ class ConfigEvidence(BaseModel):
 type Evidence = Annotated[HttpEvidence | ConfigEvidence, Field(discriminator='kind')]
 
 class Finding(BaseModel):
-    id: str                  # "fn_" + sha256(check_id + '\0' + title + '\0' + sorted evidence_ids)[:16]
+    id: str                  # "fn_" + sha256(check_id + '\0' + subject + '\0' + title + '\0' + sorted evidence_ids)[:16]
     check_id: str
     check_version: str
     severity: Severity
+    subject: str             # what the finding is about: "cookie:sid", "header:strict-transport-security",
+                             # "op:GET /users/{id}"; keeps apart findings sharing a title and evidence
     title: str
     description: str
     evidence_ids: Annotated[list[str], Field(min_length=1)]  # each must exist in the run's evidence
@@ -549,7 +569,7 @@ workers, no database-backed job queue in v1.
 
 ```sql
 CREATE TABLE engagements (
-  id TEXT PRIMARY KEY,            -- "eng_" + sha256(canonical engagement.json)[:16]
+  id TEXT PRIMARY KEY,            -- "eng_" + sha256(canonical JSON of the validated manifest)[:16]
   name TEXT NOT NULL,
   base_url TEXT NOT NULL,
   scope TEXT NOT NULL,            -- serialized Scope
@@ -586,6 +606,7 @@ CREATE TABLE findings (
   check_id TEXT NOT NULL,
   check_version TEXT NOT NULL,
   severity TEXT NOT NULL,
+  subject TEXT NOT NULL,
   title TEXT NOT NULL,
   description TEXT NOT NULL,
   evidence_ids TEXT NOT NULL,     -- JSON array
@@ -881,10 +902,17 @@ class ActiveCheck(Protocol):
     title: str
     description: str
     def applies_to(self, evidence: Sequence[Evidence]) -> bool: ...
-    def probe(self, evidence: Sequence[Evidence],
-              client: ScopedHttpClient) -> Sequence[FindingDraft]: ...
+    async def probe(self, evidence: Sequence[Evidence],
+                    client: TargetClient) -> Sequence[FindingDraft]: ...
     def verify_recipe(self, finding: Finding) -> VerificationRecipe | None: ...
+
+class TargetClient(Protocol):   # implemented by target.ScopedHttpClient
+    async def request(self, method: str, url: str, *, headers: HeaderInput | None = None,
+                      body: str | None = None) -> HttpEvidence: ...
 ```
+
+- `probe` is async because every request is; `TargetClient.request` returns the captured,
+  already-committed `HttpEvidence`, so drafts cite `evidence.id` directly.
 
 - `verify_recipe` returns the minimal request set that confirms the finding (the replay the
   verification runner executes); checks without a recipe produce `reported`-only findings.
@@ -970,7 +998,7 @@ The scope change splits the guarantee in two:
 - **Passive mode keeps full determinism.** Evidence ID = `ev_` + sha256 of the canonical JSON of
   `kind` + `http`/`config` **only** (excluding `id`, `source`, and `secret_fields`, so an
   exchange hashes the same whether captured live or re-imported from a bundle); finding ID =
-  `fn_` + sha256 of `check_id + '\0' + title + '\0' + '\0'.join(sorted evidence_ids)`.
+  `fn_` + sha256 of `check_id + '\0' + subject + '\0' + title + '\0' + '\0'.join(sorted evidence_ids)`.
   Findings that name an API operation use the **normalized operation key** — uppercase method
   plus the contract's path template with parameters inlined — never the raw observed path, so
   finding IDs survive bundle revisions and route reordering. Checks

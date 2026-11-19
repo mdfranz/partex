@@ -31,7 +31,10 @@ from .errors import ValidationFailed
 from .models import Engagement
 from .scope import check_url, normalize_host, validate_scope
 
-ENV_VAR_PATTERN = re.compile(r'^[A-Z0-9_]+$')
+# E4/E7: credential references must be partex-namespaced, so an engagement file from a
+# third party cannot name an unrelated secret (GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY) and have
+# partex send it to the target (#39).
+ENV_VAR_PATTERN = re.compile(r'^PARTEX_[A-Z0-9_]+$')
 
 MANIFEST_NAME = 'engagement.json'
 
@@ -102,7 +105,7 @@ def validate_engagement(data: Any) -> Engagement:
 def _validate_env_var_map(value: Any, field_name: str, *, require_distinct: bool) -> None:
     """Validate a name → env-var-name mapping (E4 / E7).
 
-    Values must match ``[A-Z0-9_]+`` — anything else (an inlined secret, a
+    Values must match ``PARTEX_[A-Z0-9_]+`` — anything else (an inlined secret, a
     lowercase name) is rejected as ``credential-invalid``.  With
     ``require_distinct`` (roles), values must additionally be pairwise
     distinct so no two roles silently share one credential.
@@ -119,7 +122,7 @@ def _validate_env_var_map(value: Any, field_name: str, *, require_distinct: bool
         if not isinstance(env_var, str) or not ENV_VAR_PATTERN.fullmatch(env_var):
             raise _fail(
                 'credential-invalid',
-                f'{field_name}[{name!r}] must be an environment variable name matching [A-Z0-9_]+, '
+                f'{field_name}[{name!r}] must be an environment variable name matching PARTEX_[A-Z0-9_]+, '
                 f'got {env_var!r} (inline secret values are rejected)',
             )
         if require_distinct:

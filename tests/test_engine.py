@@ -59,6 +59,7 @@ def _draft(check_id: str, evidence: Sequence[Evidence], title: str = 'Issue', **
             'check_id': check_id,
             'check_version': '1',
             'severity': 'low',
+            'subject': 'thing',
             'title': title,
             'description': 'd',
             'evidence_ids': [evidence[0].id],
@@ -252,7 +253,7 @@ async def test_dict_drafts_accepted_and_ids_assigned_by_engine(tmp_store: RunSto
     behaviour = lambda ev: [_draft('c', ev, 'From dict').model_dump()]
     result = await run_review(VALID, tmp_store, ['c'], registry={'c': FakeCheck('c', behaviour)})
     (finding,) = result.findings
-    assert finding.id == finding_id('c', 'From dict', finding.evidence_ids)
+    assert finding.id == finding_id('c', 'thing', 'From dict', finding.evidence_ids)
     assert (finding.status, finding.verification_id) == ('reported', None)
 
 
@@ -261,6 +262,14 @@ async def test_duplicate_drafts_collapse_to_one_finding(tmp_store: RunStore):
         VALID, tmp_store, ['c'], registry={'c': FakeCheck('c', _finds('c', 'Same', 'Same', 'Other'))}
     )
     assert [f.title for f in result.findings] == ['Same', 'Other']
+
+
+async def test_distinct_subjects_with_same_title_and_evidence_are_kept(tmp_store: RunStore):
+    """Two cookies on one response: same title and evidence, different subjects — both persist (#39)."""
+    behaviour = lambda ev: [_draft('c', ev, 'Weak cookie', subject=f'cookie:{name}') for name in ('a', 'b')]
+    result = await run_review(VALID, tmp_store, ['c'], registry={'c': FakeCheck('c', behaviour)})
+    assert sorted(f.subject for f in result.findings) == ['cookie:a', 'cookie:b']
+    assert len({f.id for f in result.findings}) == 2
 
 
 async def test_inapplicable_check_is_skipped(tmp_store: RunStore):
