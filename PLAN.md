@@ -413,7 +413,9 @@ class ConfigEvidence(BaseModel):
     config: ConfigExcerpt
     secret_fields: list[str]
 
-type Evidence = Annotated[HttpEvidence | ConfigEvidence, Field(discriminator='kind')]
+type Evidence = Annotated[HttpEvidence | ConfigEvidence | ArtifactEvidence, Field(discriminator='kind')]
+# ArtifactEvidence (#69) stores metadata + sha256 + mode-0600 local file_path beside the DB for
+# full-body assets (e.g. JS bundles > 256 KB); file_path is excluded from the canonical ev_ hash.
 
 class Finding(BaseModel):
     id: str                  # "fn_" + sha256(check_id + '\0' + subject + '\0' + title + '\0' + sorted evidence_ids)[:16]
@@ -926,6 +928,8 @@ class TargetClient(Protocol):   # implemented by target.ScopedHttpClient
 
 - `verify_recipe` returns the minimal request set that confirms the finding (the replay the
   verification runner executes); checks without a recipe produce `reported`-only findings.
+- Built-in checks: `header-security` (passive), `js-analysis` (passive, tree-sitter AST
+  over downloaded JS artifacts and JS responses, #69), and `version-disclosure` (active).
 - Third-party checks register via the entry-point group `partex.checks`. Check code loads
   **only** from installed distributions; extra skill roots load via `--skill-dir` (data). That
   is the trust boundary: arbitrary paths can add Markdown, never code.

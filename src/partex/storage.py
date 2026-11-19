@@ -273,6 +273,11 @@ def surface_node_id(kind: SurfaceKind, key: str) -> str:
     return 'sn_' + sha256_hex(f'{kind}\0{key}'.encode())[:16]
 
 
+def artifact_dir(db_path: Path) -> Path:
+    """Directory beside *db_path* where full-body downloaded artifacts are stored (mode 0700, files 0600)."""
+    return db_path.parent / f'{db_path.name}.artifacts'
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec='microseconds')
 

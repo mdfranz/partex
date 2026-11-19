@@ -13,6 +13,8 @@ dependencies = [
     "pydantic-ai-harness[repair-tool-arguments]>=0.68",
     "pydantic-clai2>=0.68",
     "pyyaml>=6",  # registry.py skill frontmatter (already locked transitively)
+    "tree-sitter>=0.26.1",
+    "tree-sitter-javascript>=0.25.0",
 ]
 
 [project.scripts]
@@ -20,6 +22,7 @@ partex = "partex.__main__:main"
 
 [project.entry-points."partex.checks"]
 header-security = "partex.checks.header_security:header_security_check"
+js-analysis = "partex.checks.js_analysis:js_analysis_check"
 version-disclosure = "partex.checks.version_disclosure:version_disclosure_check"
 
 # Supply-chain cool-off: only resolve registry artifacts uploaded at least 2 days ago, so a

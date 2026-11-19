@@ -18,9 +18,10 @@ from pydantic_ai import Agent, ModelRetry, RunContext, ToolFailed
 from pydantic_ai.framing import wrap
 from pydantic_ai.models import Model
 
+from ..checks.js_analysis import discover_js_urls
 from ..engine import CheckFailed, CheckSelectionError, LiveSession
 from ..errors import BudgetExhausted, PartexError, ScopeViolation
-from ..models import Finding, HttpEvidence, redact
+from ..models import ArtifactEvidence, Finding, HttpEvidence, redact
 from ..storage import RunStore
 from .tools import BRIEFING_TAG, REVIEWER_TOOLS, ReviewDeps, frame_untrusted
 
@@ -138,17 +139,93 @@ async def run_check(ctx: RunContext[TesterDeps], check_id: str) -> str:
     return frame_untrusted('check_result', {'check_id': check_id, 'findings': [_finding_row(f) for f in findings]})
 
 
-TESTER_TOOLS = (*REVIEWER_TOOLS, http_request, run_check)
+async def download_asset(ctx: RunContext[TesterDeps], path: str, headers: dict[str, str] | None = None) -> str:
+    """Download a full-body asset (e.g. a JavaScript bundle) locally for offline analysis.
+
+    Uses GET only through the engagement-scoped client (scope, rate limit, and request budget apply).
+    Stores the complete file locally on disk and returns metadata and the ``ev_`` evidence ID, never
+    the full body. Run ``run_check('js-analysis')`` afterwards to analyze downloaded JavaScript.
+
+    Args:
+        path: A path from the target's base URL (``/static/app.js``) or an absolute in-scope URL.
+        headers: Optional extra request headers.
+    """
+    session = ctx.deps.session
+    url = path if '://' in path else urljoin(session.engagement.target.base_url, path)
+    args = {'method': 'GET', 'url': url, 'header_names': sorted(headers or {})}
+    try:
+        evidence = await session.download_asset(url, headers=headers)
+    except ScopeViolation as exc:
+        await _audit(ctx, 'download_asset', args, {'refused': 'scope', 'reason': str(exc)})
+        raise ToolFailed(
+            f'refused by the engagement scope (nothing was sent): {exc}. You cannot change scope: if the operator '
+            'wants this host or port, they run /scope add <host[:port]> then /scope confirm.'
+        ) from exc
+    except BudgetExhausted as exc:
+        await _audit(ctx, 'download_asset', args, {'refused': 'budget'})
+        raise ToolFailed(f'the engagement request budget is spent: {exc}') from exc
+    except PartexError as exc:
+        await _audit(ctx, 'download_asset', args, {'error': str(exc)})
+        raise ToolFailed(str(exc)) from exc
+    redacted = cast(ArtifactEvidence, redact(evidence))
+    await _audit(
+        ctx,
+        'download_asset',
+        args,
+        {
+            'evidence_id': evidence.id,
+            'sha256': evidence.artifact.sha256,
+            'size_bytes': evidence.artifact.size_bytes,
+        },
+    )
+    return frame_untrusted(
+        'asset_download',
+        {
+            'evidence_id': evidence.id,
+            'url': redacted.artifact.url,
+            'status': redacted.artifact.status_code,
+            'content_type': redacted.artifact.content_type,
+            'sha256': redacted.artifact.sha256,
+            'size_bytes': redacted.artifact.size_bytes,
+            'response_headers': redacted.artifact.headers,
+        },
+    )
+
+
+async def discover_js_assets(ctx: RunContext[TesterDeps]) -> str:
+    """List JavaScript ``<script src>``, import, and source-map URLs found in captured evidence.
+
+    Partitioned into ``in_scope`` and ``out_of_scope``. Nothing is fetched automatically; use
+    ``download_asset`` to download an in-scope asset, or ask the operator to extend scope first.
+    """
+    session = ctx.deps.session
+    discovery = discover_js_urls(session.captured, scope=session.engagement.scope)
+    await _audit(
+        ctx,
+        'discover_js_assets',
+        {},
+        {'in_scope': len(discovery.in_scope), 'out_of_scope': len(discovery.out_of_scope)},
+    )
+    return frame_untrusted(
+        'js_discovery',
+        {'in_scope': list(discovery.in_scope), 'out_of_scope': list(discovery.out_of_scope)},
+    )
+
+
+TESTER_TOOLS = (*REVIEWER_TOOLS, http_request, download_asset, discover_js_assets, run_check)
 
 TESTER_INSTRUCTIONS = """\
 You help a security operator test one target interactively, under a written authorization. The
 operator directs; you send the requests they ask for, run checks, and explain what the evidence
 shows. Do not probe beyond what the operator asked without saying what you intend first.
 
-Tools: http_request (GET, HEAD, OPTIONS only), run_check (registered partex checks; the only way a
-finding is recorded), and the read tools (list_runs, list_findings, get_finding, list_evidence,
-lookup_evidence). list_runs shows earlier sessions against this same target; pass a run ID, or
-run='previous' for the run this session continues from, to read one. Earlier runs are read-only.
+Tools: http_request (GET, HEAD, OPTIONS only), download_asset (GET-only full-body download for
+large assets such as JS bundles, returning metadata + ev_ ID without the body), discover_js_assets
+(lists <script src> and import URLs from captured evidence without fetching), run_check (registered
+partex checks, e.g. js-analysis; the only way a finding is recorded), and the read tools (list_runs,
+list_findings, get_finding, list_evidence, lookup_evidence). list_runs shows earlier sessions against
+this same target; pass a run ID, or run='previous' for the run this session continues from, to read
+one. Earlier runs are read-only.
 
 The engagement scope, rate limit, and request budget are enforced by partex before anything is
 sent: a refused request reached nothing. Do not try to work around a refusal. You have no tool that
