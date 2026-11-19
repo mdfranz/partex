@@ -360,3 +360,130 @@ async def test_inapplicable_check_is_skipped_in_the_deterministic_pass(
         engagement(tmp_path, target_app), tmp_store, authorized=True, checks=('never',), registry=registry
     ) as session:
         assert session.findings == []
+
+
+# ── local observability: llm_usage + read-tool audit (#54) ────────────────────
+
+
+async def test_run_agent_records_model_usage_and_read_tool_calls(
+    tmp_path: Path, target_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session is auditable from the DB alone: model turns in llm_usage, read tools in tool_calls."""
+    import sqlite3
+
+    import partex.agent_adapter
+
+    async def fake_chat(agent: Agent[TesterDeps, str], **kwargs: Any) -> None:
+        # Stand in for the terminal: run one turn that reads findings, so a read-tool audit is written.
+        await agent.run('what are the findings?', deps=kwargs['deps'], model=scripted([('list_findings', {})]))
+
+    monkeypatch.setattr(partex.agent_adapter, 'chat', fake_chat)
+    db = tmp_path / 'partex.db'
+    run_id = await run_agent(
+        engagement(tmp_path, target_app), db, TestModel(), authorized=True, checks=('version-disclosure',)
+    )
+    conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+    usage = conn.execute(
+        'SELECT role, status, COUNT(*), SUM(output_tokens) FROM llm_usage WHERE run_id=? GROUP BY role, status',
+        (run_id,),
+    ).fetchall()
+    assert usage and all(role == 'tester' and status == 'ok' for role, status, _, _ in usage)
+    assert sum(count for _, _, count, _ in usage) >= 1  # briefing + the chat turn
+    tools = dict(conn.execute('SELECT tool, COUNT(*) FROM tool_calls WHERE run_id=? GROUP BY tool', (run_id,)))
+    assert tools.get('list_findings', 0) >= 1  # the read-tool call is now audited locally
+
+
+async def test_read_tool_audit_is_compact_and_has_no_secrets(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    recorded: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+
+    async def audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        recorded.append((tool, args, result))
+
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        agent: Agent[TesterDeps, str] = build_tester_agent('test')
+        deps = TesterDeps(run_id=session.run_id, reader=tmp_store, audit=audit, session=session, store=tmp_store)
+        await agent.run(
+            'look',
+            deps=deps,
+            model=scripted([('list_findings', {}), ('lookup_evidence', {'evidence_id': 'ev_nope'})]),
+        )
+    tools = {tool for tool, _, _ in recorded}
+    assert tools == {'list_findings', 'lookup_evidence'}
+    lookup = next(r for t, _, r in recorded if t == 'lookup_evidence')
+    assert lookup == {'found': False}  # compact: no body, no evidence contents
+
+
+async def test_chat_path_writes_nothing_to_the_run(tmp_path: Path, target_app: Any) -> None:
+    """chat is read-only: reviewing a run records no llm_usage and no tool_calls against it."""
+    import sqlite3
+
+    from partex.agent_adapter import run_chat
+    from partex.storage import RunStore as Store
+
+    db = tmp_path / 'partex.db'
+    async with (
+        await Store.open(db) as store,
+        live_session(engagement(tmp_path, target_app), store, authorized=True) as session,
+    ):
+        run_id = session.run_id
+
+    import partex.agent_adapter
+
+    async def fake_chat(agent: Agent[Any, str], **kwargs: Any) -> None:
+        await agent.run('findings?', deps=kwargs['deps'], model=scripted([('list_findings', {})]))
+
+    import pytest as _pytest
+
+    monkeypatch = _pytest.MonkeyPatch()
+    monkeypatch.setattr(partex.agent_adapter, 'chat', fake_chat)
+    try:
+        await run_chat(run_id, db, TestModel(), briefing=False)
+    finally:
+        monkeypatch.undo()
+    conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
+    assert conn.execute('SELECT COUNT(*) FROM llm_usage WHERE run_id=?', (run_id,)).fetchone()[0] == 0
+    assert conn.execute('SELECT COUNT(*) FROM tool_calls WHERE run_id=?', (run_id,)).fetchone()[0] == 0
+
+
+async def test_usage_recorder_covers_streaming_and_errors(tmp_store: RunStore) -> None:
+    """UsageRecordingModel writes a row for the streamed path (what CLAI2 uses) and for a failed call."""
+    from pydantic_ai import Agent as _Agent
+    from pydantic_ai.models.function import AgentInfo as _AgentInfo
+    from pydantic_ai.models.test import TestModel as _TestModel
+
+    from partex.agent_adapter.usage import UsageRecordingModel
+
+    run_id = await tmp_store.create_run(
+        input_kind='engagement', input_ref='e', input_sha256='s', engine_version='0.1.0', selected_checks=[]
+    )
+    recorder = UsageRecordingModel(_TestModel(), store=tmp_store, run_id=run_id, role='tester')
+
+    async with _Agent(recorder).run_stream('hi') as result:  # streamed path
+        await result.get_output()
+    rows = await tmp_store.llm_usage_totals(run_id)
+    assert rows['calls'] == 1 and rows['input_tokens'] > 0
+
+    async def boom_stream(messages: list[ModelMessage], info: _AgentInfo):  # type: ignore[no-untyped-def]
+        raise RuntimeError('provider down')
+        yield  # pragma: no cover -- makes this an async generator
+
+    failing = UsageRecordingModel(
+        FunctionModel(stream_function=boom_stream), store=tmp_store, run_id=run_id, role='tester'
+    )
+    with pytest.raises(RuntimeError, match='provider down'):  # streamed path, so the stream error branch runs
+        async with _Agent(failing).run_stream('hi') as result:
+            await result.get_output()
+
+    def boom_sync(messages: list[ModelMessage], info: _AgentInfo) -> ModelResponse:
+        raise RuntimeError('provider down')
+
+    failing_sync = UsageRecordingModel(FunctionModel(boom_sync), store=tmp_store, run_id=run_id, role='tester')
+    with pytest.raises(RuntimeError, match='provider down'):  # non-streamed request path
+        await _Agent(failing_sync).run('hi')
+    import sqlite3
+
+    conn = sqlite3.connect(f'file:{tmp_store.path}?mode=ro', uri=True)
+    statuses = dict(conn.execute('SELECT status, COUNT(*) FROM llm_usage WHERE run_id=? GROUP BY status', (run_id,)))
+    assert statuses.get('error', 0) == 2 and statuses.get('ok', 0) == 1  # stream + non-stream failure, one ok

@@ -25,6 +25,7 @@ from ..storage import RunReader, RunStore
 from .reviewer import BRIEFING_PROMPT, build_reviewer_agent
 from .tester import TesterDeps, build_tester_agent
 from .tools import ReviewDeps
+from .usage import UsageRecordingModel
 
 # Explicit CLAI2 settings, so the operator's saved CLAI2 preferences cannot change what the reviewer is:
 # model=None keeps the agent's model (CLAI2's default model would otherwise override it), and Code Mode
@@ -103,11 +104,23 @@ async def run_agent(
         if from_run is not None:
             await store.get_run(from_run)  # unknown run → StoreError(run-not-found) before any socket
         async with engine.live_session(engagement_path, store, authorized=authorized, checks=checks) as session:
+            # Record every model turn (briefing, chat) and every read-tool call to this run (§7, #54),
+            # so the run is auditable offline, not only through the gateway/Logfire.
+            recorded = UsageRecordingModel(model, store=store, run_id=session.run_id, role='tester')
+
+            async def audit(tool: str, args: dict[str, object], result: dict[str, object]) -> None:
+                await store.record_tool_call(session.run_id, tool, args, result)
+
             deps = TesterDeps(
-                run_id=session.run_id, reader=store, previous_run_id=from_run, session=session, store=store
+                run_id=session.run_id,
+                reader=store,
+                previous_run_id=from_run,
+                audit=audit,
+                session=session,
+                store=store,
             )
-            summary = await brief(model, deps, console) if briefing else None
+            summary = await brief(recorded, deps, console) if briefing else None
             await _pause_on(summary, console)
-            agent = build_tester_agent(model, briefing=summary)
+            agent = build_tester_agent(recorded, briefing=summary)
             await chat(agent, deps=deps, load_plugins=False, console=console, settings=CHAT_SETTINGS)
         return session.run_id

@@ -9,6 +9,7 @@ adapts instead of retrying.
 """
 
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -29,6 +30,10 @@ type RunReads = RunReader | RunStore
 
 type RunChoice = Literal['current', 'previous']
 
+type AuditHook = Callable[[str, dict[str, Any], dict[str, Any]], Awaitable[None]]
+"""Records one read-tool call (``tool, args, compact result``). ``agent`` sets it; ``chat`` leaves it None,
+so the reviewer stays fully read-only."""
+
 
 @dataclass(frozen=True, slots=True)
 class ReviewDeps:
@@ -38,6 +43,8 @@ class ReviewDeps:
     reader: RunReads
     previous_run_id: str | None = None
     """The run an ``agent`` session continues from (``--from``); ``None`` for ``chat``."""
+    audit: AuditHook | None = None
+    """Set by ``agent`` to log read-tool calls to the session run; ``None`` for the read-only ``chat``."""
 
 
 def _run_id(deps: ReviewDeps, run: RunChoice) -> str:
@@ -51,6 +58,11 @@ def _run_id(deps: ReviewDeps, run: RunChoice) -> str:
 def frame_untrusted(kind: str, payload: Any) -> str:
     """Serialize *payload* and frame it as untrusted target-derived data."""
     return wrap(UNTRUSTED_TAG, json.dumps(payload, indent=2, sort_keys=True), kind=kind)
+
+
+async def _audit_read(deps: ReviewDeps, tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+    if deps.audit is not None:
+        await deps.audit(tool, args, result)
 
 
 def _finding_summary(finding: Finding) -> dict[str, Any]:
@@ -72,6 +84,7 @@ async def list_findings(ctx: RunContext[ReviewDeps], run: RunChoice = 'current')
         run: ``current`` (default), or ``previous`` for the run an agent session continues from.
     """
     findings = await ctx.deps.reader.findings(_run_id(ctx.deps, run))
+    await _audit_read(ctx.deps, 'list_findings', {'run': run}, {'count': len(findings)})
     return frame_untrusted('findings', [_finding_summary(finding) for finding in findings])
 
 
@@ -100,6 +113,7 @@ async def list_evidence(ctx: RunContext[ReviewDeps], run: RunChoice = 'current')
         run: ``current`` (default), or ``previous`` for the run an agent session continues from.
     """
     evidence = await ctx.deps.reader.evidence(_run_id(ctx.deps, run))
+    await _audit_read(ctx.deps, 'list_evidence', {'run': run}, {'count': len(evidence)})
     return frame_untrusted('evidence_list', [_evidence_summary(item) for item in evidence])
 
 
@@ -111,6 +125,7 @@ async def get_finding(ctx: RunContext[ReviewDeps], finding_id: str, run: RunChoi
         run: ``current`` (default), or ``previous`` for the run an agent session continues from.
     """
     finding = await ctx.deps.reader.get_finding(_run_id(ctx.deps, run), finding_id)
+    await _audit_read(ctx.deps, 'get_finding', {'finding_id': finding_id, 'run': run}, {'found': finding is not None})
     if finding is None:
         raise ToolFailed(f'no finding {finding_id!r} in this run; call list_findings for valid IDs')
     return frame_untrusted('finding', finding.model_dump(mode='json'))
@@ -124,6 +139,9 @@ async def lookup_evidence(ctx: RunContext[ReviewDeps], evidence_id: str, run: Ru
         run: ``current`` (default), or ``previous`` for the run an agent session continues from.
     """
     evidence = await ctx.deps.reader.get_evidence(_run_id(ctx.deps, run), evidence_id)
+    await _audit_read(
+        ctx.deps, 'lookup_evidence', {'evidence_id': evidence_id, 'run': run}, {'found': evidence is not None}
+    )
     if evidence is None:
         raise ToolFailed(f'no evidence {evidence_id!r} in this run; use evidence_ids from list_findings')
     return frame_untrusted('evidence', json.loads(canonical_json(redact(evidence).model_dump(mode='json'))))

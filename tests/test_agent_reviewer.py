@@ -195,6 +195,7 @@ def test_reviewer_has_no_write_or_network_tools() -> None:
         '_finding_summary',
         '_evidence_summary',
         '_run_id',
+        '_audit_read',
         'list_findings',
         'get_finding',
         'list_evidence',
