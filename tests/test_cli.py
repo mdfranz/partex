@@ -371,6 +371,7 @@ def test_show_text_includes_error_verifications_and_summary() -> None:
         },
         'evidence': [],
         'findings': [],
+        'llm_usage': [],
         'verifications': [{'id': 'vf_1', 'verdict': 'confirmed', 'finding_id': 'fn_1'}],
         'summary': {'narrative': 'All good.'},
     }
@@ -401,7 +402,9 @@ def test_checks_text(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.Mon
 def test_checks_none_installed(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(engine, 'installed_checks', dict)
     as_tty(monkeypatch)
-    assert run(capsys, 'checks') == (cli.EXIT_OK, 'no checks installed\n', '')
+    code, out, err = run(capsys, 'checks')  # skills naming now-unregistered checks warn on stderr (#25)
+    assert (code, out) == (cli.EXIT_OK, 'no checks installed\n')
+    assert 'warning: header-review: unknown-check' in err
 
 
 def test_check_kind_labels() -> None:
@@ -678,3 +681,26 @@ def test_agent_refused_session_exits_1(
 
 def test_agent_requires_model(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     assert run(capsys, 'agent', str(tmp_path / 'eng'), '--authorized')[0] == cli.EXIT_USAGE
+
+
+def test_report_empty_store_exits_ok(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    async def create() -> None:
+        async with await RunStore.open(db):
+            pass
+
+    anyio.run(create)
+    code, out, _ = run(capsys, 'report', '--db', str(db))
+    assert code == cli.EXIT_OK
+    payload = json.loads(out)
+    assert payload['runs']['total'] == 0
+    assert payload['findings']['total'] == 0
+
+
+def test_report_rolls_up_a_reviewed_run(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    assert review_run_id(capsys, db, VALID_BUNDLE)  # seed one reviewed run
+    code, out, _ = run(capsys, 'report', '--db', str(db))
+    assert code == cli.EXIT_OK
+    payload = json.loads(out)
+    assert payload['runs']['total'] == 1
+    assert payload['findings']['total'] >= 1
+    assert any(check['check_id'] == 'header-security' for check in payload['findings']['by_check'])

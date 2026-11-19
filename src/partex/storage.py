@@ -233,6 +233,21 @@ class ToolCallRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmUsageRecord:
+    """One ``llm_usage`` row: a single model turn's role, model, token counts, latency, and status."""
+
+    role: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    latency_ms: int
+    status: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class SurfaceNode:
     """One ``surface_nodes`` row."""
 
@@ -427,6 +442,20 @@ class _Reads:
                 (run_id,),
             )
             return [ToolCallRecord(c, t, json.loads(a), json.loads(r), at) for c, t, a, r, at in rows]
+
+        return await self._db.run(read)
+
+    async def llm_usage(self, run_id: str) -> list[LlmUsageRecord]:
+        """The run's recorded model turns, in the order they were recorded."""
+
+        def read(conn: sqlite3.Connection) -> list[LlmUsageRecord]:
+            _get_run(conn, run_id)
+            rows = conn.execute(
+                'SELECT role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, '
+                'latency_ms, status, created_at FROM llm_usage WHERE run_id = ? ORDER BY id',
+                (run_id,),
+            )
+            return [LlmUsageRecord(*row) for row in rows]
 
         return await self._db.run(read)
 
@@ -696,11 +725,19 @@ class RunStore(_Reads):
         await self._db.run(lambda conn: _transaction(conn, lambda c: _insert_findings(c, run_id, findings)))
 
     async def record_verification(
-        self, run_id: str, verification: Verification, evidence: Sequence[Evidence] = ()
+        self,
+        run_id: str,
+        verification: Verification,
+        evidence: Sequence[Evidence] = (),
+        *,
+        transition: bool = True,
     ) -> None:
         """Store *verification* with its PoC evidence and transition the finding's status, atomically.
 
-        ``confirmed`` → ``verified``; anything else → ``verification_failed``. The finding is never deleted.
+        ``confirmed`` → ``verified``; ``not_reproduced`` → ``verification_failed``;
+        with ``transition=False`` (the runner's ``inconclusive`` path) the finding
+        keeps its current status — the skill's replay table keeps inconclusive
+        findings ``reported``. The finding is never deleted.
         """
 
         def write(conn: sqlite3.Connection) -> None:
@@ -730,10 +767,11 @@ class RunStore(_Reads):
                 ),
             )
             status: FindingStatus = 'verified' if verification.verdict == 'confirmed' else 'verification_failed'
-            conn.execute(
-                'UPDATE findings SET status = ?, verification_id = ? WHERE run_id = ? AND finding_id = ?',
-                (status, verification.id, run_id, verification.finding_id),
-            )
+            if transition:
+                conn.execute(
+                    'UPDATE findings SET status = ?, verification_id = ? WHERE run_id = ? AND finding_id = ?',
+                    (status, verification.id, run_id, verification.finding_id),
+                )
 
         await self._db.run(lambda conn: _transaction(conn, write))
 

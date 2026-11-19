@@ -12,7 +12,7 @@ from partex.checks.version_disclosure import (
     version_disclosure_check,
 )
 from partex.ids import evidence_id
-from partex.models import FindingDraft, HttpEvidence, HttpExchange, HttpRequest, HttpResponse
+from partex.models import Finding, FindingDraft, HttpEvidence, HttpExchange, HttpRequest, HttpResponse
 
 BASE_URL = 'http://fixture.test:8443'
 
@@ -137,5 +137,42 @@ async def test_all_drafts_cite_evidence_and_claim_the_check() -> None:
         assert draft.evidence_ids == [baseline.id] or len(draft.evidence_ids) == 1
 
 
-def test_verify_recipe_is_none_until_22() -> None:
-    assert version_disclosure_check.verify_recipe(object()) is None
+# ── verify_recipe + verify_match (issue #22) ──────────────────────────────────
+
+
+def test_verify_recipe_replays_the_original_exchange() -> None:
+    original = exchange('/', headers={'server': 'FixtureTarget/2.3.1'})
+    draft = version_disclosure_check._drafts_for(original)[0]
+    finding = Finding(id='fn_test', status='reported', **draft.model_dump())
+    recipe = version_disclosure_check.verify_recipe(finding, [original])
+    assert recipe is not None
+    assert len(recipe.requests) == 1
+    assert recipe.requests[0].method == 'GET'
+    assert recipe.requests[0].path == original.http.request.url  # full URL for the scope gate
+
+
+def test_verify_recipe_none_without_http_evidence() -> None:
+    original = exchange('/', headers={'server': 'FixtureTarget/2.3.1'})
+    draft = version_disclosure_check._drafts_for(original)[0]
+    finding = Finding(id='fn_test', status='reported', **draft.model_dump())
+    assert version_disclosure_check.verify_recipe(finding, []) is None
+
+
+def test_verify_match_header_finding() -> None:
+    original = exchange('/', headers={'server': 'FixtureTarget/2.3.1'})
+    draft = version_disclosure_check._drafts_for(original)[0]
+    finding = Finding(id='fn_test', status='reported', **draft.model_dump())
+    same_banner = exchange('/', headers={'server': 'FixtureTarget/2.3.1'})
+    clean_banner = exchange('/', headers={'server': 'FixtureTarget'})
+    assert version_disclosure_check.verify_match(finding, original, same_banner) is True
+    assert version_disclosure_check.verify_match(finding, original, clean_banner) is False
+
+
+def test_verify_match_error_page_finding() -> None:
+    original = exchange('/x', status=404, body='Traceback (most recent call last): boom')
+    draft = version_disclosure_check._drafts_for(original)[0]
+    finding = Finding(id='fn_test', status='reported', **draft.model_dump())
+    still_leaky = exchange('/x', status=404, body='Fatal error: /var/www/x')
+    fixed = exchange('/x', status=404, body='Not Found')
+    assert version_disclosure_check.verify_match(finding, original, still_leaky) is True
+    assert version_disclosure_check.verify_match(finding, original, fixed) is False

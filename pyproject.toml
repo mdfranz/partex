@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-ai-slim>=2.68",
     "pydantic-ai-harness[repair-tool-arguments]>=0.68",
     "pydantic-clai2>=0.68",
+    "pyyaml>=6",  # registry.py skill frontmatter (already locked transitively)
 ]
 
 [project.scripts]
