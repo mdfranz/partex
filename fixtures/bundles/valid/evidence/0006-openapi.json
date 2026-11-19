@@ -1,0 +1,9 @@
+{
+  "config": {
+    "content": "openapi: 3.1.0\ninfo:\n  title: example-app\n  version: 1.4.2\npaths:\n  /api/health:\n    get:\n      responses:\n        \"200\":\n          description: ok\n",
+    "format": "openapi",
+    "path": "openapi.yaml",
+    "revision": "v1.4.2"
+  },
+  "kind": "config_excerpt"
+}

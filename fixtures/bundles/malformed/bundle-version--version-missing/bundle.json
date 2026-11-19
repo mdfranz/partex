@@ -1,0 +1,7 @@
+{
+  "evidence_files": [],
+  "target": {
+    "base_url": "https://app.example.test",
+    "name": "x"
+  }
+}

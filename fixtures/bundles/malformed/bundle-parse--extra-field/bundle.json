@@ -1,0 +1,11 @@
+{
+  "evidence_files": [
+    "evidence/0001.json"
+  ],
+  "producer": "unknown-tool",
+  "schema_version": 1,
+  "target": {
+    "base_url": "https://app.example.test",
+    "name": "example-app"
+  }
+}

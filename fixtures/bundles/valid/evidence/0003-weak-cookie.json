@@ -1,0 +1,23 @@
+{
+  "http": {
+    "request": {
+      "headers": {
+        "Host": "app.example.test"
+      },
+      "method": "GET",
+      "url": "https://app.example.test/login"
+    },
+    "response": {
+      "body": "<!doctype html><html><head><title>Login</title></head><body><h1>Login</h1></body></html>",
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'",
+        "Content-Type": "text/html; charset=utf-8",
+        "Set-Cookie": "session=<redacted>; Path=/",
+        "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+        "X-Content-Type-Options": "nosniff"
+      },
+      "status_code": 200
+    }
+  },
+  "kind": "http_exchange"
+}

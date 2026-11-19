@@ -1,0 +1,10 @@
+{
+  "evidence_files": [
+    "../valid/evidence/0002-missing-headers.json"
+  ],
+  "schema_version": 1,
+  "target": {
+    "base_url": "https://app.example.test",
+    "name": "example-app"
+  }
+}
