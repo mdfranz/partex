@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# probe.sh: open a `partex agent` session on a target: baseline + version-disclosure, a briefing, then
+# partex.sh: open a `partex agent` session on a target: baseline + version-disclosure, a briefing, then
 # the CLAI2 terminal where you direct further GET/HEAD/OPTIONS probes and checks (model via the Gateway).
 #
-#   ./probe.sh http://192.168.12.1/home      # asks who authorized the test
-#   ./probe.sh -a 'I own 192.168.12.1 and authorize this test, 2026-11-19' http://192.168.12.1/home
+#   ./partex.sh http://192.168.12.1/home      # asks who authorized the test
+#   ./partex.sh -a 'I own 192.168.12.1 and authorize this test, 2026-11-19' http://192.168.12.1/home
 #
-# Usage: ./probe.sh [options] <target-url>       (flags override the environment variables in [])
+# Usage: ./partex.sh [options] <target-url>   |   ./partex.sh list [-d DB]       (flags override the environment variables in [])
 #   -a, --attestation TEXT   who authorized testing the target [PARTEX_ATTESTATION]; prompted for if unset
 #   -m, --model NAME         model [PARTEX_MODEL, default zai-org/GLM-5.3]
 #   -r, --route NAME         gateway route [PARTEX_GATEWAY_ROUTE, default doubleword]; --route '' when the
@@ -14,6 +14,7 @@
 #   -f, --from RUN_ID        let the new session read an earlier run [RUN_ID]
 #       --resume [RUN_ID]    read-only chat on an earlier run, no traffic and no target URL needed; the
 #                            latest run if RUN_ID is omitted [CHAT_ONLY=1, RUN_ID]
+#   -l, --list               list the runs saved in the database (same as the word `list`) and exit
 #       --no-tui             run `partex test` + show only [NO_TUI=1]
 #   -h, --help
 # Required: PYDANTIC_AI_GATEWAY_API_KEY for the chat step.
@@ -30,6 +31,7 @@ MODEL=${PARTEX_MODEL:-zai-org/GLM-5.3}
 ROUTE=${PARTEX_GATEWAY_ROUTE-doubleword}
 DB=${PARTEX_DB:-partex-probe.db}
 ATTESTATION=${PARTEX_ATTESTATION:-}
+LIST=
 RESUME=${CHAT_ONLY:+1}
 NO_TUI=${NO_TUI:-}
 RUN_ID=${RUN_ID:-}   # with --resume: the run to open; otherwise the run to read (--from)
@@ -41,10 +43,12 @@ while [[ $# -gt 0 ]]; do
     -d|--db) DB=${2?$1 needs a value}; shift 2 ;;
     -f|--from) RUN_ID=${2?$1 needs a value}; shift 2 ;;
     --resume) RESUME=1; shift; if [[ ${1:-} == run_* ]]; then RUN_ID=$1; shift; fi ;;
+    -l|--list) LIST=1; shift ;;
     --no-tui) NO_TUI=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
     -*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
+    list) if [[ -z $TARGET_URL ]]; then LIST=1; shift; else echo "unexpected argument: $1" >&2; exit 2; fi ;;
     *) [[ -z $TARGET_URL ]] || { echo "unexpected argument: $1" >&2; exit 2; }; TARGET_URL=$1; shift ;;
   esac
 done
@@ -52,6 +56,12 @@ done
 case $DB in /*) ;; *) DB=$PWD/$DB ;; esac  # absolute, before the cd below (BSD realpath has no -m)
 cd "$(dirname "${BASH_SOURCE[0]}")"
 partex() { uv run --quiet partex "$@"; }
+
+if [[ -n $LIST ]]; then  # saved runs: what was tested, when, how it ended; resume any with --resume RUN_ID
+  [[ -e $DB ]] || { echo "no database at $DB (nothing saved yet)" >&2; exit 1; }
+  partex runs --db "$DB" --json | python3 "$(dirname "${BASH_SOURCE[0]}")/scripts/list_runs.py" "$DB" "$0"
+  exit 0
+fi
 
 if [[ -n $RESUME ]]; then  # review an earlier run read-only: no traffic
   if [[ -z ${RUN_ID:-} ]]; then  # default to the most recent usable run in the DB
