@@ -299,3 +299,38 @@ def validate_scope(scope: Scope) -> list[str]:
     if scope.max_requests > MAX_REQUESTS_CEILING:
         problems.append(f'max_requests {scope.max_requests} exceeds ceiling {MAX_REQUESTS_CEILING}')
     return problems
+
+
+def parse_scope_target(spec: str) -> tuple[str, frozenset[int]]:
+    """Parse an operator's ``host``, ``host:port`` or ``http(s)://host[:port][/…]`` into ``(host, ports)``.
+
+    A bare host means both scheme defaults (80 and 443); a ``host:port`` or a URL means that one port
+    (a URL without a port: its scheme's default). Raises :class:`ScopeViolation` for anything ambiguous.
+    """
+    spec = spec.strip()
+    if '://' in spec:
+        parsed = parse_scoped_url(spec)
+        return parsed.host, frozenset({parsed.port})
+    parsed = parse_scoped_url(f'http://{spec}/')
+    explicit_port = ':' in spec.rsplit(']', 1)[-1]
+    return parsed.host, frozenset({parsed.port} if explicit_port else {80, 443})
+
+
+def extend_scope(scope: Scope, spec: str) -> Scope:
+    """Return *scope* plus the host and port(s) named by *spec*; it only ever grows.
+
+    Paths, exclusions and budgets are unchanged. When ``scope.ports`` is empty (scheme defaults only),
+    adding a port keeps 80 and 443 explicitly. Raises :class:`ScopeViolation` when *spec* is ambiguous
+    or the result fails the E3 checks.
+    """
+    host, ports = parse_scope_target(spec)
+    hosts = scope.hosts if host in {normalize_host(h) for h in scope.hosts} else [*scope.hosts, host]
+    if scope.ports:
+        merged_ports = [*scope.ports, *sorted(ports - set(scope.ports))]
+    else:  # scheme defaults only: stay that way unless a non-default port is added
+        extra = ports - {80, 443}
+        merged_ports = [80, 443, *sorted(extra)] if extra else []
+    extended = scope.model_copy(update={'hosts': hosts, 'ports': merged_ports})
+    if problems := validate_scope(extended):
+        raise ScopeViolation(f'extended scope is invalid: {"; ".join(problems)}', rule_code='scope-invalid')
+    return extended

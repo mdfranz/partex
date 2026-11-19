@@ -35,7 +35,8 @@ from .checks import HeaderInput, PassiveCheck
 from .engagement import MANIFEST_NAME, check_credentials_available, load_engagement
 from .errors import BudgetExhausted, PartexError, ScopeViolation, ValidationFailed
 from .ids import finding_id
-from .models import Engagement, Evidence, Finding, FindingDraft, HttpEvidence
+from .models import Engagement, Evidence, Finding, FindingDraft, HttpEvidence, Scope
+from .scope import extend_scope
 from .storage import RunState, RunStore
 from .target import ScopedHttpClient
 
@@ -497,6 +498,33 @@ class LiveSession:
     ) -> HttpEvidence:
         """Send one request through the scope gate (raises ``ScopeViolation`` / ``BudgetExhausted`` / ``PartexError``)."""
         return await self.client.request(method, url, headers=headers, body=body)
+
+    async def extend_scope(self, spec: str, *, confirmed_by: str) -> tuple[Scope, Scope]:
+        """Add the host/port(s) in *spec* to this session's scope; returns ``(before, after)``.
+
+        Only an operator-confirmed call may reach this (never a model tool). The scope only grows: paths,
+        exclusions and budgets are unchanged, and the result must pass the E3 checks. The amendment is
+        audited as a ``scope_amend`` tool call on the run and the run's scope snapshot is updated.
+        """
+        before = self.engagement.scope
+        after = extend_scope(before, spec)
+        if after == before:
+            return before, after
+        self.client.set_scope(after)
+        self.engagement = self.engagement.model_copy(update={'scope': after})
+        await self._store.set_scope_snapshot(self.run_id, after)
+        await self._store.record_tool_call(
+            self.run_id,
+            'scope_amend',
+            {'spec': spec, 'confirmed_by': confirmed_by},
+            {
+                'hosts_before': before.hosts,
+                'hosts_after': after.hosts,
+                'ports_before': before.ports,
+                'ports_after': after.ports,
+            },
+        )
+        return before, after
 
     async def run_check(self, check_id: str) -> list[Finding]:
         """Run one registered check over this session and commit its new findings; returns all of its findings.
