@@ -1,0 +1,322 @@
+"""Scoped target client — PLAN §4.2 send-time gate (issue #20).
+
+Scope refusals are asserted to put no bytes on the wire via the fixture
+server's request log (nothing was received ⇒ nothing was sent).  All tests
+run against the localhost fixture server; the suite's non-loopback socket
+block stays armed.
+"""
+
+import httpx2
+import pytest
+
+from partex.engagement import Engagement
+from partex.errors import BudgetExhausted, ScopeViolation
+from partex.models import HttpEvidence, redact
+from partex.target import DEFAULT_SOURCE, ScopedHttpClient, TokenBucket
+
+pytest_plugins = ['plugins.target_server']
+
+
+def engagement_for(
+    target_server: object,
+    *,
+    hosts: list[str] | None = None,
+    ports: list[int] | None = None,
+    max_requests: int = 100,
+    max_rps: int = 64,
+) -> Engagement:
+    server: object = target_server
+    port = server.port  # pyright: ignore[reportAttributeAccessIssue]
+    base_host = '127.0.0.1'
+    return Engagement.model_validate(
+        {
+            'schema_version': 1,
+            'target': {'name': 'fixture-app', 'base_url': f'http://{base_host}:{port}'},
+            'scope': {
+                'hosts': hosts if hosts is not None else [base_host],
+                'path_prefixes': ['/'],
+                'exclusions': ['/admin/shutdown'],
+                'ports': ports if ports is not None else [port],
+                'max_rps': max_rps,
+                'max_requests': max_requests,
+            },
+            'authorization': {'attestation': 'fixture authorization', 'operator': 'test'},
+        }
+    )
+
+
+# ── Capture: every in-scope request returns and commits evidence ───────────────
+
+
+async def test_in_scope_request_is_captured(target_server: object) -> None:
+    captured: list[HttpEvidence] = []
+
+    async def on_capture(evidence: HttpEvidence) -> None:
+        captured.append(evidence)
+
+    engagement = engagement_for(target_server)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement, on_capture=on_capture) as client:
+        evidence = await client.request('GET', f'{base_url}/api/users')
+    assert evidence.id.startswith('ev_')
+    assert evidence.source == DEFAULT_SOURCE
+    assert evidence.http.response.status_code == 200
+    assert evidence.http.request.method == 'GET'
+    assert evidence.http.request.url == f'{base_url}/api/users'
+    assert evidence.http.request.url.endswith('/api/users')
+    assert captured == [evidence]
+    assert client.requests_spent == 1
+
+
+async def test_post_body_and_headers_sent(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        evidence = await client.request(
+            'POST', f'{base_url}/api/orders', headers={'X-Test': '1'}, body='{"sku": "A-1"}'
+        )
+    sent = target_server.requests[-1]  # pyright: ignore[reportAttributeAccessIssue]
+    assert sent['method'] == 'POST'
+    assert sent['body'] == '{"sku": "A-1"}'
+    assert evidence.http.request.body == '{"sku": "A-1"}'
+    assert evidence.http.request.headers['x-test'] == '1'
+
+
+async def test_binary_body_refused_not_stored(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        evidence = await client.request('GET', f'{base_url}/binary')
+    assert evidence.http.response.body is None
+    assert evidence.http.response.headers['content-type'] == 'application/octet-stream'
+
+
+# ── Scope gate: refused before any bytes hit the wire ─────────────────────────
+
+
+async def test_out_of_scope_host_refused_before_send(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    port = target_server.port  # pyright: ignore[reportAttributeAccessIssue]
+    before = len(target_server.requests)  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        with pytest.raises(ScopeViolation, match='not in scope hosts'):
+            await client.request('GET', f'http://evil-example.test:{port}/api/users')
+    assert len(target_server.requests) == before  # pyright: ignore[reportAttributeAccessIssue]
+    assert client.requests_spent == 0
+
+
+async def test_excluded_path_refused_before_send(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    before = len(target_server.requests)  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        with pytest.raises(ScopeViolation, match='exclusion'):
+            await client.request('GET', f'{base_url}/admin/shutdown')
+    assert len(target_server.requests) == before  # pyright: ignore[reportAttributeAccessIssue]
+
+
+async def test_out_of_scope_port_refused_before_send(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    bad_port = target_server.port + 1  # pyright: ignore[reportAttributeAccessIssue]
+    before = len(target_server.requests)  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        with pytest.raises(ScopeViolation, match='not in scope ports'):
+            await client.request('GET', f'http://127.0.0.1:{bad_port}/api/users')
+    assert len(target_server.requests) == before  # pyright: ignore[reportAttributeAccessIssue]
+
+
+async def test_dot_segment_escape_refused_before_send(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    before = len(target_server.requests)  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        with pytest.raises(ScopeViolation):
+            await client.request('GET', f'{base_url}/api/../../admin/shutdown')
+    assert len(target_server.requests) == before  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_no_bypass_api() -> None:
+    """The only send paths are request/follow_redirect — no escape hatch."""
+    public = {
+        name
+        for name in dir(ScopedHttpClient)
+        if not name.startswith('_') and callable(getattr(ScopedHttpClient, name, None))
+    }
+    assert public == {'aclose', 'follow_redirect', 'request'}
+
+
+# ── Redirects: captured, never auto-followed, re-validated before follow ───────
+
+
+async def test_redirect_captured_not_followed_automatically(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        evidence = await client.request('GET', f'{base_url}/redirect?to=/api/next')
+    assert evidence.http.response.status_code == 302
+    assert evidence.http.response.headers['location'] == '/api/next'
+    assert len(target_server.requests) == 1  # pyright: ignore[reportAttributeAccessIssue]
+
+
+async def test_follow_redirect_in_scope(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        redirect = await client.request('GET', f'{base_url}/redirect?to=/api/next')
+        followed = await client.follow_redirect(redirect)
+    assert followed.http.response.status_code == 200
+    assert followed.http.request.url == f'{base_url}/api/next'
+    assert client.requests_spent == 2
+
+
+async def test_follow_redirect_out_of_scope_refused(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    before = len(target_server.requests)  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        redirect = await client.request('GET', f'{base_url}/redirect?to=http://evil.test/api')
+        with pytest.raises(ScopeViolation, match='not in scope hosts'):
+            await client.follow_redirect(redirect)
+    assert len(target_server.requests) == before + 1  # only the first request was sent
+
+
+async def test_follow_redirect_to_excluded_path_refused(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        redirect = await client.request('GET', f'{base_url}/redirect?to=/admin/shutdown')
+        with pytest.raises(ScopeViolation, match='exclusion'):
+            await client.follow_redirect(redirect)
+
+
+async def test_303_converts_to_get(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        redirect = await client.request('POST', f'{base_url}/redirect?to=/api/next&code=303', body='{"a": 1}')
+        followed = await client.follow_redirect(redirect)
+    sent = target_server.requests[-1]  # pyright: ignore[reportAttributeAccessIssue]
+    assert sent['method'] == 'GET'
+    assert sent['body'] == ''
+    assert followed.http.request.method == 'GET'
+    assert followed.http.request.body is None
+
+
+# ── Budgets (rule 5) ──────────────────────────────────────────────────────────
+
+
+async def test_max_requests_budget_exhausted_cleanly(target_server: object) -> None:
+    engagement = engagement_for(target_server, max_requests=2)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        await client.request('GET', f'{base_url}/api/one')
+        await client.request('GET', f'{base_url}/api/two')
+        with pytest.raises(BudgetExhausted, match='max_requests'):
+            await client.request('GET', f'{base_url}/api/three')
+    assert client.requests_spent == 2
+    assert len(target_server.requests) == 2  # pyright: ignore[reportAttributeAccessIssue]
+
+
+def test_token_bucket_waits_between_requests() -> None:
+    """Deterministic bucket math with an injected clock and sleep."""
+    now = 0.0
+    waits: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal now
+        waits.append(seconds)
+        now += seconds  # time advances only when the bucket's sleep is awaited
+
+    bucket = TokenBucket(2.0, clock=clock, sleep=fake_sleep)
+
+    async def scenario() -> None:
+        await bucket.acquire()  # immediate (full token)
+        await bucket.acquire()  # must wait 0.5s for the refill
+        await bucket.acquire()  # and again
+
+    import anyio
+
+    anyio.run(scenario)
+    assert waits == [0.5, 0.5]
+
+
+# ── DNS pinning (rule 2): resolve once, keep Host + SNI + cert identity ───────
+
+
+async def test_pin_resolves_once_and_preserves_host_header(target_server: object) -> None:
+    port = target_server.port  # pyright: ignore[reportAttributeAccessIssue]
+    engagement = engagement_for(target_server, hosts=['fixture.test'], ports=[port])
+    resolutions: list[str] = []
+
+    def resolver(host: str) -> str:
+        resolutions.append(host)
+        return '127.0.0.1'
+
+    async with ScopedHttpClient(engagement, resolver=resolver) as client:
+        first = await client.request('GET', f'http://fixture.test:{port}/api/one')
+        second = await client.request('GET', f'http://fixture.test:{port}/api/two')
+    assert first.http.response.status_code == 200
+    assert second.http.response.status_code == 200
+    assert resolutions == ['fixture.test']  # one resolution per run, reused
+    for sent in target_server.requests:  # pyright: ignore[reportAttributeAccessIssue]
+        assert sent['host_header'] == f'fixture.test:{port}'
+
+
+async def test_pin_sets_sni_and_connects_to_pinned_address(target_server: object) -> None:
+    """The transport rewrites the URL to the pin and marks SNI with the original host."""
+    port = target_server.port  # pyright: ignore[reportAttributeAccessIssue]
+    engagement = engagement_for(target_server, hosts=['fixture.test'], ports=[port])
+    seen: list[httpx2.Request] = []
+
+    class RecordingTransport(httpx2.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+            seen.append(request)
+            return httpx2.Response(200, text='stubbed')
+
+    def resolver(host: str) -> str:
+        return '127.0.0.1'
+
+    async with ScopedHttpClient(engagement, resolver=resolver, transport=RecordingTransport()) as client:
+        await client.request('GET', f'http://fixture.test:{port}/api/x')
+    assert client.requests_spent == 1
+    request = seen[0]
+    assert request.url.host == '127.0.0.1'  # connected to the pin
+    assert request.headers['host'] == f'fixture.test:{port}'  # Host preserved
+    assert request.extensions['sni_hostname'] == 'fixture.test'  # SNI + cert identity
+
+
+async def test_ip_literal_scope_host_needs_no_resolution(target_server: object) -> None:
+    port = target_server.port  # pyright: ignore[reportAttributeAccessIssue]
+    engagement = engagement_for(target_server, hosts=['127.0.0.1'], ports=[port])
+
+    def resolver(host: str) -> str:
+        raise AssertionError('resolver must not be called for IP literals')
+
+    async with ScopedHttpClient(engagement, resolver=resolver) as client:
+        evidence = await client.request('GET', f'http://127.0.0.1:{port}/api/x')
+    assert evidence.http.response.status_code == 200
+
+
+# ── Secrets: credential-matched fields are marked and redactable ─────────────
+
+
+async def test_secret_fields_marked_and_redacted(target_server: object) -> None:
+    engagement = engagement_for(target_server)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement, secrets=('sekrit-token',)) as client:
+        evidence = await client.request(
+            'POST',
+            f'{base_url}/api/login',
+            headers={'Authorization': 'Bearer sekrit-token'},
+            body='password=sekrit-token',
+        )
+    # httpx2 lowercases header names; the redaction path navigates the same keys.
+    assert evidence.secret_fields == ['$.http.request.headers.authorization', '$.http.request.body']
+    redacted = redact(evidence)
+    assert redacted.http.request.headers['authorization'] == '<redacted>'
+    assert redacted.http.request.body == '<redacted>'
+    # The canonical id excludes secret_fields, so redaction does not change identity.
+    assert evidence.http.request.headers['authorization'] == 'Bearer sekrit-token'
