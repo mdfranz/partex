@@ -413,7 +413,9 @@ class ConfigEvidence(BaseModel):
     config: ConfigExcerpt
     secret_fields: list[str]
 
-type Evidence = Annotated[HttpEvidence | ConfigEvidence, Field(discriminator='kind')]
+type Evidence = Annotated[HttpEvidence | ConfigEvidence | ArtifactEvidence, Field(discriminator='kind')]
+# ArtifactEvidence (#69) stores metadata + sha256 + mode-0600 local file_path beside the DB for
+# full-body assets (e.g. JS bundles > 256 KB); file_path is excluded from the canonical ev_ hash.
 
 class Finding(BaseModel):
     id: str                  # "fn_" + sha256(check_id + '\0' + subject + '\0' + title + '\0' + sorted evidence_ids)[:16]
@@ -936,6 +938,8 @@ class TargetClient(Protocol):   # implemented by target.ScopedHttpClient
 - `request` takes the full URL because the scope gate needs scheme, host and port; `probe` is
   async because a sync probe cannot await the anyio-based scoped client; `HttpEvidence` is
   returned because §5 drafts must cite `ev_*` ids. Landed by #21/#22; amended per #44.
+- Built-in checks: `header-security` (passive), `js-analysis` (passive, tree-sitter AST
+  over downloaded JS artifacts and JS responses, #69), and `version-disclosure` (active).
 - Third-party checks register via the entry-point group `partex.checks`. Check code loads
   **only** from installed distributions; extra skill roots load via `--skill-dir` (data). That
   is the trust boundary: arbitrary paths can add Markdown, never code.

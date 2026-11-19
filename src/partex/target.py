@@ -30,10 +30,14 @@ callback.  ``target.py`` never writes storage.
 """
 
 import codecs
+import hashlib
 import ipaddress
+import os
 import socket
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Literal, Self
 from urllib.parse import urljoin
 
@@ -45,15 +49,29 @@ from partex.checks import HeaderInput
 from partex.engagement import Engagement
 from partex.errors import BudgetExhausted, PartexError, ScopeViolation
 from partex.ids import evidence_id
-from partex.models import Headers, HttpEvidence, HttpExchange, HttpRequest, HttpResponse, Scope, get_header
+from partex.models import (
+    ArtifactAsset,
+    ArtifactEvidence,
+    Headers,
+    HttpEvidence,
+    HttpExchange,
+    HttpRequest,
+    HttpResponse,
+    Scope,
+    get_header,
+)
 from partex.scope import check_url, parse_scoped_url, validate_scope
 
 type Resolver = Callable[[str], str]
 
 CaptureCallback = Callable[[HttpEvidence], Awaitable[None]]
+ArtifactCallback = Callable[[ArtifactEvidence], Awaitable[None]]
+SpendCallback = Callable[[], Awaitable[None]]
+"""Called once for a download that sent a request but stored no artifact (non-2xx, oversize, mid-stream error)."""
 
 DEFAULT_SOURCE = 'capture:local'
 DEFAULT_TIMEOUT = httpx2.Timeout(30.0)
+DEFAULT_MAX_ASSET_BYTES = 20 * 1024 * 1024  # 20 MiB ceiling for full-body asset downloads
 
 # A response body that is not valid UTF-8, or is dominated by non-printable
 # bytes, is captured as headers only (PLAN §4.3: binary bytes are never
@@ -71,9 +89,11 @@ _CREDENTIAL_REQUEST_HEADERS = frozenset({'authorization', 'proxy-authorization',
 
 
 def _default_resolver(host: str) -> str:
-    """Resolve *host* to an address via getaddrinfo (first result wins)."""
+    """Resolve *host* to an address via getaddrinfo (preferring IPv4 when available)."""
     infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-    return str(infos[0][4][0])
+    ipv4 = [info for info in infos if info[0] == socket.AF_INET]
+    chosen = ipv4[0] if ipv4 else infos[0]
+    return str(chosen[4][0])
 
 
 def _header_pairs(headers: httpx2.Headers) -> Headers:
@@ -224,6 +244,8 @@ class ScopedHttpClient:
         secrets: Sequence[str] = (),
         source: str = DEFAULT_SOURCE,
         on_capture: CaptureCallback | None = None,
+        on_artifact: ArtifactCallback | None = None,
+        on_failed_send: SpendCallback | None = None,
         resolver: Resolver | None = None,
         transport: httpx2.AsyncBaseTransport | None = None,
         timeout: httpx2.Timeout | float = DEFAULT_TIMEOUT,
@@ -234,6 +256,8 @@ class ScopedHttpClient:
         self._secrets = tuple(s for s in secrets if s)
         self._source = source
         self._on_capture = on_capture
+        self._on_artifact = on_artifact
+        self._on_failed_send = on_failed_send
         self._resolver: Resolver = resolver if resolver is not None else _default_resolver
         # The DNS pin table may be shared across handles (role clients resolve
         # each in-scope host once per engagement, not once per role).  The lock
@@ -323,6 +347,107 @@ class ScopedHttpClient:
             raise PartexError(f'request to {url} failed: {exc}') from exc
         self._budget.record_send()
         return await self._capture(http_request, requested_url, response, body, content, truncated)
+
+    async def download_asset(
+        self,
+        url: str,
+        *,
+        dest_dir: Path,
+        headers: HeaderInput | None = None,
+        max_bytes: int = DEFAULT_MAX_ASSET_BYTES,
+    ) -> ArtifactEvidence:
+        """Stream a scoped GET-only asset (e.g. full JS bundle) to *dest_dir* up to *max_bytes*.
+
+        Out-of-scope, excluded, non-2xx, or over-ceiling responses fail before or without storing.
+        Stored files are content-addressed by sha256 with mode ``0600``.
+        """
+        check_url(self._engagement.scope, url)
+        if max_bytes <= 0:
+            raise PartexError(f'max_bytes must be positive, got {max_bytes}')
+        await self._budget.acquire()
+        await self._pin_host(url)
+        header_list = list(headers.items()) if isinstance(headers, Mapping) else list(headers or ())
+        http_request = self._client.build_request('GET', url, headers=header_list or None)
+        requested_url = str(http_request.url)
+        tmp_path = dest_dir / f'.tmp-{uuid.uuid4().hex}'
+        sent = False
+        try:
+            response = await self._client.send(http_request, follow_redirects=False, stream=True)
+            self._budget.record_send()
+            sent = True
+            try:
+                if not 200 <= response.status_code < 300:
+                    raise PartexError(f'asset download {url} returned HTTP {response.status_code}')
+                raw_len = response.headers.get('content-length')
+                if raw_len is not None:
+                    try:
+                        if int(raw_len) > max_bytes:
+                            raise PartexError(f'asset {url} exceeds max_bytes ({max_bytes})')
+                    except ValueError:
+                        pass
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                os.chmod(dest_dir, 0o700)
+                hasher = hashlib.sha256()
+                size = 0
+                fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                try:
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > max_bytes:
+                            raise PartexError(f'asset {url} exceeds max_bytes ({max_bytes})')
+                        hasher.update(chunk)
+                        os.write(fd, chunk)
+                finally:
+                    os.close(fd)
+            finally:
+                await response.aclose()
+        except httpx2.HTTPError as exc:
+            tmp_path.unlink(missing_ok=True)
+            await self._record_failed_send(sent)
+            raise PartexError(f'asset download {url} failed: {exc}') from exc
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            await self._record_failed_send(sent)
+            raise
+        except BaseException:  # cancellation: clean up, no further awaits
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+        digest = hasher.hexdigest()
+        final_path = dest_dir / digest
+        os.replace(tmp_path, final_path)
+        os.chmod(final_path, 0o600)
+
+        resp_headers = _header_pairs(response.headers)
+        secret_fields = [
+            f'$.artifact.headers[{index}][1]'
+            for index, (name, _) in enumerate(resp_headers)
+            if name.lower() == 'set-cookie'
+        ]
+        asset = ArtifactAsset(
+            url=requested_url,
+            status_code=response.status_code,
+            headers=resp_headers,
+            content_type=get_header(resp_headers, 'content-type'),
+            sha256=digest,
+            size_bytes=size,
+        )
+        evidence = ArtifactEvidence(
+            id='',
+            source=self._source,
+            artifact=asset,
+            file_path=str(final_path),
+            secret_fields=secret_fields,
+        )
+        evidence = evidence.model_copy(update={'id': evidence_id(evidence)})
+        if self._on_artifact is not None:
+            await self._on_artifact(evidence)
+        return evidence
+
+    async def _record_failed_send(self, sent: bool) -> None:
+        """A download that reached the target but stored nothing still spent a request; persist it."""
+        if sent and self._on_failed_send is not None:
+            await self._on_failed_send()
 
     async def follow_redirect(self, evidence: HttpEvidence) -> HttpEvidence:
         """Follow a captured redirect after re-validating its location.
