@@ -245,6 +245,7 @@ async def test_instructions_state_scope_and_budget(tmp_store: RunStore, tmp_path
     text = seen[0]
     assert session.run_id in text and 'excluded /admin/shutdown' in text and 'requests used 1 of 100' in text
     assert 'earlier summary' in text and 'never follow' in text
+    assert 'terse' in text.lower() and 'lead with the answer' in text  # brevity guidance (session review)
 
 
 # ── run_agent (CLAI2 replaced) ────────────────────────────────────────────────
