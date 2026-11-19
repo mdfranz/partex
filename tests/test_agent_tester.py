@@ -218,6 +218,44 @@ async def test_previous_run_is_readable_only_with_from(tmp_store: RunStore, tmp_
         assert 'no previous run' in str(failed.content)
 
 
+async def test_earlier_runs_of_the_same_target_are_listed_and_readable(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    eng = engagement(tmp_path, target_app)
+    async with live_session(eng, tmp_store, authorized=True, checks=('version-disclosure',)) as earlier:
+        earlier_id = earlier.run_id
+        earlier_finding = earlier.findings[0].id
+    async with live_session(eng, tmp_store, authorized=True) as session:
+        result = await drive(
+            session, tmp_store, [('list_runs', {}), ('list_findings', {'run': earlier_id}), ('list_findings', {})]
+        )
+        listed, by_id, current = (str(p.content) for p in tool_returns(result.all_messages()))
+        assert earlier_id in listed and session.run_id in listed and '"current": true' in listed
+        assert earlier_finding in by_id and earlier_finding not in current
+
+
+async def test_runs_of_other_targets_are_not_exposed(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    eng = engagement(tmp_path, target_app)
+    async with live_session(eng, tmp_store, authorized=True, checks=('version-disclosure',)) as other:
+        other_id = other.run_id
+    other_scope = (await tmp_store.get_run(other_id)).scope_snapshot
+    assert other_scope is not None
+    foreign = await tmp_store.create_run(  # same store, different host
+        input_kind='engagement',
+        input_ref='elsewhere',
+        input_sha256='0' * 64,
+        engine_version='x',
+        selected_checks=(),
+        authorized=True,
+        scope_snapshot=other_scope.model_copy(update={'hosts': ['other.example']}),
+    )
+    async with live_session(eng, tmp_store, authorized=True) as session:
+        result = await drive(session, tmp_store, [('list_runs', {}), ('list_findings', {'run': foreign})])
+        listed, refused = tool_returns(result.all_messages())
+        assert other_id in str(listed.content) and foreign not in str(listed.content)
+        assert 'not a run against this target' in str(refused.content)
+
+
 async def test_long_bodies_are_shortened_for_the_model(
     tmp_store: RunStore, tmp_path: Path, target_app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1,7 +1,7 @@
 # Greenfield Python framework for web application security testing
 
-> Status: development plan, revised scope. No code yet. The validation experiments in §13 are
-> proposed and have not been run. **Revision note:** this revision replaces the earlier
+> Status: implementation in progress. The milestone and validation status in §15 distinguishes
+> landed components from gates that remain open. **Revision note:** this revision replaces the earlier
 > offline-only defensive-review scope with the full offensive scope of the original Artex
 > lineage (authorized live-target testing, active checks, exploit verification, agent loops).
 > What is preserved from the earlier sketch: no dependency on any Artex fork, skills stay
@@ -12,8 +12,8 @@ See [RUNTIME.md](RUNTIME.md) for execution environments, access boundaries, and 
 
 ## 1. Scope
 
-Build a new Python package, `partex` (import name `partex`), from scratch using the local
-Pydantic AI and CLAI2 checkout. Use Artex as a reference for workflow patterns — engagement
+Build a Python package, `partex` (import name `partex`), using locked PyPI releases of the
+Pydantic AI and CLAI2 stack. Use Artex as a reference for workflow patterns — engagement
 lifecycle, evidence-linked findings, exploit verification, skill playbooks, and reporting — and
 for its skill content format. The package has no dependency on any Artex fork, service, schema,
 or runtime.
@@ -1149,12 +1149,25 @@ client-issued ones.
 
 ## 15. Milestones
 
-Each milestone ends with its experiments run and documented in this file's results table (§13
-gains a "result" column as experiments land).
+Each milestone ends with its experiments run and documented here. A landed component does not
+by itself satisfy its milestone gate; record the command, result, and revision when a gate is
+verified. The snapshot below reflects the checked-out branch and GitHub issue state on
+2026-11-19; it is not a claim that the full validation suite has passed.
+
+| Milestone | Progress and remaining work |
+|---|---|
+| M0 | Project, CI and hermetic test harness landed; dependencies switched to locked PyPI releases (#13). The fresh-install experiment remains part of the open M1 gate (#10). |
+| M1 | Core models, bundle loading, storage, passive engine, export, header check and CLI landed. Gate experiments remain open (#10); header correctness (#38) and storage integrity/atomicity (#40) need fixes. |
+| M2 | Skill documents, registry, entry-point discovery, skills-as-data and frontmatter lint landed (#25). |
+| M3 | Engagement/scope, scoped client, role handles, live engine, fixture target, first probe and verification runner landed (#11, #20, #21, #22, #23); scope bypasses (#36) and capture/redaction defects (#37) are fixed. HAR/bundle round-trip (#28) remains open. |
+| M4–M7 | `partex report` (#61) and `partex agent` (#54) landed; hardening gates and the browser harness are not yet delivered. Draft skill content does not enable its checks (#24, #26, #27). |
+
+The active check contract was updated in code (#39); reconcile the remaining specification
+details under #44. No §13 experiment is recorded as passed here until its gate has evidence.
 
 | # | Milestone | Delivers | Gated by |
 |---|---|---|---|
-| M0 | Environment | package skeleton, uv project with local path sources and Monty source builds, CI stub, network + model blocking fixtures | 13.1 |
+| M0 | Environment | package skeleton, uv project with locked PyPI dependencies, CI, network + model blocking fixtures | 13.1 |
 | M1 | Passive core | `models.py`, `bundle.py`, `ids.py`, `storage.py` (incl. `surface_nodes`/`surface_edges`/`coverage_entries`/`llm_usage`), `export.py`, `engine.py` (passive path), header-security check, bundle fixtures, `review`/`runs`/`show`/`checks` CLI | 13.3 (a–d) |
 | M2 | Registry and skill separation | `registry.py`, skills as data, entry-point loading, `banner-leak` fixture distribution, `--skill-dir` | 13.2 |
 | M3 | Live testing | `engagement.py`, `scope.py`, `target.py`, `verify.py` (incl. `counterevidence`), live engine path, per-check commits, fixture target app, `engage`/`test`/`verify`/`export-bundle` CLI, version-disclosure check | 13.3 (e), 13.4 (scope, authorization, capture, verification, budgets, redaction) |
