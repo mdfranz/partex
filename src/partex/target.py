@@ -43,10 +43,10 @@ import httpx2
 from partex.bundle import MAX_CONTENT_BYTES
 from partex.checks import HeaderInput
 from partex.engagement import Engagement
-from partex.errors import BudgetExhausted, PartexError
+from partex.errors import BudgetExhausted, PartexError, ScopeViolation
 from partex.ids import evidence_id
-from partex.models import Headers, HttpEvidence, HttpExchange, HttpRequest, HttpResponse, get_header
-from partex.scope import check_url, parse_scoped_url
+from partex.models import Headers, HttpEvidence, HttpExchange, HttpRequest, HttpResponse, Scope, get_header
+from partex.scope import check_url, parse_scoped_url, validate_scope
 
 type Resolver = Callable[[str], str]
 
@@ -257,6 +257,24 @@ class ScopedHttpClient:
     def requests_spent(self) -> int:
         """Number of in-scope requests sent under this client's budget."""
         return self._budget.requests_spent
+
+    def set_scope(self, scope: Scope) -> None:
+        """Swap in an operator-extended scope; every later request is gated by it (budgets are unchanged).
+
+        Extend-only: the new scope must keep every current host, port, path prefix and exclusion and pass the
+        E3 checks, so this can never loosen a boundary. Not a send path: each request is still gated.
+        """
+        current = self._engagement.scope
+        shrinks = (
+            not set(current.hosts) <= set(scope.hosts)
+            or not set(current.ports) <= set(scope.ports)
+            or current.path_prefixes != scope.path_prefixes
+            or current.exclusions != scope.exclusions
+            or (scope.max_rps, scope.max_requests) != (current.max_rps, current.max_requests)
+        )
+        if shrinks or validate_scope(scope):
+            raise ScopeViolation('scope may only be extended with hosts or ports', rule_code='scope-invalid')
+        self._engagement = self._engagement.model_copy(update={'scope': scope})
 
     async def __aenter__(self) -> Self:
         return self

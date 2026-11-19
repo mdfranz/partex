@@ -136,13 +136,13 @@ async def test_dot_segment_escape_refused_before_send(target_server: object) -> 
 
 
 def test_no_bypass_api() -> None:
-    """The only send paths are request/follow_redirect — no escape hatch."""
+    """The only send paths are request/follow_redirect — no escape hatch (set_scope only ever extends, #64)."""
     public = {
         name
         for name in dir(ScopedHttpClient)
         if not name.startswith('_') and callable(getattr(ScopedHttpClient, name, None))
     }
-    assert public == {'aclose', 'follow_redirect', 'request'}
+    assert public == {'aclose', 'follow_redirect', 'request', 'set_scope'}
 
 
 # ── Redirects: captured, never auto-followed, re-validated before follow ───────

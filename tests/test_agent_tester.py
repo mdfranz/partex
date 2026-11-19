@@ -18,8 +18,10 @@ from pydantic_ai.models.test import TestModel
 
 from partex import engine
 from partex.agent_adapter import TesterDeps, build_tester_agent, run_agent
+from partex.agent_adapter.scope_plugin import ScopeControl, ScopePlugin, current_control
 from partex.agent_adapter.tester import MODEL_BODY_CHARS
 from partex.engine import LiveSession, LiveSessionRefused, live_session
+from partex.errors import ScopeViolation
 from partex.storage import RunStore
 
 _TARGET_APP = Path(__file__).parent.parent / 'fixtures' / 'target_app' / 'app.py'
@@ -304,7 +306,11 @@ async def test_run_agent_opens_clai2_on_a_live_session(
     run_id = await run_agent(engagement(tmp_path, target_app), db, TestModel(), authorized=True, briefing=False)
     (call,) = calls
     assert call['agent'].name == 'partex_tester_agent'
-    assert call['load_plugins'] is False and call['settings'].code_mode is False
+    assert call['settings'].code_mode is False
+    # Only partex's own /scope plugin loads, from a private settings store (never the user's saved/drop-in ones).
+    assert call['load_plugins'] is True
+    assert [plugin.id for plugin in call['builtin_plugins']] == ['partex_scope']
+    assert 'partex-clai2-' in str(call['store'].path) and call['store'].path.name == 'config.db'
     assert call['deps'].run_id == run_id
     async with await RunStore.open(db) as store:
         assert (await store.get_run(run_id)).state == 'checks_complete'
@@ -525,3 +531,71 @@ async def test_usage_recorder_covers_streaming_and_errors(tmp_store: RunStore) -
     conn = sqlite3.connect(f'file:{tmp_store.path}?mode=ro', uri=True)
     statuses = dict(conn.execute('SELECT status, COUNT(*) FROM llm_usage WHERE run_id=? GROUP BY status', (run_id,)))
     assert statuses.get('error', 0) == 2 and statuses.get('ok', 0) == 1  # stream + non-stream failure, one ok
+
+
+# ── operator-confirmed scope extension (issue #64) ────────────────────────────
+
+
+async def test_scope_staging_changes_nothing_and_confirm_applies_and_audits(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        control = ScopeControl(session)
+        url = f'http://localhost:{target_app.port}/'
+        with pytest.raises(ScopeViolation):
+            await session.request('GET', url)  # not in scope yet: refused before any send
+
+        staged = await control.handle(['add', f'localhost:{target_app.port}'])
+        assert '+ host localhost' in staged and 'Not in effect yet' in staged
+        with pytest.raises(ScopeViolation):
+            await session.request('GET', url)  # staged is still not in effect
+        assert session.engagement.scope.hosts == ['127.0.0.1']
+
+        confirmed = await control.handle(['confirm'])
+        assert 'extended' in confirmed and 'localhost' in session.engagement.scope.hosts
+        evidence = await session.request('GET', url)  # now in scope, through the same gate
+        assert evidence.http.response.status_code == 200
+
+        stored = (await tmp_store.get_run(session.run_id)).scope_snapshot
+        assert stored is not None and stored.hosts == ['127.0.0.1', 'localhost']
+        calls = [c for c in await tmp_store.tool_calls(session.run_id) if c.tool == 'scope_amend']
+        assert len(calls) == 1 and calls[0].args['confirmed_by'] == 'test'
+        assert calls[0].result['hosts_after'] == ['127.0.0.1', 'localhost']
+
+
+async def test_scope_cancel_confirm_without_pending_and_bad_input(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        control = ScopeControl(session)
+        assert 'Nothing pending' in await control.handle(['confirm'])
+        await control.handle(['add', 'localhost'])
+        assert 'dropped' in await control.handle(['cancel'])
+        assert 'Nothing pending' in await control.handle(['confirm'])
+        assert 'Refused' in await control.handle(['add', 'user@evil.test'])
+        assert 'Usage' in await control.handle(['remove', 'x'])
+        assert 'Already in scope' in await control.handle(['add', f'127.0.0.1:{target_app.port}'])
+        assert session.engagement.scope.hosts == ['127.0.0.1']
+        assert not [c for c in await tmp_store.tool_calls(session.run_id) if c.tool == 'scope_amend']
+
+
+async def test_client_set_scope_is_extend_only(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        scope = session.engagement.scope
+        for bad in (
+            scope.model_copy(update={'hosts': ['other.test']}),
+            scope.model_copy(update={'exclusions': []}),
+            scope.model_copy(update={'max_requests': scope.max_requests + 1}),
+        ):
+            with pytest.raises(ScopeViolation):
+                session.client.set_scope(bad)
+
+
+def test_the_model_has_no_scope_tool() -> None:
+    names = set(build_tester_agent('test')._function_toolset.tools)  # pyright: ignore[reportPrivateUsage]
+    assert not {name for name in names if 'scope' in name}
+
+
+def test_scope_command_registers_only_with_a_bound_session() -> None:
+    plugin = ScopePlugin.__new__(ScopePlugin)
+    assert current_control.get() is None and plugin.get_commands() == ()

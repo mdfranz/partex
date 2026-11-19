@@ -6,6 +6,8 @@ IPv6 literals, default-port elision, backslashes, embedded whitespace/control
 characters, and `evil-example.test` vs `example.test`.
 """
 
+from typing import Any
+
 import pytest
 
 from partex.errors import ScopeViolation
@@ -14,7 +16,9 @@ from partex.scope import (
     MAX_REQUESTS_CEILING,
     MAX_RPS_CEILING,
     check_url,
+    extend_scope,
     normalize_host,
+    parse_scope_target,
     parse_scoped_url,
     validate_scope,
 )
@@ -353,3 +357,45 @@ def test_normalize_host_refusals(host: str, message: str) -> None:
 def test_malformed_authorities_refused(url: str, message: str) -> None:
     with pytest.raises(ScopeViolation, match=message):
         parse_scoped_url(url)
+
+
+# ── operator scope extension: parsing and merging (issue #64) ─────────────────
+
+
+def _scope(**update: object) -> Scope:
+    data: dict[str, Any] = {'hosts': ['a.test'], 'path_prefixes': ['/'], 'exclusions': ['/logout'], 'ports': [443]}
+    return Scope(**{**data, **update})
+
+
+@pytest.mark.parametrize(
+    ('spec', 'host', 'ports'),
+    [
+        ('b.test', 'b.test', {80, 443}),
+        ('B.test:8443', 'b.test', {8443}),
+        ('https://b.test/x', 'b.test', {443}),
+        ('http://b.test:8080', 'b.test', {8080}),
+    ],
+)
+def test_parse_scope_target(spec: str, host: str, ports: set[int]) -> None:
+    assert parse_scope_target(spec) == (host, frozenset(ports))
+
+
+@pytest.mark.parametrize('spec', ['', 'ftp://b.test', 'user@b.test', 'b test'])
+def test_parse_scope_target_refuses_ambiguous_input(spec: str) -> None:
+    with pytest.raises(ScopeViolation):
+        parse_scope_target(spec)
+
+
+def test_extend_adds_host_and_port_and_keeps_everything_else() -> None:
+    extended = extend_scope(_scope(), 'b.test:8443')
+    assert extended.hosts == ['a.test', 'b.test'] and extended.ports == [443, 8443]
+    assert extended.exclusions == ['/logout'] and extended.path_prefixes == ['/']
+
+
+def test_extend_with_a_known_host_and_port_is_a_no_op() -> None:
+    assert extend_scope(_scope(), 'A.test:443') == _scope()
+
+
+def test_extend_keeps_scheme_defaults_when_scope_has_no_explicit_ports() -> None:
+    assert extend_scope(_scope(ports=[]), 'https://b.test').ports == []
+    assert extend_scope(_scope(ports=[]), 'b.test:8080').ports == [80, 443, 8080]

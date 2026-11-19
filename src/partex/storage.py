@@ -697,6 +697,15 @@ class RunStore(_Reads):
 
         await self._db.run(lambda conn: _transaction(conn, write))
 
+    async def set_scope_snapshot(self, run_id: str, scope: Scope) -> None:
+        """Replace the run's scope snapshot with the current (operator-extended) scope."""
+
+        def write(conn: sqlite3.Connection) -> None:
+            _get_run(conn, run_id)
+            conn.execute('UPDATE runs SET scope_snapshot = ? WHERE id = ?', (scope.model_dump_json(), run_id))
+
+        await self._db.run(lambda conn: _transaction(conn, write))
+
     # ── passive: one transaction at the end (§6.1) ──
 
     async def commit_passive(self, run_id: str, evidence: Sequence[Evidence], findings: Sequence[Finding]) -> None:

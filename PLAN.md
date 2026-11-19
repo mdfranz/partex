@@ -325,6 +325,16 @@ tool — is validated immediately before send:
    `max_requests`. Exhaustion ends active work cleanly (`checks_complete` with what is
    committed), it is not an error.
 
+**Live scope extension (operator only).** In a live `agent` session the operator can add a host
+and port with the CLAI2 slash command `/scope add <host[:port]|url>`, which only *stages* the
+change and shows the exact additions (ports apply to every host in scope); `/scope confirm`
+applies it, `/scope cancel` drops it. Slash commands are handled by the terminal shell and never
+reach the model, and the model has no scope tool, so a chat message cannot widen scope. The scope
+only grows (`ScopedHttpClient.set_scope` rejects any removal or budget change and re-runs E3),
+each amendment is recorded on the run as a `scope_amend` tool call, and `runs.scope_snapshot`
+holds the current scope. The command is a small partex-owned CLAI2 plugin; the session uses a
+private settings store so the operator's saved and drop-in CLAI2 plugins stay out (#64).
+
 A scope violation raises `ScopeViolation` before any bytes hit the wire, is recorded on the
 run, and — when triggered by the agent — is raised as a `ToolFailed` tool error so the model
 sees the failure and adapts without burning its tool retry budget (§9). The client has no API

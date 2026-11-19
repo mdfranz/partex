@@ -6,6 +6,7 @@ network beyond the model provider. ``run_agent`` does the same over a new live s
 tester's scoped ``http_request`` and ``run_check`` added (#54).
 """
 
+import tempfile
 from pathlib import Path
 
 import anyio.to_thread
@@ -15,7 +16,8 @@ from pydantic_ai.models import Model
 # Imported at module level, before any tool frames text: CLAI2 registers its own framing tags at
 # import time, and a tag registered after escaping has started changes how earlier text renders.
 from pydantic_clai2 import chat  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
-from pydantic_clai2.config import Settings  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_clai2.config import PluginSettings, Settings  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_clai2.config.settings_store import SettingsStore  # pyright: ignore[reportMissingTypeStubs]
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.rule import Rule
@@ -23,6 +25,7 @@ from rich.rule import Rule
 from .. import engine
 from ..storage import RunReader, RunStore
 from .reviewer import BRIEFING_PROMPT, build_reviewer_agent
+from .scope_plugin import SCOPE_PLUGIN_FACTORY, SCOPE_PLUGIN_ID, ScopeControl, current_control
 from .tester import TesterDeps, build_tester_agent
 from .tools import ReviewDeps
 from .usage import UsageRecordingModel
@@ -122,5 +125,21 @@ async def run_agent(
             summary = await brief(recorded, deps, console) if briefing else None
             await _pause_on(summary, console)
             agent = build_tester_agent(recorded, briefing=summary)
-            await chat(agent, deps=deps, load_plugins=False, console=console, settings=CHAT_SETTINGS)
+            # The operator-only /scope command is a CLAI2 plugin (slash commands exist only as plugins). A
+            # private, empty settings store keeps the operator's saved and drop-in CLAI2 plugins out, and
+            # only the partex plugin is declared, so the session loads nothing else (#64).
+            with tempfile.TemporaryDirectory(prefix='partex-clai2-') as config_dir:
+                token = current_control.set(ScopeControl(session))
+                try:
+                    await chat(
+                        agent,
+                        deps=deps,
+                        load_plugins=True,
+                        store=SettingsStore(Path(config_dir) / 'config.db'),
+                        builtin_plugins=(PluginSettings(id=SCOPE_PLUGIN_ID, factory=SCOPE_PLUGIN_FACTORY),),
+                        console=console,
+                        settings=CHAT_SETTINGS,
+                    )
+                finally:
+                    current_control.reset(token)
         return session.run_id
