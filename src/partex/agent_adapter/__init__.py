@@ -2,7 +2,8 @@
 
 ``run_chat`` opens one run read-only, prints an opening briefing from the reviewer, then hands the
 reviewer to the CLAI2 terminal with every plugin off: no coding tools, no filesystem, no shell, no
-network beyond the model provider.
+network beyond the model provider. ``run_agent`` does the same over a new live session, with the
+tester's scoped ``http_request`` and ``run_check`` added (#54).
 """
 
 from pathlib import Path
@@ -19,16 +20,28 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.rule import Rule
 
-from ..storage import RunReader
+from .. import engine
+from ..storage import RunReader, RunStore
 from .reviewer import BRIEFING_PROMPT, build_reviewer_agent
+from .tester import TesterDeps, build_tester_agent
 from .tools import ReviewDeps
+from .usage import UsageRecordingModel
 
 # Explicit CLAI2 settings, so the operator's saved CLAI2 preferences cannot change what the reviewer is:
 # model=None keeps the agent's model (CLAI2's default model would otherwise override it), and Code Mode
 # stays off so the model calls partex's tools natively instead of through a run_code sandbox (RUNTIME.md M5).
 CHAT_SETTINGS = Settings(model=None, code_mode=False, speculative_code_mode=False)
 
-__all__ = ['BRIEFING_PROMPT', 'ReviewDeps', 'brief', 'build_reviewer_agent', 'run_chat']
+__all__ = [
+    'BRIEFING_PROMPT',
+    'ReviewDeps',
+    'TesterDeps',
+    'brief',
+    'build_reviewer_agent',
+    'build_tester_agent',
+    'run_agent',
+    'run_chat',
+]
 
 
 async def brief(model: Model | str, deps: ReviewDeps, console: Console) -> str | None:
@@ -48,6 +61,13 @@ async def brief(model: Model | str, deps: ReviewDeps, console: Console) -> str |
     return result.output
 
 
+async def _pause_on(summary: str | None, console: Console) -> None:
+    """CLAI2 takes over the screen and shows only its own transcript; let the operator read the briefing
+    first. It stays in the terminal's scrollback above the session."""
+    if summary is not None and console.is_terminal:
+        await anyio.to_thread.run_sync(lambda: console.input('[dim]Press Enter to open the chat…[/]'))
+
+
 async def run_chat(
     run_id: str, db_path: Path, model: Model | str, *, briefing: bool = True, console: Console | None = None
 ) -> None:
@@ -57,9 +77,50 @@ async def run_chat(
         await reader.get_run(run_id)  # unknown run → StoreError(run-not-found) before any model call or UI
         deps = ReviewDeps(run_id=run_id, reader=reader)
         summary = await brief(model, deps, console) if briefing else None
-        if summary is not None and console.is_terminal:
-            # CLAI2 takes over the screen and shows only its own transcript; let the operator read the
-            # briefing first. It stays in the terminal's scrollback above the session.
-            await anyio.to_thread.run_sync(lambda: console.input('[dim]Press Enter to open the chat…[/]'))
+        await _pause_on(summary, console)
         agent = build_reviewer_agent(model, briefing=summary)
         await chat(agent, deps=deps, load_plugins=False, console=console, settings=CHAT_SETTINGS)
+
+
+async def run_agent(
+    engagement_path: Path,
+    db_path: Path,
+    model: Model | str,
+    *,
+    authorized: bool,
+    checks: tuple[str, ...] = ('version-disclosure',),
+    from_run: str | None = None,
+    briefing: bool = True,
+    console: Console | None = None,
+) -> str:
+    """Open a new live session on *engagement_path*, brief, then let the operator direct probes in CLAI2.
+
+    The engine does the gates (``--authorized``, E1–E7, credentials) before any socket, the baseline
+    capture, and the selected active *checks*; the session's run is finalized when the chat ends.
+    Returns the session's run ID.
+    """
+    console = console or Console()
+    async with await RunStore.open(db_path) as store:
+        if from_run is not None:
+            await store.get_run(from_run)  # unknown run → StoreError(run-not-found) before any socket
+        async with engine.live_session(engagement_path, store, authorized=authorized, checks=checks) as session:
+            # Record every model turn (briefing, chat) and every read-tool call to this run (§7, #54),
+            # so the run is auditable offline, not only through the gateway/Logfire.
+            recorded = UsageRecordingModel(model, store=store, run_id=session.run_id, role='tester')
+
+            async def audit(tool: str, args: dict[str, object], result: dict[str, object]) -> None:
+                await store.record_tool_call(session.run_id, tool, args, result)
+
+            deps = TesterDeps(
+                run_id=session.run_id,
+                reader=store,
+                previous_run_id=from_run,
+                audit=audit,
+                session=session,
+                store=store,
+            )
+            summary = await brief(recorded, deps, console) if briefing else None
+            await _pause_on(summary, console)
+            agent = build_tester_agent(recorded, briefing=summary)
+            await chat(agent, deps=deps, load_plugins=False, console=console, settings=CHAT_SETTINGS)
+        return session.run_id

@@ -194,12 +194,19 @@ def test_reviewer_has_no_write_or_network_tools() -> None:
         'frame_untrusted',
         '_finding_summary',
         '_evidence_summary',
+        '_run_id',
+        '_audit_read',
         'list_findings',
         'get_finding',
         'list_evidence',
         'lookup_evidence',
     }
-    assert 'RunStore' not in source  # read-only handle only
+    # Read tools may be handed the session's store as a reader, but never call a write method.
+    writes = ('commit_', 'add_', 'set_state', 'set_summary', 'save_', 'record_', 'upsert_', 'create_run')
+    called = {
+        node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert not {name for name in called if name.startswith(writes)}
 
 
 async def test_run_chat_hands_clai2_the_reviewer_with_plugins_off(

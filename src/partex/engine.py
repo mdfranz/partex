@@ -20,7 +20,8 @@ opens sockets only through the scoped target client.
 import hashlib
 import importlib.metadata
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -30,11 +31,11 @@ import anyio.to_thread
 from pydantic import ValidationError
 
 from .bundle import load_bundle
-from .checks import PassiveCheck
+from .checks import HeaderInput, PassiveCheck
 from .engagement import MANIFEST_NAME, check_credentials_available, load_engagement
 from .errors import BudgetExhausted, PartexError, ScopeViolation, ValidationFailed
 from .ids import finding_id
-from .models import Evidence, Finding, FindingDraft, HttpEvidence
+from .models import Engagement, Evidence, Finding, FindingDraft, HttpEvidence
 from .storage import RunState, RunStore
 from .target import ScopedHttpClient
 
@@ -319,6 +320,24 @@ def _manifest_fingerprint(engagement_path: str | Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+class _GateRefused(PartexError):
+    """A live gate failed before any socket; the caller records the run as ``invalid``."""
+
+
+async def _check_live_gates(engagement_path: str | Path, *, authorized: bool) -> Engagement:
+    """The live gates, all before any socket: ``--authorized`` (E2 CLI half), E1–E7, credentials present."""
+    if not authorized:
+        raise _GateRefused('--authorized is required for every live command', rule_code='unauthorized')
+    try:
+        engagement = await anyio.to_thread.run_sync(load_engagement, engagement_path)
+    except ValidationFailed as exc:
+        raise _GateRefused(str(exc), rule_code=exc.rule_code or 'engagement-invalid') from exc
+    missing = check_credentials_available(engagement)
+    if missing:
+        raise _GateRefused(f'credential env vars not set: {", ".join(missing)}', rule_code='credential-missing')
+    return engagement
+
+
 async def run_test(
     engagement_path: str | Path,
     store: RunStore,
@@ -351,17 +370,10 @@ async def run_test(
         await store.set_state(run_id, 'invalid', error=message)
         return TestResult(run_id, 'invalid', selected_ids, error=message, rule_code=rule_code)
 
-    if not authorized:
-        return await invalid('unauthorized', '--authorized is required for every live command')
-
     try:
-        engagement = await anyio.to_thread.run_sync(load_engagement, engagement_path)
-    except ValidationFailed as exc:
+        engagement = await _check_live_gates(engagement_path, authorized=authorized)
+    except _GateRefused as exc:
         return await invalid(exc.rule_code or 'engagement-invalid', str(exc))
-
-    missing = check_credentials_available(engagement)
-    if missing:
-        return await invalid('credential-missing', f'credential env vars not set: {", ".join(missing)}')
 
     run_id = await store.create_run(
         input_kind='engagement',
@@ -441,3 +453,136 @@ async def run_test(
         )
     finally:
         await client.aclose()
+
+
+# ── Live session (issue #54; PLAN §9 operator-in-the-loop) ─────────────────────
+
+
+class LiveSessionRefused(PartexError):
+    """A live gate failed before any socket. The run row is recorded ``invalid`` (``run_id``) for audit."""
+
+    def __init__(self, message: str, *, rule_code: str | None, run_id: str) -> None:
+        super().__init__(message, rule_code=rule_code)
+        self.run_id = run_id
+
+
+class LiveSession:
+    """One open live run that an operator (through an agent) extends with further requests and checks.
+
+    The engine stays the only writer: requests go through the engagement-scoped client and commit their
+    evidence at capture time; checks return drafts that the engine validates and commits. The run stays
+    ``created`` while the session is open and is finalized when :func:`live_session` exits.
+    """
+
+    def __init__(self, *, run_id: str, engagement: Engagement, registry: Mapping[str, Any], store: RunStore) -> None:
+        self.run_id = run_id
+        self.engagement = engagement
+        self.registry = registry
+        self.captured: list[Evidence] = []
+        self.findings: list[Finding] = []
+        self._store = store
+        self.client = ScopedHttpClient(engagement, source=f'capture:{run_id}', on_capture=self._on_capture)
+
+    async def _on_capture(self, evidence: HttpEvidence) -> None:
+        await self._store.add_evidence(self.run_id, evidence)
+        await self._store.add_requests_spent(self.run_id, 1)
+        self.captured.append(evidence)
+
+    @property
+    def requests_spent(self) -> int:
+        return self.client.requests_spent
+
+    async def request(
+        self, method: str, url: str, *, headers: HeaderInput | None = None, body: str | None = None
+    ) -> HttpEvidence:
+        """Send one request through the scope gate (raises ``ScopeViolation`` / ``BudgetExhausted`` / ``PartexError``)."""
+        return await self.client.request(method, url, headers=headers, body=body)
+
+    async def run_check(self, check_id: str) -> list[Finding]:
+        """Run one registered check over this session and commit its new findings; returns all of its findings.
+
+        Active checks probe through the session's scoped client; passive checks review every exchange
+        captured so far. Raises :class:`CheckSelectionError` for an unknown ID, ``BudgetExhausted`` when
+        the budget runs out, and :class:`CheckFailed` when the check raises or returns invalid drafts.
+        """
+        check = self.registry.get(check_id)
+        if check is None:
+            available = ', '.join(sorted(self.registry)) or '(none installed)'
+            raise CheckSelectionError(f'unknown check {check_id!r}; available: {available}', rule_code='unknown-check')
+        evidence = list(self.captured)
+        try:
+            if callable(getattr(check, 'probe', None)):
+                drafts = await check.probe(evidence, self.client)
+            else:
+                drafts = await anyio.to_thread.run_sync(check.review, evidence)
+        except BudgetExhausted:
+            raise
+        except ScopeViolation as exc:
+            raise CheckFailed(check_id, f'probe left the engagement scope: {exc}') from exc
+        except Exception as exc:
+            raise CheckFailed(check_id, f'raised {type(exc).__name__}: {exc}') from exc
+        findings = _finalize([check], [drafts], self.captured)
+        known = {finding.id for finding in self.findings}
+        new = [finding for finding in findings if finding.id not in known]
+        await self._store.commit_findings(self.run_id, new)
+        self.findings.extend(new)
+        return findings
+
+
+@asynccontextmanager
+async def live_session(
+    engagement_path: str | Path,
+    store: RunStore,
+    *,
+    authorized: bool,
+    checks: Sequence[str] = (),
+    registry: Mapping[str, Any] | None = None,
+) -> AsyncGenerator[LiveSession]:
+    """Open a new live run, do the deterministic pass, and yield it for operator-directed work.
+
+    Same gates as :func:`run_test`, before any socket (a refusal records an ``invalid`` run and raises
+    :class:`LiveSessionRefused`). Then a baseline capture of ``target.base_url`` and the selected active
+    *checks*, as ``partex test`` does. On exit the run becomes ``checks_complete``, or ``checks_failed``
+    with the error if the block raised; finalizing is shielded from cancellation.
+    """
+    registry = installed_checks() if registry is None else registry
+    selected = select_active_checks(registry, checks) if checks else []
+    selected_ids = tuple(check.check_id for check in selected)
+    try:
+        engagement = await _check_live_gates(engagement_path, authorized=authorized)
+    except _GateRefused as exc:
+        run_id = await store.create_run(
+            input_kind='engagement',
+            input_ref=str(engagement_path),
+            input_sha256='',
+            engine_version=engine_version(),
+            selected_checks=selected_ids,
+        )
+        message = f'{exc.rule_code}: {exc}'
+        await store.set_state(run_id, 'invalid', error=message)
+        raise LiveSessionRefused(message, rule_code=exc.rule_code, run_id=run_id) from exc
+    run_id = await store.create_run(
+        input_kind='engagement',
+        input_ref=str(engagement_path),
+        input_sha256=_manifest_fingerprint(engagement_path),
+        engine_version=engine_version(),
+        selected_checks=selected_ids,
+        authorized=True,
+        scope_snapshot=engagement.scope,
+    )
+    session = LiveSession(run_id=run_id, engagement=engagement, registry=registry, store=store)
+    try:
+        await session.request('GET', engagement.target.base_url)
+        for check in selected:
+            if check.applies_to(session.captured):
+                await session.run_check(check.check_id)
+        yield session
+    except BaseException as exc:
+        with anyio.CancelScope(shield=True):
+            await store.set_state(run_id, 'checks_failed', error=f'{type(exc).__name__}: {exc}')
+            await session.client.aclose()
+        raise
+    else:
+        with anyio.CancelScope(shield=True):
+            await store.set_state(run_id, 'checks_complete')
+            await session.client.aclose()

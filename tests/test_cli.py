@@ -603,6 +603,86 @@ def test_chat_requires_model(capsys: pytest.CaptureFixture[str], db: Path) -> No
     assert run(capsys, 'chat', 'run_x', '--db', str(db))[0] == cli.EXIT_USAGE
 
 
+# ── agent (#54) — the live session and terminal are replaced ──────────────────
+
+
+@pytest.fixture
+def agent_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    import partex.agent_adapter
+
+    calls: list[dict[str, object]] = []
+
+    async def fake_run_agent(engagement: Path, db_path: Path, model: object, **kwargs: object) -> str:
+        calls.append({'engagement': engagement, 'db': db_path, 'model': model, **kwargs})
+        return 'run_session'
+
+    monkeypatch.setattr(partex.agent_adapter, 'run_agent', fake_run_agent)
+    return calls
+
+
+def test_agent_passes_options_through(
+    capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path, agent_calls: list[dict[str, object]]
+) -> None:
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    code, _, err = run(
+        capsys,
+        'agent',
+        str(tmp_path / 'eng'),
+        '--authorized',
+        '--model',
+        'test',
+        '--checks',
+        'version-disclosure, x',
+        '--from',
+        run_id,
+        '--no-briefing',
+        '--db',
+        str(db),
+    )
+    assert code == cli.EXIT_OK
+    (call,) = agent_calls
+    assert call['authorized'] is True and call['briefing'] is False
+    assert call['checks'] == ('version-disclosure', 'x') and call['from_run'] == run_id
+    assert call['model'] == 'test' and call['db'] == db
+    assert 'run_session' in err
+
+
+def test_agent_unknown_from_run_exits_1_before_the_model(
+    capsys: pytest.CaptureFixture[str],
+    db: Path,
+    tmp_path: Path,
+    agent_calls: list[dict[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import partex.models_config
+
+    monkeypatch.setattr(partex.models_config, 'resolve_model', lambda *a, **k: pytest.fail('model resolved'))
+    review_run_id(capsys, db, VALID_BUNDLE)
+    code, _, err = run(
+        capsys, 'agent', str(tmp_path / 'eng'), '--authorized', '--model', 'test', '--from', 'run_nope', '--db', str(db)
+    )
+    assert code == cli.EXIT_FATAL and 'run-not-found' in err
+    assert agent_calls == []
+
+
+def test_agent_refused_session_exits_1(
+    capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import partex.agent_adapter
+    from partex.engine import LiveSessionRefused
+
+    async def refused(*args: object, **kwargs: object) -> str:
+        raise LiveSessionRefused('unauthorized: --authorized is required', rule_code='unauthorized', run_id='run_x')
+
+    monkeypatch.setattr(partex.agent_adapter, 'run_agent', refused)
+    code, _, err = run(capsys, 'agent', str(tmp_path / 'eng'), '--model', 'test', '--db', str(db))
+    assert code == cli.EXIT_FATAL and 'unauthorized' in err
+
+
+def test_agent_requires_model(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    assert run(capsys, 'agent', str(tmp_path / 'eng'), '--authorized')[0] == cli.EXIT_USAGE
+
+
 def test_report_empty_store_exits_ok(capsys: pytest.CaptureFixture[str], db: Path) -> None:
     async def create() -> None:
         async with await RunStore.open(db):
