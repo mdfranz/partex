@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "target": {
+    "name": "example-app",
+    "base_url": "https://staging.example.test"
+  },
+  "scope": {
+    "hosts": [
+      "staging.example.test/admin"
+    ],
+    "path_prefixes": [
+      "/"
+    ],
+    "exclusions": [
+      "/admin/shutdown",
+      "/logout"
+    ],
+    "ports": [
+      443
+    ],
+    "max_rps": 5,
+    "max_requests": 2000
+  },
+  "authorization": {
+    "attestation": "Written authorization from Example Corp, ref SOW-2026-114, expires 2026-12-31.",
+    "operator": "j.operator"
+  },
+  "credentials": {
+    "session": "PARTEX_CRED_SESSION"
+  },
+  "roles": {
+    "owner": "PARTEX_CRED_OWNER",
+    "guest": "PARTEX_CRED_GUEST"
+  },
+  "suggested_checks": [
+    "header-security",
+    "version-disclosure"
+  ]
+}
