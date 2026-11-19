@@ -14,7 +14,7 @@
 #
 # Traffic: the session opens with 3 GETs (TARGET_URL, /robots.txt, /partex-nonexistent-probe-0); after that
 # only what you ask for in the chat (GET/HEAD/OPTIONS). 2 req/s, budget 50 per session, host and port locked
-# to TARGET_URL, /logout|/reboot|/reset|/restart|/factory excluded — enforced by partex, not the model.
+# to TARGET_URL, /logout|/reboot|/reset|/restart|/factory excluded — scope is checked by partex, not the model.
 set -euo pipefail
 export PYDANTIC_AI_NO_BANNER=${PYDANTIC_AI_NO_BANNER:-1}  # skip pydantic-ai's startup banner between findings and briefing
 
@@ -34,7 +34,7 @@ fi
 : "${PARTEX_ATTESTATION:?set PARTEX_ATTESTATION to who authorized testing $TARGET_URL}"
 [[ $TARGET_URL =~ ^(https?)://([^/:]+)(:([0-9]+))?(/.*)?$ ]] || { echo "bad TARGET_URL: $TARGET_URL" >&2; exit 1; }
 host=${BASH_REMATCH[2]} port=${BASH_REMATCH[4]:-$([[ ${BASH_REMATCH[1]} == https ]] && echo 443 || echo 80)}
-json_str() { local s=${1//\\/\\\\}; printf '"%s"' "${s//\"/\\\"}"; }
+json_str() { python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$1"; }
 
 eng=$(mktemp -d "${TMPDIR:-/tmp}/partex-engagement.XXXXXX")
 trap 'rc=$?; rm -rf "$eng"; exit $rc' EXIT  # keep the exit status (bash 3.2 would return the trap's)
@@ -58,6 +58,7 @@ JSON
 if [[ -n ${NO_TUI:-} ]]; then
   rc=0
   result=$(partex test "$eng" --authorized --checks version-disclosure --db "$DB") || rc=$?
+  printf '%s\n' "$result"
   run=$(grep -o 'run_[0-9a-f]\{32\}' <<<"$result" | head -1 || true)
   [[ -n $run ]] && partex show "$run" --db "$DB" --format text
   exit $(( rc == 3 ? 0 : rc ))

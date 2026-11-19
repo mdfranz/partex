@@ -1152,15 +1152,15 @@ client-issued ones.
 Each milestone ends with its experiments run and documented here. A landed component does not
 by itself satisfy its milestone gate; record the command, result, and revision when a gate is
 verified. The snapshot below reflects the checked-out branch and GitHub issue state on
-2026-11-18; it is not a claim that the full validation suite has passed.
+2026-11-19; it is not a claim that the full validation suite has passed.
 
 | Milestone | Progress and remaining work |
 |---|---|
 | M0 | Project, CI and hermetic test harness landed; dependencies switched to locked PyPI releases (#13). The fresh-install experiment remains part of the open M1 gate (#10). |
 | M1 | Core models, bundle loading, storage, passive engine, export, header check and CLI landed. Gate experiments remain open (#10); header correctness (#38) and storage integrity/atomicity (#40) need fixes. |
-| M2 | Skill documents are present, but registry, entry-point discovery and separation gate remain open (#25). |
-| M3 | Engagement/scope, scoped client, role handles, live engine, fixture target and first probe landed (#11, #20, #21, #23). Verification (#22) and HAR/bundle round-trip (#28) remain open. Scope bypasses (#36) and capture/redaction defects (#37) require resolution before relying on the live boundary. |
-| M4–M7 | Planned; summarization, agent/chat, hardening gates and browser harness are not yet delivered. Draft skill content does not enable its checks (#24, #26, #27). |
+| M2 | Skill documents, registry, entry-point discovery, skills-as-data and frontmatter lint landed (#25). |
+| M3 | Engagement/scope, scoped client, role handles, live engine, fixture target, first probe and verification runner landed (#11, #20, #21, #22, #23); scope bypasses (#36) and capture/redaction defects (#37) are fixed. HAR/bundle round-trip (#28) remains open. |
+| M4–M7 | `partex report` (#61) and `partex agent` (#54) landed; hardening gates and the browser harness are not yet delivered. Draft skill content does not enable its checks (#24, #26, #27). |
 
 The active check contract was updated in code (#39); reconcile the remaining specification
 details under #44. No §13 experiment is recorded as passed here until its gate has evidence.
