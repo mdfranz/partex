@@ -499,3 +499,87 @@ def test_review_text_reports_invalid_bundle(
     assert code == cli.EXIT_FATAL
     assert ': invalid' in out
     assert err.startswith('error: ')
+
+
+# ── chat (#49) — the CLAI2 terminal is replaced; nothing interactive starts ───
+
+
+@pytest.fixture
+def chat_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Path, object]]:
+    import partex.agent_adapter
+
+    calls: list[tuple[str, Path, object]] = []
+
+    async def fake_run_chat(run_id: str, db_path: Path, model: object) -> None:
+        calls.append((run_id, db_path, model))
+
+    monkeypatch.setattr(partex.agent_adapter, 'run_chat', fake_run_chat)
+    return calls
+
+
+def test_chat_opens_the_run_with_the_resolved_model(
+    capsys: pytest.CaptureFixture[str], db: Path, chat_calls: list[tuple[str, Path, object]]
+) -> None:
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    code, _, err = run(capsys, 'chat', run_id, '--model', 'test', '--db', str(db))
+    assert (code, err) == (cli.EXIT_OK, '')
+    assert chat_calls == [(run_id, db, 'test')]
+
+
+def test_chat_routes_a_bare_model_through_the_gateway(
+    capsys: pytest.CaptureFixture[str],
+    db: Path,
+    chat_calls: list[tuple[str, Path, object]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.models.openai import OpenAIChatModel
+
+    monkeypatch.setenv('PYDANTIC_AI_GATEWAY_API_KEY', 'pylf_v2_eu_dummyKeyForTests')
+    monkeypatch.setenv('PYDANTIC_AI_GATEWAY_BASE_URL', 'https://gateway-eu.pydantic.dev/proxy/doubleword')
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    code, _, _ = run(
+        capsys, 'chat', run_id, '--model', 'zai-org/GLM-5.3', '--gateway-route', 'doubleword', '--db', str(db)
+    )
+    assert code == cli.EXIT_OK
+    ((_, _, model),) = chat_calls
+    assert isinstance(model, OpenAIChatModel)
+    assert str(model.client.base_url) == 'https://gateway-eu.pydantic.dev/proxy/doubleword/'
+
+
+def test_chat_unknown_run_exits_1_before_resolving_a_model(
+    capsys: pytest.CaptureFixture[str],
+    db: Path,
+    chat_calls: list[tuple[str, Path, object]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import partex.models_config
+
+    def must_not_resolve(*args: object, **kwargs: object) -> object:
+        raise AssertionError('model resolved for an unknown run')
+
+    monkeypatch.setattr(partex.models_config, 'resolve_model', must_not_resolve)
+    review_run_id(capsys, db, VALID_BUNDLE)
+    code, out, err = run(capsys, 'chat', 'run_missing', '--model', 'test', '--db', str(db))
+    assert (code, out) == (cli.EXIT_FATAL, '')
+    assert 'run-not-found' in err
+    assert chat_calls == []
+
+
+def test_chat_missing_store_exits_1(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    code, _, err = run(capsys, 'chat', 'run_x', '--model', 'test', '--db', str(tmp_path / 'none.db'))
+    assert code == cli.EXIT_FATAL
+    assert 'store-missing' in err
+
+
+def test_chat_bare_model_without_route_exits_1(
+    capsys: pytest.CaptureFixture[str], db: Path, chat_calls: list[tuple[str, Path, object]]
+) -> None:
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    code, _, err = run(capsys, 'chat', run_id, '--model', 'zai-org/GLM-5.3', '--db', str(db))
+    assert code == cli.EXIT_FATAL
+    assert 'model-config' in err and '--gateway-route' in err
+    assert chat_calls == []
+
+
+def test_chat_requires_model(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    assert run(capsys, 'chat', 'run_x', '--db', str(db))[0] == cli.EXIT_USAGE
