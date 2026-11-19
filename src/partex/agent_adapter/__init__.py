@@ -14,6 +14,7 @@ from pydantic_ai.models import Model
 # Imported at module level, before any tool frames text: CLAI2 registers its own framing tags at
 # import time, and a tag registered after escaping has started changes how earlier text renders.
 from pydantic_clai2 import chat  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
+from pydantic_clai2.config import Settings  # pyright: ignore[reportMissingTypeStubs]
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.rule import Rule
@@ -21,6 +22,11 @@ from rich.rule import Rule
 from ..storage import RunReader
 from .reviewer import BRIEFING_PROMPT, build_reviewer_agent
 from .tools import ReviewDeps
+
+# Explicit CLAI2 settings, so the operator's saved CLAI2 preferences cannot change what the reviewer is:
+# model=None keeps the agent's model (CLAI2's default model would otherwise override it), and Code Mode
+# stays off so the model calls partex's tools natively instead of through a run_code sandbox (RUNTIME.md M5).
+CHAT_SETTINGS = Settings(model=None, code_mode=False, speculative_code_mode=False)
 
 __all__ = ['BRIEFING_PROMPT', 'ReviewDeps', 'brief', 'build_reviewer_agent', 'run_chat']
 
@@ -56,4 +62,4 @@ async def run_chat(
             # briefing first. It stays in the terminal's scrollback above the session.
             await anyio.to_thread.run_sync(lambda: console.input('[dim]Press Enter to open the chat…[/]'))
         agent = build_reviewer_agent(model, briefing=summary)
-        await chat(agent, deps=deps, load_plugins=False, console=console)
+        await chat(agent, deps=deps, load_plugins=False, console=console, settings=CHAT_SETTINGS)

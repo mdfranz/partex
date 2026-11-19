@@ -18,7 +18,16 @@ from pydantic_ai.models.test import TestModel
 from partex.agent_adapter import ReviewDeps, build_reviewer_agent
 from partex.agent_adapter.tools import UNTRUSTED_TAG
 from partex.ids import evidence_id, finding_id
-from partex.models import Evidence, Finding, HttpEvidence, HttpExchange, HttpRequest, HttpResponse
+from partex.models import (
+    ConfigEvidence,
+    ConfigExcerpt,
+    Evidence,
+    Finding,
+    HttpEvidence,
+    HttpExchange,
+    HttpRequest,
+    HttpResponse,
+)
 from partex.storage import RunReader, RunStore
 
 SECRET = 'Bearer reviewer-test-secret'
@@ -100,7 +109,12 @@ def _returns(messages: list[ModelMessage]) -> list[ToolReturnPart]:
 def test_agent_is_named_and_needs_no_credentials_to_build() -> None:
     agent = build_reviewer_agent('gateway/anthropic:claude-sonnet-5-5')  # no key needed: defer_model_check
     assert agent.name == 'partex_reviewer_agent'
-    assert sorted(agent._function_toolset.tools) == ['get_finding', 'list_findings', 'lookup_evidence']  # pyright: ignore[reportPrivateUsage]
+    assert sorted(agent._function_toolset.tools) == [  # pyright: ignore[reportPrivateUsage]
+        'get_finding',
+        'list_evidence',
+        'list_findings',
+        'lookup_evidence',
+    ]
 
 
 async def test_tools_read_the_run_redacted_and_framed(
@@ -176,7 +190,15 @@ def test_reviewer_has_no_write_or_network_tools() -> None:
     source = Path(build_reviewer_agent.__code__.co_filename).with_name('tools.py').read_text()
     tree = ast.parse(source)
     funcs = {node.name for node in tree.body if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef)}
-    assert funcs == {'frame_untrusted', '_finding_summary', 'list_findings', 'get_finding', 'lookup_evidence'}
+    assert funcs == {
+        'frame_untrusted',
+        '_finding_summary',
+        '_evidence_summary',
+        'list_findings',
+        'get_finding',
+        'list_evidence',
+        'lookup_evidence',
+    }
     assert 'RunStore' not in source  # read-only handle only
 
 
@@ -196,6 +218,12 @@ async def test_run_chat_hands_clai2_the_reviewer_with_plugins_off(
     await run_chat(run_id, reader.path, TestModel())
     (call,) = calls
     assert call['load_plugins'] is False
+    # Saved CLAI2 preferences can't swap the model or fold tools into a run_code sandbox.
+    assert (call['settings'].model, call['settings'].code_mode, call['settings'].speculative_code_mode) == (
+        None,
+        False,
+        False,
+    )
     assert call['agent'].name == 'partex_reviewer_agent'
     assert call['deps'].run_id == run_id
 
@@ -346,3 +374,26 @@ async def test_terminal_waits_for_enter_after_the_briefing(
     order.clear()
     await run_chat(run_id, reader.path, TestModel(), console=console, briefing=False)
     assert order == ['chat']  # nothing to read, no pause
+
+
+async def test_list_evidence_shows_what_a_clean_run_captured(tmp_path: Path) -> None:
+    """A run with no findings is still reviewable: every capture is listed, redacted, bodies omitted."""
+    db = tmp_path / 'partex.db'
+    exchange = _http('/', body='<html>large page</html>', secret=True)
+    config = ConfigEvidence(
+        id='', source='bundle/app.ini', config=ConfigExcerpt(path='app.ini', format='config', content='debug=1')
+    )
+    config = config.model_copy(update={'id': evidence_id(config)})
+    async with await RunStore.open(db) as store:
+        run_id = await _seed(store, [exchange, config], [])
+    async with await RunReader.open(db) as reader:
+        model = _scripted([('list_evidence', {})])
+        result = await build_reviewer_agent('test').run(
+            'what did you capture?', deps=ReviewDeps(run_id, reader), model=model
+        )
+    (listed,) = (str(part.content) for part in _returns(result.all_messages()))
+    assert listed.startswith(f'<{UNTRUSTED_TAG} kind="evidence_list"')
+    assert exchange.id in listed and 'GET https://app.example.test/' in listed
+    assert '"status": 200' in listed and 'nginx/1.24.0' in listed and '"body_bytes": 23' in listed
+    assert SECRET not in listed and 'large page' not in listed
+    assert '"path": "app.ini"' in listed and 'debug=1' not in listed  # excerpt listed, content omitted

@@ -10,13 +10,13 @@ adapts instead of retrying.
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from pydantic_ai import RunContext, ToolFailed
 from pydantic_ai.framing import register_tag, wrap
 
 from ..ids import canonical_json
-from ..models import Finding, redact
+from ..models import ConfigEvidence, Evidence, Finding, HttpEvidence, redact
 from ..storage import RunReader
 
 UNTRUSTED_TAG = register_tag('partex_untrusted_data')
@@ -55,6 +55,31 @@ async def list_findings(ctx: RunContext[ReviewDeps]) -> str:
     return frame_untrusted('findings', [_finding_summary(finding) for finding in findings])
 
 
+def _evidence_summary(item: Evidence) -> dict[str, Any]:
+    if isinstance(item, ConfigEvidence):
+        return {'id': item.id, 'kind': item.kind, 'path': item.config.path, 'format': item.config.format}
+    redacted = cast(HttpEvidence, redact(item))  # redaction keeps the evidence kind
+    request, response = redacted.http.request, redacted.http.response
+    return {
+        'id': item.id,
+        'kind': item.kind,
+        'request': f'{request.method} {request.url}',
+        'status': response.status_code,
+        'response_headers': response.headers,
+        'body_bytes': None if response.body is None else len(response.body.encode()),
+    }
+
+
+async def list_evidence(ctx: RunContext[ReviewDeps]) -> str:
+    """List everything this run captured, in capture order: request, status, response headers, body size.
+
+    Use it to see what a run actually saw, including runs with no findings. Bodies are omitted; use
+    lookup_evidence for one exchange in full.
+    """
+    evidence = await ctx.deps.reader.evidence(ctx.deps.run_id)
+    return frame_untrusted('evidence_list', [_evidence_summary(item) for item in evidence])
+
+
 async def get_finding(ctx: RunContext[ReviewDeps], finding_id: str) -> str:
     """Return one finding of this run in full (description, remediation, verification ID).
 
@@ -79,4 +104,4 @@ async def lookup_evidence(ctx: RunContext[ReviewDeps], evidence_id: str) -> str:
     return frame_untrusted('evidence', json.loads(canonical_json(redact(evidence).model_dump(mode='json'))))
 
 
-REVIEWER_TOOLS = (list_findings, get_finding, lookup_evidence)
+REVIEWER_TOOLS = (list_findings, get_finding, list_evidence, lookup_evidence)
