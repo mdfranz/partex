@@ -186,6 +186,26 @@ def build_parser() -> argparse.ArgumentParser:
         '--no-briefing', action='store_true', help='open the chat without the opening model summary of the run'
     )
     chat.set_defaults(handler=_cmd_chat)
+
+    agent = subparsers.add_parser(
+        'agent',
+        parents=[with_db],
+        help='live session: direct further probes from the CLAI2 terminal (requires --authorized)',
+    )
+    agent.add_argument('engagement', help='engagement directory or engagement.json path')
+    agent.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
+    agent.add_argument(
+        '--model', required=True, help='as for chat: a model string, or a bare name with --gateway-route'
+    )
+    agent.add_argument('--gateway-route', default=None, help='Pydantic AI Gateway route serving a bare --model')
+    agent.add_argument(
+        '--checks',
+        default='version-disclosure',
+        help='active checks run before the chat opens (comma-separated; default: %(default)s)',
+    )
+    agent.add_argument('--from', dest='from_run', default=None, help='earlier run the agent may read (run_…)')
+    agent.add_argument('--no-briefing', action='store_true', help='open the chat without the opening summary')
+    agent.set_defaults(handler=_cmd_agent)
     return parser
 
 
@@ -428,6 +448,39 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     anyio.run(check_run)  # unknown store or run: exit 1 before a model is built or the terminal opens
     model = resolve_model(args.model, gateway_route=args.gateway_route)
     anyio.run(partial(run_chat, args.run_id, db_path, model, briefing=not args.no_briefing))
+    return EXIT_OK
+
+
+# ── agent ─────────────────────────────────────────────────────────────────────
+
+
+def _cmd_agent(args: argparse.Namespace) -> int:
+    from .agent_adapter import run_agent
+    from .models_config import resolve_model
+
+    db_path = resolve_db_path(args.db)
+    checks = tuple(_split_checks(args.checks))
+    if args.from_run is not None:
+
+        async def check_from() -> None:
+            async with await RunReader.open(db_path) as reader:
+                await reader.get_run(args.from_run)
+
+        anyio.run(check_from)  # unknown store or run: exit 1 before a model, a run row, or a socket
+    model = resolve_model(args.model, gateway_route=args.gateway_route)
+    run_id = anyio.run(
+        partial(
+            run_agent,
+            Path(args.engagement),
+            db_path,
+            model,
+            authorized=bool(args.authorized),
+            checks=checks,
+            from_run=args.from_run,
+            briefing=not args.no_briefing,
+        )
+    )
+    print(f'session run {run_id} saved; review it with: partex show {run_id} --db {db_path}', file=sys.stderr)
     return EXIT_OK
 
 
