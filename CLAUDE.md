@@ -22,6 +22,9 @@ While working:
   contradiction. Ask there instead of guessing; don't silently redesign.
 - One issue = one branch `issue-<n>-<slug>` (a git worktree is fine) = one PR whose body says
   `Closes #<n>`. Never commit directly to `main`.
+- Exception: small, unrelated issues may share one branch (`issue-<n>-<m>-<slug>`) and one PR. Claim
+  each issue, put a `Closes #<n>` line per issue in the PR body, and say the PR bundles them. Large or
+  risky issues stay in their own PR.
 - Touch only the files the issue lists under **Owns**. If you must edit a shared file
   (`pyproject.toml`, `tests/conftest.py`, `cli.py`), keep the hunk minimal and say so in the PR.
 - Unassign yourself and comment if you stop before finishing.
