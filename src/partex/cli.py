@@ -342,6 +342,9 @@ def _run_row(run: RunRecord) -> dict[str, Any]:
         'input_kind': run.input_kind,
         'input_ref': run.input_ref,
         'findings_count': run.findings_count,
+        'requests_spent': run.requests_spent,
+        'model': run.model,
+        'hosts': [] if run.scope_snapshot is None else run.scope_snapshot.hosts,
     }
 
 

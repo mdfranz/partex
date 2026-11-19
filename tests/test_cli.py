@@ -270,6 +270,7 @@ def test_runs_lists_runs_as_json(capsys: pytest.CaptureFixture[str], db: Path, t
     assert [row['id'] for row in rows] == [first, second]
     assert rows[0]['state'] == 'checks_complete'
     assert rows[0]['findings_count'] > 0 and rows[1]['findings_count'] == 0
+    assert {'requests_spent', 'model', 'hosts'} <= rows[0].keys()  # extra columns for partex.sh list
 
 
 def test_runs_text_output(capsys: pytest.CaptureFixture[str], db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
