@@ -61,12 +61,16 @@ class ScopeControl:
     async def confirm(self) -> str:
         if self.pending is None:
             return 'Nothing pending. Use /scope add <host[:port]|url> first.'
-        spec, self.pending = self.pending, None
+        spec = self.pending
         operator = self.session.engagement.authorization.operator
         try:
             _, after = await self.session.extend_scope(spec, confirmed_by=operator)
         except PartexError as exc:
+            if exc.rule_code == 'scope-persist':  # nothing changed; keep it staged so /scope confirm can retry
+                return f'Not applied: {exc}\nThe change is still staged; /scope confirm to retry or /scope cancel.'
+            self.pending = None
             return f'Refused: {exc}'
+        self.pending = None
         return f'Scope extended and recorded on the run.\n{describe(after)}'
 
     def cancel(self) -> str:

@@ -16,7 +16,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, Text
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
-from partex import engine
+from partex import engine, target
 from partex.agent_adapter import TesterDeps, build_tester_agent, run_agent
 from partex.agent_adapter.scope_plugin import ScopeControl, ScopePlugin, current_control
 from partex.agent_adapter.tester import MODEL_BODY_CHARS
@@ -537,8 +537,10 @@ async def test_usage_recorder_covers_streaming_and_errors(tmp_store: RunStore) -
 
 
 async def test_scope_staging_changes_nothing_and_confirm_applies_and_audits(
-    tmp_store: RunStore, tmp_path: Path, target_app: Any
+    tmp_store: RunStore, tmp_path: Path, target_app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The fixture binds IPv4 only; pin 'localhost' to it so a resolver that lists ::1 first cannot break CI.
+    monkeypatch.setattr(target, '_default_resolver', lambda host: '127.0.0.1')
     async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
         control = ScopeControl(session)
         url = f'http://localhost:{target_app.port}/'
@@ -599,3 +601,31 @@ def test_the_model_has_no_scope_tool() -> None:
 def test_scope_command_registers_only_with_a_bound_session() -> None:
     plugin = ScopePlugin.__new__(ScopePlugin)
     assert current_control.get() is None and plugin.get_commands() == ()
+
+
+async def test_failed_scope_persist_leaves_scope_snapshot_and_audit_unchanged(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(target, '_default_resolver', lambda host: '127.0.0.1')
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        control = ScopeControl(session)
+        url = f'http://localhost:{target_app.port}/'
+        await control.handle(['add', f'localhost:{target_app.port}'])
+
+        async def boom(*args: Any, **kwargs: Any) -> str:
+            raise OSError('disk full')
+
+        monkeypatch.setattr(tmp_store, 'amend_scope', boom)
+        message = await control.handle(['confirm'])
+        assert 'Not applied' in message and 'still staged' in message and 'disk full' in message
+        assert session.engagement.scope.hosts == ['127.0.0.1']  # effective scope unchanged...
+        with pytest.raises(ScopeViolation):
+            await session.request('GET', url)  # ...and the gate still refuses
+        stored = (await tmp_store.get_run(session.run_id)).scope_snapshot
+        assert stored is not None and stored.hosts == ['127.0.0.1']
+        assert not [c for c in await tmp_store.tool_calls(session.run_id) if c.tool == 'scope_amend']
+
+        monkeypatch.undo()  # storage recovers: the staged change can be retried and applies
+        monkeypatch.setattr(target, '_default_resolver', lambda host: '127.0.0.1')
+        assert 'extended' in await control.handle(['confirm'])
+        assert (await session.request('GET', url)).http.response.status_code == 200

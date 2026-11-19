@@ -626,3 +626,29 @@ async def test_reader_exposes_the_same_reads(tmp_store: RunStore, tmp_store_path
         assert await reader.evidence(run_id) == [item]
         assert await reader.findings(run_id) == [finding]
         assert (await reader.get_run(run_id)).findings_count == 1
+
+
+async def test_amend_scope_writes_snapshot_and_audit_together_or_not_at_all(tmp_store: RunStore) -> None:
+    scope = Scope(hosts=['a.test'], ports=[443])
+    run_id = await tmp_store.create_run(
+        input_kind='engagement',
+        input_ref='e',
+        input_sha256='0' * 64,
+        engine_version='x',
+        selected_checks=(),
+        scope_snapshot=scope,
+    )
+    bigger = scope.model_copy(update={'hosts': ['a.test', 'b.test']})
+
+    class Unserializable:
+        pass
+
+    with pytest.raises(TypeError):  # the audit row fails after the snapshot UPDATE: both roll back
+        await tmp_store.amend_scope(run_id, bigger, args={'x': Unserializable()}, result={})
+    assert (await tmp_store.get_run(run_id)).scope_snapshot == scope
+    assert not [c for c in await tmp_store.tool_calls(run_id) if c.tool == 'scope_amend']
+
+    await tmp_store.amend_scope(run_id, bigger, args={'spec': 'b.test'}, result={'hosts_after': bigger.hosts})
+    assert (await tmp_store.get_run(run_id)).scope_snapshot == bigger
+    (call,) = [c for c in await tmp_store.tool_calls(run_id) if c.tool == 'scope_amend']
+    assert call.args == {'spec': 'b.test'}
