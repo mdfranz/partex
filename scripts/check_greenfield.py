@@ -21,10 +21,12 @@ from contextlib import redirect_stdout
 from importlib.metadata import version
 from io import StringIO
 from pathlib import Path, PurePosixPath
-from runpy import run_path
+from runpy import run_module
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from zipfile import ZipFile
+
+import pytest
 
 from partex.__main__ import main as cli_main
 
@@ -185,8 +187,12 @@ def test_cli_version() -> None:
 
 
 def test_module_entry_point() -> None:
-    with patch.object(sys, 'argv', ['partex']):
-        run_path(str(ROOT / 'src/partex/__main__.py'), run_name='__main__')
+    # The console script imports partex.__main__ as a package module; exercise
+    # exactly that path (a loose script run cannot express the CLI delegation).
+    sys.modules.pop('partex.__main__', None)  # let run_module execute it fresh
+    with patch.object(sys, 'argv', ['partex', '--version']), pytest.raises(SystemExit) as excinfo:
+        run_module('partex.__main__', run_name='__main__')
+    assert excinfo.value.code == 0
 
 
 def test_greenfield_install() -> None:

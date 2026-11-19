@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "target": {"name": "fixture-app", "base_url": "http://127.0.0.1:8765"},
+  "scope": {
+    "hosts": ["staging.example.test"],
+    "path_prefixes": ["/"],
+    "exclusions": ["/admin/shutdown"],
+    "ports": [8765],
+    "max_rps": 5,
+    "max_requests": 100
+  },
+  "authorization": {
+    "attestation": "Deliberately invalid fixture: base_url host is outside scope.hosts (E5).",
+    "operator": "fixture"
+  },
+  "suggested_checks": ["version-disclosure"]
+}

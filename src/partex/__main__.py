@@ -1,15 +1,6 @@
-"""Command-line entry point for Partex."""
+"""Command-line entry point for Partex (surface lives in ``cli.py``)."""
 
-import argparse
-from importlib.metadata import version
-
-
-def main() -> None:
-    """Parse the command line."""
-    parser = argparse.ArgumentParser(prog='partex')
-    parser.add_argument('--version', action='version', version=f'partex {version("partex")}')
-    parser.parse_args()
-
+from .cli import main
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
