@@ -26,6 +26,7 @@ from .engine import CheckSelectionError
 from .errors import PartexError
 from .export import IncludeSecretsWarning, export_run_data, write_run_export
 from .ids import canonical_json
+from .registry import build_registry
 from .storage import RunReader, RunRecord, RunStore
 
 DB_ENV = 'PARTEX_DB'
@@ -165,6 +166,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     checks = subparsers.add_parser('checks', parents=[common], help='list installed checks')
     checks.add_argument('--json', action='store_true', help='JSON output even on a TTY')
+    checks.add_argument(
+        '--skill-dir', action='append', default=[], metavar='DIR', help='extra skill root (data only; repeatable)'
+    )
     checks.set_defaults(handler=_cmd_checks)
 
     chat = subparsers.add_parser(
@@ -392,15 +396,16 @@ def _check_kind(check: Any) -> str:
 
 
 def _cmd_checks(args: argparse.Namespace) -> int:
-    registry = engine.installed_checks()
+    registry = build_registry(args.skill_dir)
     rows = [
         {
             'check_id': check_id,
             'kind': _check_kind(check),
             'version': str(getattr(check, 'version', '')),
             'title': str(getattr(check, 'title', '')),
+            'skills': registry.skills_for(check_id),
         }
-        for check_id, check in registry.items()
+        for check_id, check in registry.checks.items()
     ]
     if _wants_json(args.json):
         _print_json(rows)
@@ -408,8 +413,11 @@ def _cmd_checks(args: argparse.Namespace) -> int:
         print('no checks installed')
     else:
         for row in rows:
-            print(f'{row["check_id"]:<24} {row["kind"]:<15} {row["version"]:<8} {row["title"]}')
-    return EXIT_OK
+            skills = ','.join(row['skills']) or '-'
+            print(f'{row["check_id"]:<24} {row["kind"]:<15} {row["version"]:<8} {row["title"]}  [skills: {skills}]')
+    for diagnostic in registry.diagnostics:
+        print(f'partex: {diagnostic.render()}', file=sys.stderr)
+    return EXIT_FATAL if registry.errors else EXIT_OK
 
 
 # ── chat ──────────────────────────────────────────────────────────────────────

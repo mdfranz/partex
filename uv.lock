@@ -1197,6 +1197,7 @@ dependencies = [
     { name = "pydantic-ai-harness", extra = ["repair-tool-arguments"] },
     { name = "pydantic-ai-slim" },
     { name = "pydantic-clai2" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -1215,6 +1216,7 @@ requires-dist = [
     { name = "pydantic-ai-harness", extras = ["repair-tool-arguments"], specifier = ">=0.68" },
     { name = "pydantic-ai-slim", specifier = ">=2.68" },
     { name = "pydantic-clai2", specifier = ">=0.68" },
+    { name = "pyyaml", specifier = ">=6" },
 ]
 
 [package.metadata.requires-dev]
