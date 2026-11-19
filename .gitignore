@@ -1,15 +1,3 @@
-# Allowlist: track root files plus partex's own source, test, docs, and data trees. Every
-# other top-level directory (venvs, build output, reference clones) stays untracked.
-/*/
-!src/
-!tests/
-!skills/
-!docs/
-!fixtures/
-!scripts/
-!bench/
-!.github/
-
 # Python build/test byproducts inside tracked trees.
 __pycache__/
 *.py[cod]
@@ -21,3 +9,21 @@ __pycache__/
 .DS_Store
 *.swp
 *~
+
+# Local engagement/probe databases (SQLite + WAL sidecars) and per-machine MCP config.
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+.mcp.json
+
+# Tool caches and build output (top-level dirs are no longer allowlisted).
+.venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.claude/settings.local.json
+build/
+dist/
+node_modules/
