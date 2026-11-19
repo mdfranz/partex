@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "target": {"name": "fixture-app", "base_url": "http://127.0.0.1:8765"},
+  "scope": {
+    "hosts": ["127.0.0.1"],
+    "path_prefixes": ["/"],
+    "exclusions": ["/admin/shutdown"],
+    "ports": [8765],
+    "max_rps": 5,
+    "max_requests": 100
+  },
+  "authorization": {
+    "attestation": "Local fixture target for two-role boundary testing (PLAN 4.1 D2); no real system.",
+    "operator": "fixture"
+  },
+  "roles": {
+    "owner": "PARTEX_CRED_OWNER",
+    "guest": "PARTEX_CRED_GUEST"
+  },
+  "suggested_checks": ["version-disclosure"]
+}

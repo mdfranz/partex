@@ -116,6 +116,44 @@ class TokenBucket:
             await self._sleep(wait)
 
 
+class RequestBudget:
+    """Engagement-wide request budget: run counter + rate bucket (§4.2 rule 5).
+
+    One budget object is shared by the primary handle and every role handle
+    (PLAN §4.1 D2, issue #23) so ``max_requests`` / ``max_rps`` are the
+    *engagement's*, never multiplied per client.  :meth:`acquire` reserves one
+    request (raising :class:`BudgetExhausted` when the counter is spent) and
+    paces it against the rate bucket; the client records the send after the
+    response lands.
+    """
+
+    def __init__(self, max_requests: int, max_rps: int) -> None:
+        self.max_requests = max_requests
+        self._remaining = max_requests
+        self._sent = 0
+        self._lock = anyio.Lock()
+        self._bucket = TokenBucket(float(max_rps))
+
+    @property
+    def requests_spent(self) -> int:
+        """Requests successfully sent under this budget."""
+        return self._sent
+
+    def record_send(self) -> None:
+        """Record one completed send (called by the client after the response lands)."""
+        self._sent += 1
+
+    async def acquire(self) -> None:
+        """Reserve one request slot and pace it, or raise :class:`BudgetExhausted`."""
+        async with self._lock:
+            if self._remaining <= 0:
+                raise BudgetExhausted(
+                    f'max_requests budget ({self.max_requests}) exhausted; {self._sent} requests were sent'
+                )
+            self._remaining -= 1
+        await self._bucket.acquire()
+
+
 class _PinnedTransport(httpx2.AsyncHTTPTransport):
     """Rewrite the request to the pinned address, preserving Host and SNI.
 
@@ -160,18 +198,26 @@ class ScopedHttpClient:
         resolver: Resolver | None = None,
         transport: httpx2.AsyncBaseTransport | None = None,
         timeout: httpx2.Timeout | float = DEFAULT_TIMEOUT,
+        budget: RequestBudget | None = None,
+        pins: dict[str, str] | None = None,
     ) -> None:
         self._engagement = engagement
         self._secrets = tuple(s for s in secrets if s)
         self._source = source
         self._on_capture = on_capture
         self._resolver: Resolver = resolver if resolver is not None else _default_resolver
-        self._pins: dict[str, str] = {}
+        # The DNS pin table may be shared across handles (role clients resolve
+        # each in-scope host once per engagement, not once per role).  The lock
+        # stays per-client: two concurrent clients may, benignly, both resolve
+        # the same host before either writes the pin.
+        self._pins: dict[str, str] = pins if pins is not None else {}
         self._pin_lock = anyio.Lock()
-        self._budget_lock = anyio.Lock()
-        self._remaining = engagement.scope.max_requests
-        self._sent = 0
-        self._bucket = TokenBucket(float(engagement.scope.max_rps))
+        # One engagement-wide budget shared by every handle bound to it (D2):
+        # passing a shared RequestBudget is what makes role clients pool their
+        # request/rate allowance instead of each getting a fresh one.
+        self._budget = (
+            budget if budget is not None else RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps)
+        )
         self._client = httpx2.AsyncClient(
             transport=_PinnedTransport(self._pins, inner=transport),
             follow_redirects=False,
@@ -180,8 +226,8 @@ class ScopedHttpClient:
 
     @property
     def requests_spent(self) -> int:
-        """Number of in-scope requests this client has sent."""
-        return self._sent
+        """Number of in-scope requests sent under this client's budget."""
+        return self._budget.requests_spent
 
     async def __aenter__(self) -> Self:
         return self
@@ -207,10 +253,14 @@ class ScopedHttpClient:
         :class:`BudgetExhausted` when the engagement budget is spent.
         """
         check_url(self._engagement.scope, url)  # rules 1–3, before resolution
-        await self._acquire_budget()  # rule 5
+        await self._budget.acquire()  # rule 5
         await self._pin_host(url)  # rule 2: resolve once per run
         header_list = list(headers.items()) if isinstance(headers, Mapping) else list(headers or ())
-        http_request = httpx2.Request(
+        # build_request (not a bare httpx2.Request) so the client cookie jar and
+        # default headers merge into the outbound request — `send()` transmits a
+        # request as-is, and role handles must carry their session cookies the
+        # way the operator's browser would.
+        http_request = self._client.build_request(
             method.upper(), url, headers=header_list or None, content=body.encode() if body else None
         )
         # The pinned transport rewrites ``request.url`` to the resolved address; evidence
@@ -221,7 +271,7 @@ class ScopedHttpClient:
             await response.aread()
         except httpx2.HTTPError as exc:
             raise PartexError(f'request to {url} failed: {exc}') from exc
-        self._sent += 1
+        self._budget.record_send()
         return await self._capture(http_request, requested_url, response, body)
 
     async def follow_redirect(self, evidence: HttpEvidence) -> HttpEvidence:
@@ -257,16 +307,6 @@ class ScopedHttpClient:
             for key, value in evidence.http.request.headers
             if key.lower() not in {'host', 'content-length'}
         ]
-
-    async def _acquire_budget(self) -> None:
-        async with self._budget_lock:
-            if self._remaining <= 0:
-                raise BudgetExhausted(
-                    f'max_requests budget ({self._engagement.scope.max_requests}) exhausted; '
-                    f'{self._sent} requests were sent'
-                )
-            self._remaining -= 1
-        await self._bucket.acquire()
 
     async def _pin_host(self, url: str) -> None:
         """Resolve the URL's host once per client, pinning the address (rule 2)."""
