@@ -27,9 +27,6 @@ from partex.models import (
 )
 from partex.storage import SCHEMA_VERSION, RunReader, RunStore, StoreError, surface_node_id
 
-# Until #2 lands tests/conftest.py, register the store fixtures here; then move this to its list.
-pytest_plugins = ['plugins.store']
-
 # ── builders ──────────────────────────────────────────────────────────────────
 
 
