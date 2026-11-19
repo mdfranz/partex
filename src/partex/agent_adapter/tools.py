@@ -11,14 +11,14 @@ adapts instead of retrying.
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from pydantic_ai import RunContext, ToolFailed
 from pydantic_ai.framing import register_tag, wrap
 
 from ..ids import canonical_json
 from ..models import ConfigEvidence, Evidence, Finding, HttpEvidence, redact
-from ..storage import RunReader, RunStore
+from ..storage import RunReader, RunRecord, RunStore
 
 UNTRUSTED_TAG = register_tag('partex_untrusted_data')
 # The opening briefing is model output written from untrusted data, so it is framed (and escaped) too.
@@ -28,7 +28,8 @@ BRIEFING_TAG = register_tag('partex_briefing')
 type RunReads = RunReader | RunStore
 """Read access to the store: a ``mode=ro`` reader for ``chat``; the session's engine store for ``agent``."""
 
-type RunChoice = Literal['current', 'previous']
+type RunChoice = str
+"""``current``, ``previous`` (the ``--from`` run), or the ID (``run_…``) of an earlier run against the same target."""
 
 type AuditHook = Callable[[str, dict[str, Any], dict[str, Any]], Awaitable[None]]
 """Records one read-tool call (``tool, args, compact result``). ``agent`` sets it; ``chat`` leaves it None,
@@ -47,12 +48,33 @@ class ReviewDeps:
     """Set by ``agent`` to log read-tool calls to the session run; ``None`` for the read-only ``chat``."""
 
 
-def _run_id(deps: ReviewDeps, run: RunChoice) -> str:
+def _target_key(run: RunRecord) -> tuple[frozenset[str], frozenset[int]] | None:
+    """A run's target identity: the hosts and ports of its scope snapshot (``None`` if it has none)."""
+    scope = run.scope_snapshot
+    return None if scope is None else (frozenset(scope.hosts), frozenset(scope.ports))
+
+
+async def _same_target_runs(deps: ReviewDeps) -> list[RunRecord]:
+    """Runs in the store against the same target (hosts and ports) as the current run, oldest first.
+
+    Runs of other targets or engagements in the same database are never exposed to the model.
+    """
+    key = _target_key(await deps.reader.get_run(deps.run_id))
+    if key is None:
+        return []
+    return [run for run in await deps.reader.list_runs() if _target_key(run) == key]
+
+
+async def _run_id(deps: ReviewDeps, run: RunChoice) -> str:
     if run == 'current':
         return deps.run_id
-    if deps.previous_run_id is None:
-        raise ToolFailed("there is no previous run in this session; use run='current'")
-    return deps.previous_run_id
+    if run == 'previous':
+        if deps.previous_run_id is None:
+            raise ToolFailed("there is no previous run in this session; use run='current' or call list_runs")
+        return deps.previous_run_id
+    if run == deps.previous_run_id or any(candidate.id == run for candidate in await _same_target_runs(deps)):
+        return run
+    raise ToolFailed(f'run {run!r} is not a run against this target; call list_runs for valid run IDs')
 
 
 def frame_untrusted(kind: str, payload: Any) -> str:
@@ -77,13 +99,40 @@ def _finding_summary(finding: Finding) -> dict[str, Any]:
     }
 
 
+async def list_runs(ctx: RunContext[ReviewDeps]) -> str:
+    """List earlier sessions/runs against this same target (oldest first), including the current run.
+
+    Use a returned ``id`` as the ``run`` argument of the other read tools to look at that run's
+    findings and evidence. Runs against other targets are not listed.
+    """
+    runs = await _same_target_runs(ctx.deps)
+    await _audit_read(ctx.deps, 'list_runs', {}, {'count': len(runs)})
+    return frame_untrusted(
+        'runs',
+        [
+            {
+                'id': run.id,
+                'created_at': run.created_at,
+                'state': run.state,
+                'kind': run.input_kind,
+                'checks': list(run.selected_checks),
+                'findings': run.findings_count,
+                'requests_spent': run.requests_spent,
+                'current': run.id == ctx.deps.run_id,
+            }
+            for run in runs
+        ],
+    )
+
+
 async def list_findings(ctx: RunContext[ReviewDeps], run: RunChoice = 'current') -> str:
     """List a run's findings: id, check, severity, subject, title, status, and evidence IDs.
 
     Args:
-        run: ``current`` (default), or ``previous`` for the run an agent session continues from.
+        run: ``current`` (default), ``previous`` (the run an agent session continues from), or a run ID from
+            ``list_runs``.
     """
-    findings = await ctx.deps.reader.findings(_run_id(ctx.deps, run))
+    findings = await ctx.deps.reader.findings(await _run_id(ctx.deps, run))
     await _audit_read(ctx.deps, 'list_findings', {'run': run}, {'count': len(findings)})
     return frame_untrusted('findings', [_finding_summary(finding) for finding in findings])
 
@@ -110,9 +159,10 @@ async def list_evidence(ctx: RunContext[ReviewDeps], run: RunChoice = 'current')
     lookup_evidence for one exchange in full.
 
     Args:
-        run: ``current`` (default), or ``previous`` for the run an agent session continues from.
+        run: ``current`` (default), ``previous`` (the run an agent session continues from), or a run ID from
+            ``list_runs``.
     """
-    evidence = await ctx.deps.reader.evidence(_run_id(ctx.deps, run))
+    evidence = await ctx.deps.reader.evidence(await _run_id(ctx.deps, run))
     await _audit_read(ctx.deps, 'list_evidence', {'run': run}, {'count': len(evidence)})
     return frame_untrusted('evidence_list', [_evidence_summary(item) for item in evidence])
 
@@ -122,9 +172,10 @@ async def get_finding(ctx: RunContext[ReviewDeps], finding_id: str, run: RunChoi
 
     Args:
         finding_id: A finding ID from ``list_findings`` (``fn_…``).
-        run: ``current`` (default), or ``previous`` for the run an agent session continues from.
+        run: ``current`` (default), ``previous`` (the run an agent session continues from), or a run ID from
+            ``list_runs``.
     """
-    finding = await ctx.deps.reader.get_finding(_run_id(ctx.deps, run), finding_id)
+    finding = await ctx.deps.reader.get_finding(await _run_id(ctx.deps, run), finding_id)
     await _audit_read(ctx.deps, 'get_finding', {'finding_id': finding_id, 'run': run}, {'found': finding is not None})
     if finding is None:
         raise ToolFailed(f'no finding {finding_id!r} in this run; call list_findings for valid IDs')
@@ -136,9 +187,10 @@ async def lookup_evidence(ctx: RunContext[ReviewDeps], evidence_id: str, run: Ru
 
     Args:
         evidence_id: An evidence ID from ``list_evidence`` or a finding (``ev_…``).
-        run: ``current`` (default), or ``previous`` for the run an agent session continues from.
+        run: ``current`` (default), ``previous`` (the run an agent session continues from), or a run ID from
+            ``list_runs``.
     """
-    evidence = await ctx.deps.reader.get_evidence(_run_id(ctx.deps, run), evidence_id)
+    evidence = await ctx.deps.reader.get_evidence(await _run_id(ctx.deps, run), evidence_id)
     await _audit_read(
         ctx.deps, 'lookup_evidence', {'evidence_id': evidence_id, 'run': run}, {'found': evidence is not None}
     )
@@ -147,4 +199,4 @@ async def lookup_evidence(ctx: RunContext[ReviewDeps], evidence_id: str, run: Ru
     return frame_untrusted('evidence', json.loads(canonical_json(redact(evidence).model_dump(mode='json'))))
 
 
-REVIEWER_TOOLS = (list_findings, get_finding, list_evidence, lookup_evidence)
+REVIEWER_TOOLS = (list_runs, list_findings, get_finding, list_evidence, lookup_evidence)

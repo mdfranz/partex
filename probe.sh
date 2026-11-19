@@ -21,7 +21,8 @@ export PYDANTIC_AI_NO_BANNER=${PYDANTIC_AI_NO_BANNER:-1}  # skip pydantic-ai's s
 TARGET_URL=${1:-}
 MODEL=${PARTEX_MODEL:-zai-org/GLM-5.3}
 ROUTE=${PARTEX_GATEWAY_ROUTE-doubleword}
-DB=$(realpath -m "${PARTEX_DB:-partex-probe.db}")  # absolute, before the cd below
+DB=${PARTEX_DB:-partex-probe.db}
+case $DB in /*) ;; *) DB=$PWD/$DB ;; esac  # absolute, before the cd below (BSD realpath has no -m)
 cd "$(dirname "${BASH_SOURCE[0]}")"
 partex() { uv run --quiet partex "$@"; }
 

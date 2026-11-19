@@ -113,6 +113,7 @@ def test_agent_is_named_and_needs_no_credentials_to_build() -> None:
         'get_finding',
         'list_evidence',
         'list_findings',
+        'list_runs',
         'lookup_evidence',
     ]
 
@@ -195,7 +196,10 @@ def test_reviewer_has_no_write_or_network_tools() -> None:
         '_finding_summary',
         '_evidence_summary',
         '_run_id',
+        '_target_key',
+        '_same_target_runs',
         '_audit_read',
+        'list_runs',
         'list_findings',
         'get_finding',
         'list_evidence',
