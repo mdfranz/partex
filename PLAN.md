@@ -916,7 +916,10 @@ class ActiveCheck(Protocol):
     def applies_to(self, evidence: Sequence[Evidence]) -> bool: ...
     async def probe(self, evidence: Sequence[Evidence],
                     client: TargetClient) -> Sequence[FindingDraft]: ...
-    def verify_recipe(self, finding: Finding) -> VerificationRecipe | None: ...
+    def verify_recipe(self, finding: Finding,
+                      evidence: Sequence[Evidence]) -> VerificationRecipe | None: ...
+    def verify_match(self, finding: Finding, original: HttpEvidence,
+                     replay: HttpEvidence) -> bool: ...
 
 class TargetClient(Protocol):   # implemented by target.ScopedHttpClient
     async def request(self, method: str, url: str, *, headers: HeaderInput | None = None,
@@ -927,7 +930,14 @@ class TargetClient(Protocol):   # implemented by target.ScopedHttpClient
   already-committed `HttpEvidence`, so drafts cite `evidence.id` directly.
 
 - `verify_recipe` returns the minimal request set that confirms the finding (the replay the
-  verification runner executes); checks without a recipe produce `reported`-only findings.
+  verification runner executes); checks without a recipe produce `reported`-only findings. The
+  runner loads the finding's cited evidence from the store and passes it in, because a check has
+  no store access and could not otherwise know which exchange to replay.
+- `verify_match` is the reproduction seam: the runner executes the recipe, captures the replay,
+  and asks the check whether the finding's class still holds (`confirmed` vs `not_reproduced`).
+- `request` takes the full URL because the scope gate needs scheme, host and port; `probe` is
+  async because a sync probe cannot await the anyio-based scoped client; `HttpEvidence` is
+  returned because §5 drafts must cite `ev_*` ids. Landed by #21/#22; amended per #44.
 - Built-in checks: `header-security` (passive), `js-analysis` (passive, tree-sitter AST
   over downloaded JS artifacts and JS responses, #69), and `version-disclosure` (active).
 - Third-party checks register via the entry-point group `partex.checks`. Check code loads
@@ -1181,10 +1191,12 @@ verified. The snapshot below reflects the checked-out branch and GitHub issue st
 | M1 | Core models, bundle loading, storage, passive engine, export, header check and CLI landed. Gate experiments remain open (#10); header correctness (#38) and storage integrity/atomicity (#40) need fixes. |
 | M2 | Skill documents, registry, entry-point discovery, skills-as-data and frontmatter lint landed (#25). |
 | M3 | Engagement/scope, scoped client, role handles, live engine, fixture target, first probe and verification runner landed (#11, #20, #21, #22, #23); scope bypasses (#36) and capture/redaction defects (#37) are fixed. HAR/bundle round-trip (#28) remains open. |
-| M4–M7 | `partex report` (#61) and `partex agent` (#54) landed; hardening gates and the browser harness are not yet delivered. Draft skill content does not enable its checks (#24, #26, #27). |
+| M4 | Not delivered: `summarize.py` and `partex summarize`; retry, validation and timeout gates (§13.5) remain open. |
+| M5 | Early read-only `partex chat` (#49), interactive `partex agent` with operator-confirmed live scope extension (#54, #64) and `partex report` (#61) landed. Open: `--auto` mode, Code Mode and speculation gates, headless and cancellation tests, tmux checklist, operator approval for state-changing requests (#65), skills as deferred capabilities (#59). |
+| M6 | Not delivered: coverage target, authoring docs and recorded experiment results. Open related work: passive checks on live runs (#51), `--insecure` TLS (#71), scope confirmation fix (#72). Draft skill content does not enable its checks (#24, #26, #27). |
+| M7 | Not delivered: browser capture harness (`browser.py`, `partex browse`). |
 
-The active check contract was updated in code (#39); reconcile the remaining specification
-details under #44. No §13 experiment is recorded as passed here until its gate has evidence.
+No §13 experiment is recorded as passed here until its gate has evidence.
 
 | # | Milestone | Delivers | Gated by |
 |---|---|---|---|

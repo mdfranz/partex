@@ -1,6 +1,6 @@
 # ParTEx (`partex`)
 
-> **Status:** Planning & architecture repository (pre-implementation). No package code has landed yet; milestone sequencing, runtime boundaries, and skill synthesis plans are tracked in the documents below.
+> **Status:** Early implementation. The passive core, registry, live scoped testing, reporting, read-only chat and the interactive agent have landed (see [Implemented CLI](#implemented-cli)); summarization, hardening gates, HAR/bundle round-trip and the browser harness are still open. Dependencies are locked PyPI releases resolved through `uv.lock`.
 
 **ParTEx** (`partex`) is a greenfield Python framework for **authorized web application and API security testing**, built on locked PyPI releases of [Pydantic AI](https://github.com/pydantic/pydantic-ai) (`pydantic-ai-slim`, `pydantic-ai-harness`, `pydantic-clai2`) and [Monty](https://github.com/pydantic/monty) (`pydantic-monty`).
 
@@ -92,12 +92,35 @@ Used in [`PARTX_SKILL_PLAN.md`](PARTX_SKILL_PLAN.md) and [`SKILLS.md`](SKILLS.md
 
 ---
 
+## Implemented CLI
+
+Available today (`uv run partex --help`):
+
+| Command | Mode / Role | Coverage |
+|---|---|---|
+| `partex review <bundle>` | Passive | Deterministic passive checks over an offline bundle. |
+| `partex test <engagement>` | Active | Live baseline capture, active checks (default `version-disclosure`); requires `--authorized`. Passive checks over live captures are not run yet ([#51](https://github.com/mdfranz/partex/issues/51)). |
+| `partex verify <run-id> <finding-id>` | Active | Re-runs the verification replay for one finding; requires `--authorized`. |
+| `partex runs` | Query | Lists recorded runs. |
+| `partex show <run-id>` | Export | Canonical export of a run, secrets redacted by default. |
+| `partex report` | Query | Cross-run rollup of findings, model spend and tool calls. |
+| `partex checks` | Registry | Installed checks, linked skills and frontmatter lint. |
+| `partex chat <run-id>` | Read-only + Model | Read-only review chat over a saved run (CLAI2 terminal). |
+| `partex agent <engagement>` | Active + Model | Live operator-directed session, including operator-confirmed `/scope add`; requires `--authorized`. |
+
 ## Planned CLI Surface
 
-From [`PLAN.md` §8](PLAN.md#8-cli-surface):
+Not implemented yet, from [`PLAN.md` §8](PLAN.md#8-cli-surface):
 
 | Command | Mode / Role | Description |
 |---|---|---|
+| `partex engage init <dir>` / `engage check <dir>` | Setup / Validation | Scaffold and validate `engagement.json` without sending traffic. |
+| `partex export-bundle <run-id>` | Export | Export a live run's exchanges as a passive-reviewable bundle ([#28](https://github.com/mdfranz/partex/issues/28)). |
+| `partex import-har <file.har>` | Import | Build a bundle from an operator-exported HAR file ([#28](https://github.com/mdfranz/partex/issues/28)). |
+| `partex summarize <run-id>` | Model | Reference-validated `ReviewSummary` over committed findings (M4). |
+| `partex browse <engagement>` | Active + Browser (M7) | Browser capture harness (requires `--authorized`). |
+
+---|---|---|
 | `partex engage init <dir>` | Setup | Scaffold a new `engagement.json` manifest and target scope template. |
 | `partex engage check <dir>` | Validation | Validate engagement manifest, authorization attestation, scope rules, and credential/role env vars without sending traffic. |
 | `partex review <bundle>` | Passive | Run deterministic passive checks over an offline evidence bundle. |
@@ -121,7 +144,7 @@ From [`PLAN.md` §8](PLAN.md#8-cli-surface):
 
 | Milestone | Focus | Key Deliverables | Validation Gate |
 |---|---|---|---|
-| **M0** | Environment | Standalone `uv` project, local path sources/overrides for `pydantic-ai` and `pydantic-monty`, hermetic socket & model-blocking test fixtures. | [§13.1](PLAN.md#131-greenfield-dependency-check) |
+| **M0** | Environment | Standalone `uv` project, locked PyPI releases of `pydantic-ai` and `pydantic-monty` via `uv.lock`, hermetic socket & model-blocking test fixtures. | [§13.1](PLAN.md#131-greenfield-dependency-check) |
 | **M1** | Passive Core | `models.py`, `bundle.py`, `ids.py`, `storage.py`, `export.py`, `engine.py` (passive path), `header-security` check, `review`/`runs`/`show`/`checks` CLI. | [§13.3 (a–d)](PLAN.md#133-engine-repeatability-and-failure-policy) |
 | **M2** | Registry & Skill Separation | `registry.py`, data-only skills + frontmatter lint (D6), entry-point check loading, `banner-leak` fixture distribution, `--skill-dir`. | [§13.2](PLAN.md#132-skill-separation) |
 | **M3** | Live Testing | `engagement.py` (incl. `roles` D2), `scope.py`, `target.py` (`ScopedHttpClient`), `verify.py`, per-capture/per-check commits, local fixture target app, `version-disclosure` active check, `engage`/`test`/`verify`/`export-bundle` CLI. | [§13.3 (e)](PLAN.md#133-engine-repeatability-and-failure-policy), [§13.4](PLAN.md#134-scope-gate-capture-and-verification) |

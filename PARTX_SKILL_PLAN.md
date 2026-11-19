@@ -107,7 +107,7 @@ fixture). P0 rows are already inside M1–M3 and anchor every contract below.
 
 ## 5. Engine deltas required (proposed `PLAN.md` amendments)
 
-Gaps the re-ranked skills expose in the engine plan. **D1, D2, and D6 are landed in `PLAN.md`
+Gaps the re-ranked skills expose in the engine plan. **D1, D2, D6, and D7 are landed in `PLAN.md`
 (this round); D3 rides with its slice (S4); D4 and D5 stay deferred:**
 
 | # | Delta | Amends | Needed by | State |
@@ -118,6 +118,7 @@ Gaps the re-ranked skills expose in the engine plan. **D1, D2, and D6 are landed
 | D4 | CI-result import format (policy revision, operation/test id, expected, observed, evidence ref). New evidence kind, not a `ConfigExcerpt`. | §4.3, §5 | P2.3 | deferred, then proposal |
 | D5 | `SourceCheck` protocol for white-box review. `PLAN.md` §17.8 already asks; answer stays **deferred** — no source-assisted skill lands before the P3 proposal. | §10 | P3 | deferred |
 | D6 | Frontmatter lint: `name == dirname`, `modes` values valid, attribution fields present when derived, `checks` cross-join clean under `partex checks`. | §10 | P0/M2 | **landed in PLAN.md** |
+| D7 | ActiveCheck protocol reality: async `probe`, evidence-returning client (`TargetClient.request(method, url) -> HttpEvidence`, full URL for the scope gate), `verify_recipe(finding, evidence)` and `verify_match(finding, original, replay)`. Landed by #21 and #22; PLAN §10 amended (#44). Needed by S2/S3 checks (#26/#27). | §10 | P0/M3 | **landed in PLAN.md** |
 
 ## 6. Definition of ready (per skill)
 
