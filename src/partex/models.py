@@ -60,6 +60,10 @@ class HttpResponse(BaseModel):
     status_code: int
     headers: Headers
     body: str | None = None
+    body_note: Literal['truncated', 'refused'] | None = Field(default=None, exclude_if=lambda note: note is None)
+    """Why ``body`` is not the full response body: ``truncated`` (cut at the capture cap) or ``refused``
+    (binary or not UTF-8, so not stored). Omitted from serialization when unset, so evidence IDs of
+    complete bodies are unchanged (§12)."""
 
 
 class HttpExchange(BaseModel):
@@ -361,16 +365,49 @@ def _validate_secret_fields(evidence: HttpEvidence | ConfigEvidence) -> None:
             raise ValueError(f'secret_fields entry {path!r}: {exc}') from None
 
 
+def _redact_set_cookie(value: str) -> str:
+    """``sid=abc; Path=/; Secure`` → ``sid=<redacted>; Path=/; Secure``: the value goes, attributes stay."""
+    pair, sep, attributes = value.partition(';')
+    name, has_value, _ = pair.partition('=')
+    if not has_value:
+        return REDACTED
+    return f'{name.strip()}={REDACTED}{sep}{attributes}'
+
+
+def _redact_cookie_header(value: str) -> str:
+    """``a=1; b=2`` → ``a=<redacted>; b=<redacted>``: which cookies were sent stays visible."""
+    return '; '.join(
+        f'{name.strip()}={REDACTED}' if has_value else REDACTED
+        for name, has_value, _ in (pair.partition('=') for pair in value.split(';'))
+    )
+
+
+def _redacted_value(container: Any, leaf: _PathPart) -> str:
+    """The replacement for one secret value; cookie headers keep their structure (PLAN §5, value-only)."""
+    if leaf == 1 and isinstance(container, list) and len(cast(list[Any], container)) == 2:
+        name, value = cast(list[str], container)
+        match name.lower():
+            case 'set-cookie':
+                return _redact_set_cookie(value)
+            case 'cookie':
+                return _redact_cookie_header(value)
+            case _:
+                pass
+    return REDACTED
+
+
 def redact(evidence: Evidence) -> Evidence:
     """Return a copy of *evidence* with every ``secret_fields`` value replaced by ``<redacted>``.
 
-    Paths were validated when *evidence* was constructed, so every one resolves; for a header,
-    only the value is replaced (``headers[i][1]``) and the name stays visible.
+    Paths were validated when *evidence* was constructed, so every one resolves. For a header only
+    the value is replaced (``headers[i][1]``) and the name stays visible; for cookie headers only
+    the cookie values are (``Set-Cookie: sid=<redacted>; Path=/; Secure``, ``Cookie: a=<redacted>``),
+    so cookie attributes stay reviewable after redaction.
     """
     if not evidence.secret_fields:
         return evidence
     data = evidence.model_dump(mode='json')
     for path in evidence.secret_fields:
         parent, leaf = _resolve_parent(data, parse_secret_path(path))
-        parent[leaf] = REDACTED
+        parent[leaf] = _redacted_value(parent, leaf)
     return EvidenceAdapter.validate_python(data)

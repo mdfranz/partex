@@ -40,6 +40,7 @@ class _FixtureHandler(http.server.BaseHTTPRequestHandler):
                 'method': self.command,
                 'path': self.path,
                 'host_header': self.headers.get('Host', ''),
+                'cookie_header': self.headers.get('Cookie', ''),
                 'body': request_body,
             }
         )
@@ -52,6 +53,17 @@ class _FixtureHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Location', location)
             self.send_header('Content-Length', '0')
             self.end_headers()
+        elif parsed.path == '/set-cookie':
+            # Issue #23: a session-setting endpoint for cookie-isolation tests.
+            query = parse_qs(parsed.query)
+            value = query.get('value', ['marker'])[0]
+            payload = b'{"ok": true}'
+            self.send_response(200)
+            self.send_header('Set-Cookie', f'role_marker={value}; Path=/')
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
         elif parsed.path == '/binary':
             payload = b'\x00\xff\xfe\x00\x01not-text\x00\xff'
             self.send_response(200)

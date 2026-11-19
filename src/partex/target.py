@@ -29,16 +29,18 @@ headers and bodies marked in ``secret_fields``, handed to the engine's commit
 callback.  ``target.py`` never writes storage.
 """
 
+import codecs
 import ipaddress
 import socket
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Self
+from typing import Literal, Self
 from urllib.parse import urljoin
 
 import anyio
 import httpx2
 
+from partex.bundle import MAX_CONTENT_BYTES
 from partex.checks import HeaderInput
 from partex.engagement import Engagement
 from partex.errors import BudgetExhausted, PartexError
@@ -58,6 +60,15 @@ DEFAULT_TIMEOUT = httpx2.Timeout(30.0)
 # stored; Content-Type is a hint, not the arbiter).
 _NON_PRINTABLE_LIMIT = 0.3
 
+MAX_BODY_BYTES = MAX_CONTENT_BYTES
+"""Decoded response bytes kept per exchange (the bundle cap, so a capture always re-imports). The body is
+streamed and reading stops one byte past the cap: a hostile or huge response, or a decompression bomb,
+never lands in memory, storage, or a model's context whole."""
+
+# Request headers that carry credentials whatever their value (PLAN §5): marked secret on every
+# capture, as is every Set-Cookie the target issues (redacted value-only, attributes stay visible).
+_CREDENTIAL_REQUEST_HEADERS = frozenset({'authorization', 'proxy-authorization', 'cookie'})
+
 
 def _default_resolver(host: str) -> str:
     """Resolve *host* to an address via getaddrinfo (first result wins)."""
@@ -70,16 +81,34 @@ def _header_pairs(headers: httpx2.Headers) -> Headers:
     return [(key.decode(headers.encoding), value.decode(headers.encoding)) for key, value in headers.raw]
 
 
-def _decode_body(content: bytes) -> str | None:
-    """Decode a response body for storage, or return ``None`` to refuse it."""
+def _decode_body(content: bytes, *, truncated: bool) -> tuple[str | None, Literal['truncated', 'refused'] | None]:
+    """Decode a captured body for storage: ``(text, body_note)``.
+
+    Binary or non-UTF-8 content is refused (``(None, 'refused')``). A truncated body may end inside
+    a multi-byte character; the incomplete tail is dropped rather than refusing the whole body.
+    """
+    decoder = codecs.getincrementaldecoder('utf-8')()
     try:
-        text = content.decode('utf-8')
+        text = decoder.decode(content, final=not truncated)
     except UnicodeDecodeError:
-        return None
+        return None, 'refused'
     non_printable = sum(1 for ch in text if ord(ch) < 0x20 and ch not in '\t\n\r')
     if non_printable > _NON_PRINTABLE_LIMIT * max(len(text), 1):
-        return None
-    return text
+        return None, 'refused'
+    return text, 'truncated' if truncated else None
+
+
+async def _read_capped(response: httpx2.Response) -> tuple[bytes, bool]:
+    """Read at most :data:`MAX_BODY_BYTES` of the decoded body: ``(content, truncated)``."""
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.aiter_bytes():
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > MAX_BODY_BYTES:
+            break
+    content = b''.join(chunks)
+    return content[:MAX_BODY_BYTES], size > MAX_BODY_BYTES
 
 
 class TokenBucket:
@@ -114,6 +143,44 @@ class TokenBucket:
                     return
                 wait = (1.0 - self._tokens) / self._rate
             await self._sleep(wait)
+
+
+class RequestBudget:
+    """Engagement-wide request budget: run counter + rate bucket (§4.2 rule 5).
+
+    One budget object is shared by the primary handle and every role handle
+    (PLAN §4.1 D2, issue #23) so ``max_requests`` / ``max_rps`` are the
+    *engagement's*, never multiplied per client.  :meth:`acquire` reserves one
+    request (raising :class:`BudgetExhausted` when the counter is spent) and
+    paces it against the rate bucket; the client records the send after the
+    response lands.
+    """
+
+    def __init__(self, max_requests: int, max_rps: int) -> None:
+        self.max_requests = max_requests
+        self._remaining = max_requests
+        self._sent = 0
+        self._lock = anyio.Lock()
+        self._bucket = TokenBucket(float(max_rps))
+
+    @property
+    def requests_spent(self) -> int:
+        """Requests successfully sent under this budget."""
+        return self._sent
+
+    def record_send(self) -> None:
+        """Record one completed send (called by the client after the response lands)."""
+        self._sent += 1
+
+    async def acquire(self) -> None:
+        """Reserve one request slot and pace it, or raise :class:`BudgetExhausted`."""
+        async with self._lock:
+            if self._remaining <= 0:
+                raise BudgetExhausted(
+                    f'max_requests budget ({self.max_requests}) exhausted; {self._sent} requests were sent'
+                )
+            self._remaining -= 1
+        await self._bucket.acquire()
 
 
 class _PinnedTransport(httpx2.AsyncHTTPTransport):
@@ -160,18 +227,26 @@ class ScopedHttpClient:
         resolver: Resolver | None = None,
         transport: httpx2.AsyncBaseTransport | None = None,
         timeout: httpx2.Timeout | float = DEFAULT_TIMEOUT,
+        budget: RequestBudget | None = None,
+        pins: dict[str, str] | None = None,
     ) -> None:
         self._engagement = engagement
         self._secrets = tuple(s for s in secrets if s)
         self._source = source
         self._on_capture = on_capture
         self._resolver: Resolver = resolver if resolver is not None else _default_resolver
-        self._pins: dict[str, str] = {}
+        # The DNS pin table may be shared across handles (role clients resolve
+        # each in-scope host once per engagement, not once per role).  The lock
+        # stays per-client: two concurrent clients may, benignly, both resolve
+        # the same host before either writes the pin.
+        self._pins: dict[str, str] = pins if pins is not None else {}
         self._pin_lock = anyio.Lock()
-        self._budget_lock = anyio.Lock()
-        self._remaining = engagement.scope.max_requests
-        self._sent = 0
-        self._bucket = TokenBucket(float(engagement.scope.max_rps))
+        # One engagement-wide budget shared by every handle bound to it (D2):
+        # passing a shared RequestBudget is what makes role clients pool their
+        # request/rate allowance instead of each getting a fresh one.
+        self._budget = (
+            budget if budget is not None else RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps)
+        )
         self._client = httpx2.AsyncClient(
             transport=_PinnedTransport(self._pins, inner=transport),
             follow_redirects=False,
@@ -180,8 +255,8 @@ class ScopedHttpClient:
 
     @property
     def requests_spent(self) -> int:
-        """Number of in-scope requests this client has sent."""
-        return self._sent
+        """Number of in-scope requests sent under this client's budget."""
+        return self._budget.requests_spent
 
     async def __aenter__(self) -> Self:
         return self
@@ -207,22 +282,29 @@ class ScopedHttpClient:
         :class:`BudgetExhausted` when the engagement budget is spent.
         """
         check_url(self._engagement.scope, url)  # rules 1–3, before resolution
-        await self._acquire_budget()  # rule 5
+        await self._budget.acquire()  # rule 5
         await self._pin_host(url)  # rule 2: resolve once per run
         header_list = list(headers.items()) if isinstance(headers, Mapping) else list(headers or ())
-        http_request = httpx2.Request(
+        # build_request (not a bare httpx2.Request) so the client cookie jar and
+        # default headers merge into the outbound request — `send()` transmits a
+        # request as-is, and role handles must carry their session cookies the
+        # way the operator's browser would.
+        http_request = self._client.build_request(
             method.upper(), url, headers=header_list or None, content=body.encode() if body else None
         )
         # The pinned transport rewrites ``request.url`` to the resolved address; evidence
         # records the URL as requested (hostname, not IP) so redirects and re-import stay in scope.
         requested_url = str(http_request.url)
         try:
-            response = await self._client.send(http_request, follow_redirects=False)
-            await response.aread()
+            response = await self._client.send(http_request, follow_redirects=False, stream=True)
+            try:
+                content, truncated = await _read_capped(response)
+            finally:
+                await response.aclose()
         except httpx2.HTTPError as exc:
             raise PartexError(f'request to {url} failed: {exc}') from exc
-        self._sent += 1
-        return await self._capture(http_request, requested_url, response, body)
+        self._budget.record_send()
+        return await self._capture(http_request, requested_url, response, body, content, truncated)
 
     async def follow_redirect(self, evidence: HttpEvidence) -> HttpEvidence:
         """Follow a captured redirect after re-validating its location.
@@ -258,16 +340,6 @@ class ScopedHttpClient:
             if key.lower() not in {'host', 'content-length'}
         ]
 
-    async def _acquire_budget(self) -> None:
-        async with self._budget_lock:
-            if self._remaining <= 0:
-                raise BudgetExhausted(
-                    f'max_requests budget ({self._engagement.scope.max_requests}) exhausted; '
-                    f'{self._sent} requests were sent'
-                )
-            self._remaining -= 1
-        await self._bucket.acquire()
-
     async def _pin_host(self, url: str) -> None:
         """Resolve the URL's host once per client, pinning the address (rule 2)."""
         host = parse_scoped_url(url).host
@@ -290,7 +362,13 @@ class ScopedHttpClient:
             self._pins[host] = resolved
 
     async def _capture(
-        self, request: httpx2.Request, url: str, response: httpx2.Response, body: str | None
+        self,
+        request: httpx2.Request,
+        url: str,
+        response: httpx2.Response,
+        body: str | None,
+        content: bytes,
+        truncated: bool,
     ) -> HttpEvidence:
         """Build the ``ev_`` record for a sent exchange, mark secrets, commit via callback."""
         request_model = HttpRequest(
@@ -299,30 +377,37 @@ class ScopedHttpClient:
             headers=_header_pairs(request.headers),
             body=body,
         )
+        response_body, body_note = _decode_body(content, truncated=truncated)
         response_model = HttpResponse(
             status_code=response.status_code,
             headers=_header_pairs(response.headers),
-            body=_decode_body(response.content),
+            body=response_body,
+            body_note=body_note,
         )
         evidence = HttpEvidence(
             id='',
             source=self._source,
             http=HttpExchange(request=request_model, response=response_model),
-            secret_fields=self._secret_fields(request_model, body),
+            secret_fields=self._secret_fields(request_model, body, response_model),
         )
         evidence = evidence.model_copy(update={'id': evidence_id(evidence)})
         if self._on_capture is not None:
             await self._on_capture(evidence)
         return evidence
 
-    def _secret_fields(self, request: HttpRequest, body: str | None) -> list[str]:
-        """Mark credential-matched headers and the request body as secret."""
-        if not self._secrets:
-            return []
+    def _secret_fields(self, request: HttpRequest, body: str | None, response: HttpResponse) -> list[str]:
+        """Mark secret: credential request headers (by name) and anything carrying an engagement
+        credential, and every ``Set-Cookie`` the target issued (redaction keeps its attributes)."""
         paths: list[str] = []
-        for index, (_, value) in enumerate(request.headers):
-            if any(secret in value for secret in self._secrets):
+        for index, (name, value) in enumerate(request.headers):
+            if name.lower() in _CREDENTIAL_REQUEST_HEADERS or self._carries_secret(value):
                 paths.append(f'$.http.request.headers[{index}][1]')
-        if body is not None and any(secret in body for secret in self._secrets):
+        if body is not None and self._carries_secret(body):
             paths.append('$.http.request.body')
+        for index, (name, _) in enumerate(response.headers):
+            if name.lower() == 'set-cookie':
+                paths.append(f'$.http.response.headers[{index}][1]')
         return paths
+
+    def _carries_secret(self, text: str) -> bool:
+        return any(secret in text for secret in self._secrets)

@@ -351,3 +351,133 @@ async def test_secret_fields_marked_and_redacted(target_server: object) -> None:
     assert len(redacted.http.request.headers) == len(evidence.http.request.headers)
     # The canonical id excludes secret_fields, so redaction does not change identity.
     assert get_header(evidence.http.request.headers, 'Authorization') == 'Bearer sekrit-token'
+
+
+# ── #37: capped capture, body notes, target-issued secrets ────────────────────
+
+
+def _stub_client(target_server: object, handler: object) -> ScopedHttpClient:
+    """A client on the fixture engagement whose transport is *handler* (no bytes leave the process)."""
+    port = target_server.port  # pyright: ignore[reportAttributeAccessIssue]
+    engagement = engagement_for(target_server, hosts=['fixture.test'], ports=[port])
+    return ScopedHttpClient(
+        engagement,
+        resolver=lambda host: '127.0.0.1',
+        transport=httpx2.MockTransport(handler),  # pyright: ignore[reportArgumentType]
+    )
+
+
+def _url(target_server: object, path: str = '/api/x') -> str:
+    return f'http://fixture.test:{target_server.port}{path}'  # pyright: ignore[reportAttributeAccessIssue]
+
+
+async def test_large_body_is_truncated_at_the_cap(target_server: object) -> None:
+    from partex.target import MAX_BODY_BYTES
+
+    big = b'a' * (MAX_BODY_BYTES * 4)
+    async with _stub_client(target_server, lambda request: httpx2.Response(200, content=big)) as client:
+        evidence = await client.request('GET', _url(target_server))
+    response = evidence.http.response
+    assert response.body is not None and len(response.body) == MAX_BODY_BYTES
+    assert response.body_note == 'truncated'
+
+
+async def test_body_exactly_at_the_cap_is_complete(target_server: object) -> None:
+    from partex.target import MAX_BODY_BYTES
+
+    exact = b'b' * MAX_BODY_BYTES
+    async with _stub_client(target_server, lambda request: httpx2.Response(200, content=exact)) as client:
+        evidence = await client.request('GET', _url(target_server))
+    assert evidence.http.response.body_note is None
+    assert len(evidence.http.response.body or '') == MAX_BODY_BYTES
+
+
+async def test_truncation_inside_a_multibyte_character_keeps_the_text(target_server: object) -> None:
+    from partex.target import MAX_BODY_BYTES
+
+    body = ('é' * MAX_BODY_BYTES).encode()  # 2 bytes each: the cap lands mid-character half the time
+    async with _stub_client(target_server, lambda request: httpx2.Response(200, content=body + b'x')) as client:
+        evidence = await client.request('GET', _url(target_server))
+    response = evidence.http.response
+    assert response.body_note == 'truncated'
+    assert response.body is not None and set(response.body) == {'é'}
+    assert len(response.body.encode()) <= MAX_BODY_BYTES
+
+
+async def test_binary_body_is_refused_with_a_note(target_server: object) -> None:
+    payload = b'\x00\xff\xfe\x00\x01not-text\x00\xff'
+    async with _stub_client(target_server, lambda request: httpx2.Response(200, content=payload)) as client:
+        evidence = await client.request('GET', _url(target_server))
+    assert (evidence.http.response.body, evidence.http.response.body_note) == (None, 'refused')
+
+
+async def test_gzip_bomb_is_bounded(target_server: object) -> None:
+    import gzip
+
+    from partex.target import MAX_BODY_BYTES
+
+    bomb = gzip.compress(b'0' * (64 * 1024 * 1024))  # 64 MiB of zeros, ~64 KiB on the wire
+    handler = lambda request: httpx2.Response(200, content=bomb, headers=[('Content-Encoding', 'gzip')])
+    async with _stub_client(target_server, handler) as client:
+        evidence = await client.request('GET', _url(target_server))
+    assert evidence.http.response.body_note == 'truncated'
+    assert len(evidence.http.response.body or '') == MAX_BODY_BYTES
+
+
+async def test_response_stream_is_closed(target_server: object) -> None:
+    closed: list[bool] = []
+
+    class Tracked(httpx2.AsyncByteStream):
+        async def __aiter__(self):  # type: ignore[override]
+            yield b'x' * 10
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    async with _stub_client(target_server, lambda request: httpx2.Response(200, stream=Tracked())) as client:
+        await client.request('GET', _url(target_server))
+    assert closed == [True]
+
+
+async def test_target_issued_cookies_and_credential_headers_are_secret(target_server: object) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            headers=[
+                ('Set-Cookie', 'sid=server-issued-token; Path=/; Secure; HttpOnly'),
+                ('Set-Cookie', 'theme=dark'),
+                ('Content-Type', 'text/plain'),
+            ],
+            text='ok',
+        )
+
+    async with _stub_client(target_server, handler) as client:  # no engagement secrets configured
+        evidence = await client.request(
+            'GET',
+            _url(target_server),
+            headers=[('Authorization', 'Bearer model-typed-token'), ('Cookie', 'sid=old'), ('Accept', '*/*')],
+        )
+    redacted = redact(evidence)
+    assert isinstance(redacted, HttpEvidence)
+    dumped = redacted.model_dump_json()
+    for secret in ('server-issued-token', 'model-typed-token', 'sid=old'):
+        assert secret not in dumped
+    # Value-only: cookie names and attributes stay visible to checks and reviewers.
+    assert get_all(redacted.http.response.headers, 'set-cookie') == [
+        'sid=<redacted>; Path=/; Secure; HttpOnly',
+        'theme=<redacted>',
+    ]
+    assert get_header(redacted.http.request.headers, 'cookie') == 'sid=<redacted>'
+    assert get_header(redacted.http.request.headers, 'accept') == '*/*'
+    # Storage keeps cleartext for replay (§5): only the export/model boundary redacts.
+    assert (
+        get_header(evidence.http.response.headers, 'set-cookie') == 'sid=server-issued-token; Path=/; Secure; HttpOnly'
+    )
+
+
+async def test_control_character_text_is_refused(target_server: object) -> None:
+    """Valid UTF-8 that is mostly control characters is binary in disguise: refused, not stored."""
+    payload = ('\x01\x02\x03\x04' * 50 + 'hi').encode()
+    async with _stub_client(target_server, lambda request: httpx2.Response(200, content=payload)) as client:
+        evidence = await client.request('GET', _url(target_server))
+    assert (evidence.http.response.body, evidence.http.response.body_note) == (None, 'refused')

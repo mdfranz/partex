@@ -1,0 +1,602 @@
+"""CLI surface — PLAN §6 exit codes, §8 commands, §11.1 Logfire opt-in (issue #9).
+
+Every test drives :func:`partex.cli.main` in-process against a temporary store; no network, no
+model. ``capsys`` makes stdout a non-TTY, so output is JSON unless a test forces TTY mode.
+"""
+
+import json
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+import anyio
+import pytest
+
+from partex import cli, engine
+from partex.models import Evidence, FindingDraft
+from partex.storage import RunStore
+
+FIXTURES = Path(__file__).parent.parent / 'fixtures'
+VALID_BUNDLE = FIXTURES / 'bundles' / 'valid'
+MALFORMED_BUNDLE = FIXTURES / 'bundles' / 'malformed' / 'bundle-version--version-2'
+SECRET = 'Bearer cli-test-secret-token'
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def db(tmp_path: Path) -> Path:
+    return tmp_path / 'store' / 'partex.db'
+
+
+def run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str, str]:
+    """Run the CLI as the console script would: argparse's own ``SystemExit`` becomes the exit code."""
+    try:
+        code = cli.main(list(argv))
+    except SystemExit as exc:
+        assert isinstance(exc.code, int)
+        code = exc.code
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def as_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys.stdout, 'isatty', lambda: True)
+
+
+def write_bundle(root: Path, records: list[dict[str, Any]]) -> Path:
+    (root / 'evidence').mkdir(parents=True)
+    names: list[str] = []
+    for index, record in enumerate(records):
+        name = f'evidence/{index:04d}.json'
+        (root / name).write_text(json.dumps(record))
+        names.append(name)
+    manifest = {
+        'schema_version': 1,
+        'target': {'name': 'cli-fixture', 'base_url': 'https://app.example.test/'},
+        'evidence_files': names,
+    }
+    (root / 'bundle.json').write_text(json.dumps(manifest))
+    return root
+
+
+def secret_bundle(root: Path) -> Path:
+    """One exchange whose Authorization value is a real (marked) secret, plus a weak-header response."""
+    return write_bundle(
+        root,
+        [
+            {
+                'kind': 'http_exchange',
+                'http': {
+                    'request': {
+                        'method': 'GET',
+                        'url': 'https://app.example.test/',
+                        'headers': [['Authorization', SECRET]],
+                    },
+                    'response': {'status_code': 200, 'headers': [['Content-Type', 'text/html']], 'body': 'hi'},
+                },
+                'secret_fields': ['$.http.request.headers[0][1]'],
+            }
+        ],
+    )
+
+
+def config_only_bundle(root: Path) -> Path:
+    """header-security does not apply to config excerpts, so the run completes with no findings."""
+    return write_bundle(
+        root,
+        [{'kind': 'config_excerpt', 'config': {'path': 'app.ini', 'format': 'config', 'content': 'debug=false'}}],
+    )
+
+
+def review_run_id(capsys: pytest.CaptureFixture[str], db: Path, bundle: Path) -> str:
+    code, out, _ = run(capsys, 'review', str(bundle), '--checks', 'header-security', '--db', str(db))
+    assert code in (cli.EXIT_OK, cli.EXIT_FINDINGS)
+    return json.loads(out)['run_id']
+
+
+# ── DB path resolution ────────────────────────────────────────────────────────
+
+
+def test_db_flag_wins(tmp_path: Path) -> None:
+    env = {'PARTEX_DB': '/env/db', 'XDG_DATA_HOME': '/xdg'}
+    assert cli.resolve_db_path(str(tmp_path / 'flag.db'), env) == tmp_path / 'flag.db'
+
+
+def test_db_env_beats_xdg() -> None:
+    assert cli.resolve_db_path(None, {'PARTEX_DB': '/env/db', 'XDG_DATA_HOME': '/xdg'}) == Path('/env/db')
+
+
+def test_db_xdg_data_home() -> None:
+    assert cli.resolve_db_path(None, {'XDG_DATA_HOME': '/xdg'}) == Path('/xdg/partex/partex.db')
+
+
+def test_db_home_fallback_creates_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    assert cli.resolve_db_path(None, {}) == tmp_path / '.local' / 'share' / 'partex' / 'partex.db'
+    assert not (tmp_path / '.local').exists()
+
+
+def test_db_env_used_by_commands(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db_path = tmp_path / 'env.db'
+    monkeypatch.setenv('PARTEX_DB', str(db_path))
+    code, _, _ = run(capsys, 'review', str(VALID_BUNDLE), '--all')
+    assert code == cli.EXIT_FINDINGS
+    assert db_path.is_file()
+
+
+# ── review ────────────────────────────────────────────────────────────────────
+
+
+def test_review_with_findings_exits_3(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    code, out, _ = run(capsys, 'review', str(VALID_BUNDLE), '--all', '--db', str(db))
+    assert code == cli.EXIT_FINDINGS
+    payload = json.loads(out)
+    assert payload['state'] == 'checks_complete'
+    assert payload['checks'] == ['header-security']  # --all: installed passive checks only
+    subjects = {finding['subject'] for finding in payload['findings']}
+    assert {'cookie:session', 'cookie:remember_token'} <= subjects
+
+
+def test_review_without_findings_exits_0(capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path) -> None:
+    bundle = config_only_bundle(tmp_path / 'bundle')
+    code, out, _ = run(capsys, 'review', str(bundle), '--checks', 'header-security', '--db', str(db))
+    assert code == cli.EXIT_OK
+    payload = json.loads(out)
+    assert (payload['findings'], payload['skipped_checks']) == ([], ['header-security'])
+
+
+def test_review_invalid_bundle_exits_1(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    code, out, _ = run(capsys, 'review', str(MALFORMED_BUNDLE), '--checks', 'header-security', '--db', str(db))
+    assert code == cli.EXIT_FATAL
+    payload = json.loads(out)
+    assert payload['state'] == 'invalid'
+    assert payload['rule_code'] == 'bundle-version'
+
+
+def test_review_checks_are_ordered_and_deduplicated(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    code, out, _ = run(
+        capsys, 'review', str(VALID_BUNDLE), '--checks', 'header-security, header-security', '--db', str(db)
+    )
+    assert code == cli.EXIT_FINDINGS
+    assert json.loads(out)['checks'] == ['header-security']
+
+
+def test_unknown_check_exits_1_listing_available(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    code, out, err = run(capsys, 'review', str(VALID_BUNDLE), '--checks', 'nope', '--db', str(db))
+    assert code == cli.EXIT_FATAL
+    assert out == ''
+    assert 'unknown-check' in err
+    assert 'header-security' in err and 'version-disclosure' in err
+    assert not db.exists()  # rejected before any run row (or store) is created
+
+
+def test_active_check_on_bundle_exits_1(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    code, _, err = run(capsys, 'review', str(VALID_BUNDLE), '--checks', 'version-disclosure', '--db', str(db))
+    assert code == cli.EXIT_FATAL
+    assert 'not-passive' in err
+
+
+@pytest.mark.parametrize(
+    'argv',
+    [
+        pytest.param(['--checks', ' , '], id='empty-selection'),
+        pytest.param([], id='no-selection'),
+        pytest.param(['--checks', 'header-security', '--all'], id='checks-and-all'),
+        pytest.param(['--all', '--workers', '0'], id='zero-workers'),
+        pytest.param(['--all', '--workers', 'many'], id='non-int-workers'),
+    ],
+)
+def test_review_usage_errors_exit_2(capsys: pytest.CaptureFixture[str], db: Path, argv: list[str]) -> None:
+    code, out, _ = run(capsys, 'review', str(VALID_BUNDLE), *argv, '--db', str(db))
+    assert code == cli.EXIT_USAGE
+    assert out == ''
+
+
+def test_no_command_is_usage_error(capsys: pytest.CaptureFixture[str]) -> None:
+    assert run(capsys)[0] == cli.EXIT_USAGE
+
+
+def test_version_exits_0(capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, _ = run(capsys, '--version')
+    assert code == cli.EXIT_OK
+    assert out.startswith('partex ')
+
+
+class _CrashingCheck:
+    check_id = 'boom'
+    version = '1'
+    title = 'Crashes'
+    description = 'raises from review'
+
+    def applies_to(self, evidence: Sequence[Evidence]) -> bool:
+        return True
+
+    def review(self, evidence: Sequence[Evidence]) -> Sequence[FindingDraft]:
+        raise RuntimeError('check exploded')
+
+
+def test_check_crash_exits_1(capsys: pytest.CaptureFixture[str], db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine, 'installed_checks', lambda: {'boom': _CrashingCheck()})
+    code, out, _ = run(capsys, 'review', str(VALID_BUNDLE), '--checks', 'boom', '--db', str(db))
+    assert code == cli.EXIT_FATAL
+    payload = json.loads(out)
+    assert (payload['state'], payload['failed_check']) == ('checks_failed', 'boom')
+
+
+def test_interrupt_exits_130(capsys: pytest.CaptureFixture[str], db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def interrupted() -> dict[str, Any]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(engine, 'installed_checks', interrupted)
+    code, _, err = run(capsys, 'review', str(VALID_BUNDLE), '--all', '--db', str(db))
+    assert code == cli.EXIT_INTERRUPTED
+    assert 'interrupted' in err
+
+
+def test_review_text_output_on_tty(
+    capsys: pytest.CaptureFixture[str], db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    as_tty(monkeypatch)
+    code, out, _ = run(capsys, 'review', str(VALID_BUNDLE), '--all', '--db', str(db))
+    assert code == cli.EXIT_FINDINGS
+    assert out.startswith('run run_')
+    assert 'checks_complete' in out
+    assert 'cookie:remember_token' in out
+
+
+def test_review_out_writes_the_canonical_export(capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path) -> None:
+    out_file = tmp_path / 'exports' / 'run.json'
+    code, out, _ = run(capsys, 'review', str(VALID_BUNDLE), '--all', '--db', str(db), '--out', str(out_file))
+    assert code == cli.EXIT_FINDINGS
+    run_id = json.loads(out)['run_id']
+    _, shown, _ = run(capsys, 'show', run_id, '--db', str(db), '--format', 'json')
+    assert out_file.read_text() == shown
+
+
+# ── runs ──────────────────────────────────────────────────────────────────────
+
+
+def test_runs_lists_runs_as_json(capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path) -> None:
+    first = review_run_id(capsys, db, VALID_BUNDLE)
+    second = review_run_id(capsys, db, config_only_bundle(tmp_path / 'b'))
+    code, out, _ = run(capsys, 'runs', '--db', str(db))
+    assert code == cli.EXIT_OK
+    rows = json.loads(out)
+    assert [row['id'] for row in rows] == [first, second]
+    assert rows[0]['state'] == 'checks_complete'
+    assert rows[0]['findings_count'] > 0 and rows[1]['findings_count'] == 0
+
+
+def test_runs_text_output(capsys: pytest.CaptureFixture[str], db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    as_tty(monkeypatch)
+    code, out, _ = run(capsys, 'runs', '--db', str(db))
+    assert code == cli.EXIT_OK
+    assert run_id in out and 'checks_complete' in out
+
+
+def test_runs_json_flag_on_tty(capsys: pytest.CaptureFixture[str], db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    review_run_id(capsys, db, VALID_BUNDLE)
+    as_tty(monkeypatch)
+    code, out, _ = run(capsys, 'runs', '--db', str(db), '--json')
+    assert code == cli.EXIT_OK
+    assert len(json.loads(out)) == 1
+
+
+def test_runs_empty_store(capsys: pytest.CaptureFixture[str], db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def create() -> None:
+        async with await RunStore.open(db):
+            pass
+
+    anyio.run(create)
+    as_tty(monkeypatch)
+    assert run(capsys, 'runs', '--db', str(db)) == (cli.EXIT_OK, 'no runs\n', '')
+
+
+def test_runs_missing_store_exits_1_and_creates_nothing(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    missing = tmp_path / 'nowhere' / 'partex.db'
+    code, out, err = run(capsys, 'runs', '--db', str(missing))
+    assert code == cli.EXIT_FATAL
+    assert out == ''
+    assert 'store-missing' in err
+    assert not missing.parent.exists()
+
+
+# ── show ──────────────────────────────────────────────────────────────────────
+
+
+def test_show_json_redacts_by_default(capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path) -> None:
+    run_id = review_run_id(capsys, db, secret_bundle(tmp_path / 'bundle'))
+    code, out, err = run(capsys, 'show', run_id, '--db', str(db))
+    assert code == cli.EXIT_OK
+    assert err == ''
+    assert SECRET not in out
+    payload = json.loads(out)
+    assert payload['evidence'][0]['http']['request']['headers'] == [['Authorization', '<redacted>']]
+    assert run_id not in out  # canonical export omits run IDs (§7)
+
+
+def test_show_include_secrets_warns(capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path) -> None:
+    run_id = review_run_id(capsys, db, secret_bundle(tmp_path / 'bundle'))
+    code, out, err = run(capsys, 'show', run_id, '--db', str(db), '--include-secrets')
+    assert code == cli.EXIT_OK
+    assert SECRET in out
+    assert 'unredacted secrets' in err
+
+
+def test_show_text_is_redacted_and_names_subjects(
+    capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = review_run_id(capsys, db, secret_bundle(tmp_path / 'bundle'))
+    as_tty(monkeypatch)
+    code, out, _ = run(capsys, 'show', run_id, '--db', str(db))
+    assert code == cli.EXIT_OK
+    assert out.startswith(f'run {run_id}: checks_complete')
+    assert 'header:content-security-policy' in out
+    assert SECRET not in out
+
+
+def test_show_out_writes_file(capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path) -> None:
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    target = tmp_path / 'out' / 'show.txt'
+    code, out, _ = run(capsys, 'show', run_id, '--db', str(db), '--format', 'text', '--out', str(target))
+    assert (code, out) == (cli.EXIT_OK, '')
+    assert target.read_text().startswith(f'run {run_id}:')
+
+
+def test_show_unknown_run_exits_1(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    review_run_id(capsys, db, VALID_BUNDLE)
+    code, out, err = run(capsys, 'show', 'run_missing', '--db', str(db))
+    assert code == cli.EXIT_FATAL
+    assert out == ''
+    assert 'run-not-found' in err
+
+
+def test_show_text_includes_error_verifications_and_summary() -> None:
+    payload: dict[str, Any] = {
+        'run': {
+            'state': 'complete',
+            'input_kind': 'engagement',
+            'input_ref': 'eng_x',
+            'engine_version': '0.1.0',
+            'selected_checks': ['version-disclosure'],
+            'requests_spent': 3,
+            'authorized': True,
+            'error': 'earlier diagnostic',
+        },
+        'evidence': [],
+        'findings': [],
+        'verifications': [{'id': 'vf_1', 'verdict': 'confirmed', 'finding_id': 'fn_1'}],
+        'summary': {'narrative': 'All good.'},
+    }
+    text = cli._render_text(payload, 'run_x')  # pyright: ignore[reportPrivateUsage]
+    assert 'requests spent: 3  authorized: True' in text
+    assert 'error: earlier diagnostic' in text
+    assert 'verification vf_1: confirmed for fn_1' in text
+    assert text.endswith('summary:\n  All good.\n')
+
+
+# ── checks ────────────────────────────────────────────────────────────────────
+
+
+def test_checks_json(capsys: pytest.CaptureFixture[str]) -> None:
+    code, out, _ = run(capsys, 'checks')
+    assert code == cli.EXIT_OK
+    kinds = {row['check_id']: row['kind'] for row in json.loads(out)}
+    assert kinds == {'header-security': 'passive', 'version-disclosure': 'active'}
+
+
+def test_checks_text(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    as_tty(monkeypatch)
+    code, out, _ = run(capsys, 'checks')
+    assert code == cli.EXIT_OK
+    assert out.splitlines()[0].startswith('header-security')
+
+
+def test_checks_none_installed(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine, 'installed_checks', dict)
+    as_tty(monkeypatch)
+    code, out, err = run(capsys, 'checks')  # skills naming now-unregistered checks warn on stderr (#25)
+    assert (code, out) == (cli.EXIT_OK, 'no checks installed\n')
+    assert 'warning: header-review: unknown-check' in err
+
+
+def test_check_kind_labels() -> None:
+    class Both:
+        def review(self) -> None: ...
+        def probe(self) -> None: ...
+
+    assert cli._check_kind(Both()) == 'passive+active'  # pyright: ignore[reportPrivateUsage]
+    assert cli._check_kind(object()) == 'unknown'  # pyright: ignore[reportPrivateUsage]
+
+
+# ── test (live) — only the gates that need no target ─────────────────────────
+
+
+def test_live_test_without_authorized_exits_1(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    engagement = FIXTURES / 'engagements' / 'valid'
+    code, out, _ = run(capsys, 'test', str(engagement), '--db', str(db))
+    assert code == cli.EXIT_FATAL
+    assert json.loads(out)['rule_code'] == 'unauthorized'
+
+
+def test_live_test_text_output(capsys: pytest.CaptureFixture[str], db: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    as_tty(monkeypatch)
+    code, out, err = run(capsys, 'test', str(FIXTURES / 'engagements' / 'valid'), '--db', str(db))
+    assert code == cli.EXIT_FATAL
+    assert 'invalid' in out and 'no findings' in out
+    assert 'unauthorized' in err
+
+
+# ── Logfire opt-in (§11.1) ────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def logfire_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str, Any]]]:
+    import logfire
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(logfire, 'configure', lambda **kw: calls.append(('configure', kw)))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(logfire, 'instrument_pydantic_ai', lambda **kw: calls.append(('instrument_pydantic_ai', kw)))  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.delenv('PARTEX_LOGFIRE', raising=False)
+    return calls
+
+
+def test_logfire_off_by_default(capsys: pytest.CaptureFixture[str], logfire_calls: list[Any]) -> None:
+    run(capsys, 'checks')
+    assert logfire_calls == []
+
+
+def test_logfire_flag_configures_before_instrumenting(
+    capsys: pytest.CaptureFixture[str], logfire_calls: list[tuple[str, dict[str, Any]]]
+) -> None:
+    assert run(capsys, 'checks', '--logfire')[0] == cli.EXIT_OK
+    assert [name for name, _ in logfire_calls] == ['configure', 'instrument_pydantic_ai']
+    assert logfire_calls[0][1] == {'service_name': 'partex', 'service_version': engine.engine_version()}
+
+
+def test_logfire_env_var(
+    capsys: pytest.CaptureFixture[str], logfire_calls: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv('PARTEX_LOGFIRE', '1')
+    run(capsys, 'checks')
+    assert [name for name, _ in logfire_calls] == ['configure', 'instrument_pydantic_ai']
+
+
+def test_cli_never_instruments_httpx(capsys: pytest.CaptureFixture[str], logfire_calls: list[Any]) -> None:
+    """§11.1: the target client carries engagement credentials; global httpx instrumentation is forbidden."""
+    source = Path(cli.__file__).read_text()
+    assert 'instrument_httpx' not in source.replace('Never ``instrument_httpx()``', '')
+
+
+def test_review_workers_flag(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    code, _, _ = run(capsys, 'review', str(VALID_BUNDLE), '--all', '--workers', '2', '--db', str(db))
+    assert code == cli.EXIT_FINDINGS
+
+
+def test_review_text_reports_warnings_and_skips(
+    capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = config_only_bundle(tmp_path / 'bundle')
+    manifest = json.loads((bundle / 'bundle.json').read_text())
+    manifest['evidence_files'] *= 2  # duplicate evidence → V3 warning
+    (bundle / 'bundle.json').write_text(json.dumps(manifest))
+    as_tty(monkeypatch)
+    code, out, err = run(capsys, 'review', str(bundle), '--checks', 'header-security', '--db', str(db))
+    assert code == cli.EXIT_OK
+    assert 'skipped (not applicable): header-security' in out
+    assert 'warning:' in err and 'duplicate' in err
+
+
+def test_review_text_reports_invalid_bundle(
+    capsys: pytest.CaptureFixture[str], db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    as_tty(monkeypatch)
+    code, out, err = run(capsys, 'review', str(MALFORMED_BUNDLE), '--checks', 'header-security', '--db', str(db))
+    assert code == cli.EXIT_FATAL
+    assert ': invalid' in out
+    assert err.startswith('error: ')
+
+
+# ── chat (#49) — the CLAI2 terminal is replaced; nothing interactive starts ───
+
+
+briefings: list[bool] = []
+
+
+@pytest.fixture
+def chat_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Path, object]]:
+    import partex.agent_adapter
+
+    briefings.clear()
+
+    calls: list[tuple[str, Path, object]] = []
+
+    async def fake_run_chat(run_id: str, db_path: Path, model: object, *, briefing: bool) -> None:
+        calls.append((run_id, db_path, model))
+        briefings.append(briefing)
+
+    monkeypatch.setattr(partex.agent_adapter, 'run_chat', fake_run_chat)
+    return calls
+
+
+def test_chat_opens_the_run_with_the_resolved_model(
+    capsys: pytest.CaptureFixture[str], db: Path, chat_calls: list[tuple[str, Path, object]]
+) -> None:
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    code, _, err = run(capsys, 'chat', run_id, '--model', 'test', '--db', str(db))
+    assert (code, err) == (cli.EXIT_OK, '')
+    assert chat_calls == [(run_id, db, 'test')]
+    assert briefings == [True]
+
+
+def test_chat_no_briefing_flag(
+    capsys: pytest.CaptureFixture[str], db: Path, chat_calls: list[tuple[str, Path, object]]
+) -> None:
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    assert run(capsys, 'chat', run_id, '--model', 'test', '--db', str(db), '--no-briefing')[0] == cli.EXIT_OK
+    assert briefings == [False]
+
+
+def test_chat_routes_a_bare_model_through_the_gateway(
+    capsys: pytest.CaptureFixture[str],
+    db: Path,
+    chat_calls: list[tuple[str, Path, object]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pydantic_ai.models.openai import OpenAIChatModel
+
+    monkeypatch.setenv('PYDANTIC_AI_GATEWAY_API_KEY', 'pylf_v2_eu_dummyKeyForTests')
+    monkeypatch.setenv('PYDANTIC_AI_GATEWAY_BASE_URL', 'https://gateway-eu.pydantic.dev/proxy/doubleword')
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    code, _, _ = run(
+        capsys, 'chat', run_id, '--model', 'zai-org/GLM-5.3', '--gateway-route', 'doubleword', '--db', str(db)
+    )
+    assert code == cli.EXIT_OK
+    ((_, _, model),) = chat_calls
+    assert isinstance(model, OpenAIChatModel)
+    assert str(model.client.base_url) == 'https://gateway-eu.pydantic.dev/proxy/doubleword/'
+
+
+def test_chat_unknown_run_exits_1_before_resolving_a_model(
+    capsys: pytest.CaptureFixture[str],
+    db: Path,
+    chat_calls: list[tuple[str, Path, object]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import partex.models_config
+
+    def must_not_resolve(*args: object, **kwargs: object) -> object:
+        raise AssertionError('model resolved for an unknown run')
+
+    monkeypatch.setattr(partex.models_config, 'resolve_model', must_not_resolve)
+    review_run_id(capsys, db, VALID_BUNDLE)
+    code, out, err = run(capsys, 'chat', 'run_missing', '--model', 'test', '--db', str(db))
+    assert (code, out) == (cli.EXIT_FATAL, '')
+    assert 'run-not-found' in err
+    assert chat_calls == []
+
+
+def test_chat_missing_store_exits_1(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
+    code, _, err = run(capsys, 'chat', 'run_x', '--model', 'test', '--db', str(tmp_path / 'none.db'))
+    assert code == cli.EXIT_FATAL
+    assert 'store-missing' in err
+
+
+def test_chat_bare_model_without_route_exits_1(
+    capsys: pytest.CaptureFixture[str], db: Path, chat_calls: list[tuple[str, Path, object]]
+) -> None:
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    code, _, err = run(capsys, 'chat', run_id, '--model', 'zai-org/GLM-5.3', '--db', str(db))
+    assert code == cli.EXIT_FATAL
+    assert 'model-config' in err and '--gateway-route' in err
+    assert chat_calls == []
+
+
+def test_chat_requires_model(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    assert run(capsys, 'chat', 'run_x', '--db', str(db))[0] == cli.EXIT_USAGE

@@ -214,3 +214,142 @@ def test_validate_scope_exclusion_ok_without_prefixes() -> None:
 def test_validate_scope_flags_bad_hosts() -> None:
     problems = validate_scope(scope_of(hosts=['example.test:443']))
     assert any('host' in p for p in problems)
+
+
+# ── #36: path matching bypasses ───────────────────────────────────────────────
+# scope_of(): prefix /api, exclusion /api/admin/shutdown. Each URL below reached the excluded
+# endpoint (or left the prefix) under some server's interpretation and must be refused.
+
+
+@pytest.mark.parametrize(
+    'url',
+    [
+        pytest.param('https://example.test/api//admin/shutdown', id='double-slash'),
+        pytest.param('https://example.test/api///admin//shutdown', id='slash-runs'),
+        pytest.param('https://example.test//api/admin/shutdown', id='leading-double-slash'),
+        pytest.param('https://example.test/api/ADMIN/shutdown', id='upper-segment'),
+        pytest.param('https://example.test/API/Admin/Shutdown', id='mixed-case'),
+        pytest.param('https://example.test/api/admin/shutdown/', id='trailing-slash'),
+        pytest.param('https://example.test/api/admin;jsessionid=x/shutdown', id='matrix-param'),
+        pytest.param('https://example.test/api/admin/shutdown;x', id='matrix-param-last'),
+        pytest.param('https://example.test/api/admin/shutdown.', id='trailing-dot'),
+        pytest.param('https://example.test/api/admin/shutdown%20', id='trailing-space'),
+        pytest.param('https://example.test/api/admin/shutdown%2e', id='encoded-trailing-dot'),
+        pytest.param('https://example.test/api/admin%2fshutdown', id='encoded-slash'),
+        pytest.param('https://example.test/api//admin/./shutdown;x.', id='combined'),
+    ],
+)
+def test_excluded_endpoint_refused_under_every_interpretation(url: str) -> None:
+    with pytest.raises(ScopeViolation):
+        check_url(scope_of(), url)
+
+
+@pytest.mark.parametrize(
+    'url',
+    [
+        pytest.param('https://example.test/apix/secret', id='sibling-prefix'),
+        pytest.param('https://example.test/api-internal/x', id='dash-sibling'),
+        pytest.param('https://example.test/api;x/../admin', id='matrix-then-dotdot'),
+        pytest.param('https://example.test/API/users', id='prefix-case-refused'),
+    ],
+)
+def test_prefix_matches_on_segment_boundary(url: str) -> None:
+    with pytest.raises(ScopeViolation):
+        check_url(scope_of(), url)
+
+
+@pytest.mark.parametrize(
+    'url',
+    [
+        pytest.param('https://example.test/api/%252e%252e/admin', id='double-encoded-dots'),
+        pytest.param('https://example.test/api/admin%252fshutdown', id='double-encoded-slash'),
+        pytest.param('https://example.test/api/100%2541', id='double-encoded-letter'),
+        pytest.param('https://example.test/api/admin/shutdown%00.png', id='null-byte'),
+        pytest.param('https://example.test/api/users%0a', id='encoded-newline'),
+        pytest.param('https://example.test/api/users%e2%80%8b', id='encoded-zero-width'),
+    ],
+)
+def test_double_encoding_and_decoded_controls_refused(url: str) -> None:
+    with pytest.raises(ScopeViolation, match='double encoding|control or format'):
+        check_url(scope_of(), url)
+
+
+@pytest.mark.parametrize(
+    'url',
+    [
+        'https://example.test/api',
+        'https://example.test/api/',
+        'https://example.test/api/users/42',
+        'https://example.test/api/admin/shutdowns',  # sibling of the excluded segment, not under it
+        'https://example.test/api/admin/status',
+        'https://example.test/api/search%3Fq',  # one level of encoding is fine
+        'https://example.test/api/100%25',  # a literal percent sign, encoded once
+        'https://example.test/api/a%20b',
+        'https://example.test/api/users?id=../../admin',  # query strings are not paths
+    ],
+)
+def test_legitimate_paths_still_allowed(url: str) -> None:
+    check_url(scope_of(), url)
+
+
+def test_trailing_slash_prefix_covers_children_only() -> None:
+    scope = scope_of(path_prefixes=['/api/'], exclusions=[])
+    check_url(scope, 'https://example.test/api/users')
+    with pytest.raises(ScopeViolation):
+        check_url(scope, 'https://example.test/api')
+
+
+def test_root_prefix_and_dotdot_at_root() -> None:
+    scope = scope_of(path_prefixes=['/'], exclusions=['/logout'])
+    check_url(scope, 'https://example.test/../../etc')  # '..' above root stays at root
+    with pytest.raises(ScopeViolation):
+        check_url(scope, 'https://example.test/../LOGOUT')
+
+
+def test_candidate_paths_include_normalized_forms() -> None:
+    view = parse_scoped_url('https://example.test/api//admin;x/shutdown.')
+    assert '/api/admin/shutdown' in view.candidate_paths
+    assert view.path == '/api//admin;x/shutdown.'
+
+
+def test_validate_scope_uses_segment_boundaries() -> None:
+    problems = validate_scope(scope_of(path_prefixes=['/api'], exclusions=['/apix/admin']))
+    assert any('not within any path prefix' in p for p in problems)
+    assert validate_scope(scope_of(path_prefixes=['/api'], exclusions=['/api', '/api/x'])) == []
+
+
+# ── Hostile hosts and authorities not covered above ───────────────────────────
+
+
+@pytest.mark.parametrize(
+    ('host', 'message'),
+    [
+        ('', 'empty host'),
+        ('ex%25ample.test', 'unresolved percent-escape'),
+        ('[::1', 'malformed IPv6'),
+        ('[zz::1]', 'invalid IPv6'),
+        ('.', 'reduces to empty'),
+        ('ex%0aample.test', 'control or separator'),
+        ('a..b.test', 'empty label'),
+        (('x' * 64) + 'é.test', 'internationalized'),
+        ('example.test/x', 'path or userinfo'),
+    ],
+)
+def test_normalize_host_refusals(host: str, message: str) -> None:
+    with pytest.raises(ScopeViolation, match=message):
+        normalize_host(host)
+
+
+@pytest.mark.parametrize(
+    ('url', 'message'),
+    [
+        ('https:///api', 'missing authority'),
+        ('https://[::1/api', 'unparseable URL|malformed IPv6 authority'),
+        ('https://[::1]x/api', 'unparseable URL|garbage after IPv6'),
+        ('https://[::1]:x/api', 'invalid port'),
+        ('https://:443/api', 'empty host'),
+    ],
+)
+def test_malformed_authorities_refused(url: str, message: str) -> None:
+    with pytest.raises(ScopeViolation, match=message):
+        parse_scoped_url(url)

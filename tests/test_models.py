@@ -479,7 +479,8 @@ def test_redact_one_of_repeated_set_cookie():
     )
     result = redact(ev)
     assert isinstance(result, HttpEvidence)
-    assert get_all(result.http.response.headers, 'set-cookie') == ['<redacted>', 'theme=dark']
+    # Value-only (PLAN §5): the cookie's attributes stay reviewable after redaction.
+    assert get_all(result.http.response.headers, 'set-cookie') == ['sid=<redacted>; Secure', 'theme=dark']
 
 
 def test_redact_request_body_secret():
@@ -515,3 +516,56 @@ def test_redacted_evidence_still_validates():
     """Redacted output keeps its secret_fields and still satisfies the resolve rule."""
     ev = HttpEvidence(id='ev_01', source='f', http=_exchange(), secret_fields=['$.http.request.body'])
     assert EvidenceAdapter.validate_python(redact(ev).model_dump(mode='json')) == redact(ev)
+
+
+# ── Cookie-aware redaction and body_note (#37) ────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ('name', 'value', 'expected'),
+    [
+        (
+            'Set-Cookie',
+            'sid=abc123; Path=/; Secure; HttpOnly; SameSite=Lax',
+            'sid=<redacted>; Path=/; Secure; HttpOnly; SameSite=Lax',
+        ),
+        ('set-cookie', 'sid=abc', 'sid=<redacted>'),
+        ('Set-Cookie', 'malformed-no-equals; Secure', '<redacted>'),
+        ('Cookie', 'a=1; b=two; flag', 'a=<redacted>; b=<redacted>; <redacted>'),
+        ('Authorization', 'Bearer xyz', '<redacted>'),
+    ],
+)
+def test_cookie_headers_redact_values_only(name: str, value: str, expected: str) -> None:
+    ev = HttpEvidence(
+        id='ev_01',
+        source='f',
+        http=_exchange(headers=[(name, value)])
+        if name.lower() == 'set-cookie'
+        else _exchange(request_headers=[(name, value)]),
+        secret_fields=[
+            '$.http.response.headers[0][1]' if name.lower() == 'set-cookie' else '$.http.request.headers[0][1]'
+        ],
+    )
+    once = redact(ev)
+    assert isinstance(once, HttpEvidence)
+    side = once.http.response if name.lower() == 'set-cookie' else once.http.request
+    assert side.headers == [(name, expected)]
+    assert redact(once) == once  # idempotent
+
+
+def test_body_note_is_omitted_when_unset_so_evidence_ids_are_stable() -> None:
+    from partex.ids import evidence_id
+
+    plain = HttpResponse(status_code=200, headers=[], body='x')
+    assert 'body_note' not in plain.model_dump(mode='json')
+    noted = HttpResponse(status_code=200, headers=[], body='x', body_note='truncated')
+    assert noted.model_dump(mode='json')['body_note'] == 'truncated'
+    assert HttpResponse.model_validate_json(noted.model_dump_json()) == noted
+
+    def ev(response: HttpResponse) -> HttpEvidence:
+        exchange = HttpExchange(request=HttpRequest(method='GET', url='https://e.test/', headers=[]), response=response)
+        return HttpEvidence(id='x', source='s', http=exchange)
+
+    assert evidence_id(ev(plain)) != evidence_id(ev(noted))  # a truncated body is different evidence
+    with pytest.raises(ValidationError):
+        HttpResponse.model_validate({'status_code': 200, 'headers': [], 'body_note': 'gzip'})
