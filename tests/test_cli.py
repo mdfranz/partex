@@ -740,3 +740,16 @@ def test_report_rolls_up_a_reviewed_run(capsys: pytest.CaptureFixture[str], db: 
     assert payload['runs']['total'] == 1
     assert payload['findings']['total'] >= 1
     assert any(check['check_id'] == 'header-security' for check in payload['findings']['by_check'])
+
+
+def test_show_text_and_test_text_flag_areas_that_were_not_exercised() -> None:
+    gap = {
+        'surface': 'http://a.test',
+        'risk_area': 'error-page-disclosure',
+        'outcome': 'not_applicable',
+        'reason': 'catch-all route',
+    }
+    fine = {**gap, 'risk_area': 'cors', 'outcome': 'no_issue_found', 'reason': 'ok'}
+    assert cli._coverage_gaps([gap, fine]) == [  # pyright: ignore[reportPrivateUsage]
+        '  not exercised: http://a.test / error-page-disclosure (not_applicable): catch-all route'
+    ]

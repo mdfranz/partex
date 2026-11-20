@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from urllib.parse import urlsplit
 
 from ..models import (
+    CoverageEntry,
     Evidence,
     Finding,
     FindingDraft,
@@ -32,7 +33,7 @@ from ..scope import ScopeViolation
 from . import TargetClient
 
 CHECK_ID = 'version-disclosure'
-CHECK_VERSION = '0.2'
+CHECK_VERSION = '0.3'
 CHECK_TITLE = 'Version and Error Disclosure'
 CHECK_DESCRIPTION = (
     'Probe for explicit software version banners (Server, X-Powered-By, '
@@ -69,6 +70,39 @@ STACK_MARKERS = (
 # Deterministic unknown path (PLAN §10 fixture 2): stable URLs keep evidence and
 # finding IDs comparable across replays of the same engagement.
 UNKNOWN_PROBE_PATH = '/partex-nonexistent-probe-0'
+
+
+ERROR_PAGE_RISK = 'error-page-disclosure'
+"""Coverage ledger ``risk_area`` for the unknown-path (error handler) probe."""
+
+_ASSET_REF = re.compile(r'(?:src|href)\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+_NONCE_ATTR = re.compile(r'(?:nonce|integrity)\s*=\s*["\'][^"\']*["\']', re.IGNORECASE)
+_TOKEN = re.compile(r'[A-Za-z0-9_+/=-]{24,}')
+
+
+def _normalized_body(body: str) -> str:
+    """The body with per-request tokens (nonces, long random strings) and whitespace removed."""
+    return re.sub(r'\s+', '', _TOKEN.sub('', _NONCE_ATTR.sub('', body)))
+
+
+def _asset_refs(body: str) -> frozenset[str]:
+    return frozenset(_ASSET_REF.findall(body))
+
+
+def is_catch_all(baseline: HttpEvidence, probe: HttpEvidence) -> bool:
+    """Whether the unknown-path probe was served the baseline's page, so no error handler ran (#53).
+
+    True when the probe answered 2xx with the same body as the baseline after stripping per-request
+    tokens, or with the same HTML shell (the same script/stylesheet references).
+    """
+    response = probe.http.response
+    if not 200 <= response.status_code < 300 or response.body is None or baseline.http.response.body is None:
+        return False
+    if _normalized_body(response.body) == _normalized_body(baseline.http.response.body):
+        return True
+    ctype = (get_header(response.headers, 'content-type') or '').lower()
+    refs = _asset_refs(response.body)
+    return 'html' in ctype and bool(refs) and refs == _asset_refs(baseline.http.response.body)
 
 
 def _origin_of(url: str) -> str:
@@ -213,6 +247,60 @@ class VersionDisclosureCheck:
             evidence_ids=[exchange.id],
             remediation='Disable debug/verbose error pages in production; log details server-side only.',
         )
+
+    def coverage(self, evidence: Sequence[Evidence]) -> list[CoverageEntry]:
+        """What the error-handler probe did and did not exercise, as a ledger entry (#53).
+
+        Without this a clean result reads as "error pages are clean" even when the unknown-path probe
+        was served the app shell (a catch-all route) or never ran because no in-scope path could serve it.
+        """
+        captured = [item for item in evidence if isinstance(item, HttpEvidence)]
+        if not captured:
+            return []
+        baseline = captured[0]
+        surface = _origin_of(baseline.http.request.url)
+        probe = next(
+            (item for item in captured if urlsplit(item.http.request.url).path.endswith(UNKNOWN_PROBE_PATH)), None
+        )
+        if probe is None:
+            return [
+                CoverageEntry(
+                    surface=surface,
+                    risk_area=ERROR_PAGE_RISK,
+                    outcome='not_applicable',
+                    source='check_observed',
+                    evidence_ids=[baseline.id],
+                    reason='error handler not exercised: the unknown-path probe was refused by the engagement scope',
+                )
+            ]
+        if is_catch_all(baseline, probe):
+            return [
+                CoverageEntry(
+                    surface=surface,
+                    risk_area=ERROR_PAGE_RISK,
+                    outcome='not_applicable',
+                    source='check_observed',
+                    evidence_ids=[probe.id, baseline.id],
+                    reason=(
+                        'catch-all route: unknown paths return the application shell, so the server error '
+                        'handler was not reached; try an unknown path under an API prefix the app exposes'
+                    ),
+                )
+            ]
+        if self._error_draft(probe) is not None:
+            outcome, reason = 'reported', 'the error response disclosed stack traces or internal paths'
+        else:
+            outcome, reason = 'no_issue_found', 'the unknown-path probe reached an error response with no disclosure'
+        return [
+            CoverageEntry(
+                surface=surface,
+                risk_area=ERROR_PAGE_RISK,
+                outcome=outcome,  # pyright: ignore[reportArgumentType]
+                source='check_observed',
+                evidence_ids=[probe.id],
+                reason=reason,
+            )
+        ]
 
     def verify_recipe(self, finding: Finding, evidence: Sequence[Evidence]) -> VerificationRecipe | None:
         """The single-request replay: re-send the exact exchange that produced the finding."""

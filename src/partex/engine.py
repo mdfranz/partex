@@ -21,7 +21,7 @@ import hashlib
 import importlib.metadata
 import os
 import sys
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,7 +36,17 @@ from .checks import HeaderInput, PassiveCheck
 from .engagement import MANIFEST_NAME, check_credentials_available, load_engagement
 from .errors import BudgetExhausted, PartexError, ScopeViolation, ValidationFailed
 from .ids import finding_id
-from .models import ArtifactEvidence, Engagement, Evidence, Finding, FindingDraft, HttpEvidence, Scope, TlsPolicy
+from .models import (
+    ArtifactEvidence,
+    CoverageEntry,
+    Engagement,
+    Evidence,
+    Finding,
+    FindingDraft,
+    HttpEvidence,
+    Scope,
+    TlsPolicy,
+)
 from .scope import extend_scope
 from .storage import RunState, RunStore, artifact_dir
 from .target import DEFAULT_MAX_ASSET_BYTES, ScopedHttpClient
@@ -259,6 +269,35 @@ def _finalize(
     return list(findings.values())
 
 
+async def _record_coverage(
+    store: RunStore, run_id: str, check: Any, evidence: Sequence[Evidence]
+) -> list[CoverageEntry]:
+    """Run a check's optional ``coverage(evidence)`` hook and commit its ledger entries (``check_observed`` only)."""
+    hook = getattr(check, 'coverage', None)
+    if not callable(hook):
+        return []
+    try:
+        raw: list[Any] = list(cast('Iterable[Any]', hook(list(evidence))))
+    except Exception as exc:
+        raise CheckFailed(check.check_id, f'coverage raised {type(exc).__name__}: {exc}') from exc
+    registered = {item.id for item in evidence}
+    entries: list[CoverageEntry] = []
+    for position, item in enumerate(raw):
+        try:
+            entry = CoverageEntry.model_validate(item.model_dump() if isinstance(item, CoverageEntry) else item)
+        except ValidationError as exc:
+            raise CheckFailed(
+                check.check_id, f'coverage entry {position} is invalid: {exc.errors()[0]["msg"]}'
+            ) from exc
+        if entry.source != 'check_observed':
+            raise CheckFailed(check.check_id, f'coverage entry {position} must have source check_observed')
+        if missing := sorted(set(entry.evidence_ids) - registered):
+            raise CheckFailed(check.check_id, f'coverage entry {position} cites unregistered evidence {missing}')
+        entries.append(entry)
+    await store.upsert_coverage(run_id, entries)
+    return entries
+
+
 def _validate_draft(check: PassiveCheck, position: int, raw: Any) -> FindingDraft:
     try:
         draft = FindingDraft.model_validate(raw.model_dump() if isinstance(raw, FindingDraft) else raw)
@@ -295,6 +334,8 @@ class TestResult:
     """Selected checks that did not run: ``applies_to`` false, or cut short by budget."""
     budget_exhausted: bool = field(default=False)
     """True when ``max_requests`` ended active work cleanly (``checks_complete``, not failure)."""
+    coverage: tuple[CoverageEntry, ...] = field(default=())
+    """What the checks report they did or did not exercise (``check_observed`` ledger entries, #53)."""
 
 
 def is_active_check(check: Any) -> bool:
@@ -448,6 +489,7 @@ async def run_test(
     captured: list[Evidence] = []
     findings: list[Finding] = []
     skipped: list[str] = []
+    coverage: list[CoverageEntry] = []
     done: set[str] = set()
     budget_exhausted = False
 
@@ -482,6 +524,7 @@ async def run_test(
                 committed = _finalize([check], [drafts], captured)
                 await store.commit_findings(run_id, committed)
                 findings.extend(committed)
+                coverage.extend(await _record_coverage(store, run_id, check, captured))
                 done.add(check.check_id)
             # Passive checks run last, over every exchange captured so far (baseline and probe traffic), and need
             # no budget, so they still run after active work was cut short.
@@ -497,6 +540,7 @@ async def run_test(
                 committed = _finalize([check], [drafts], captured)
                 await store.commit_findings(run_id, committed)
                 findings.extend(committed)
+                coverage.extend(await _record_coverage(store, run_id, check, captured))
                 done.add(check.check_id)
         except CheckFailed as exc:
             await store.set_state(run_id, 'checks_failed', error=str(exc))
@@ -512,6 +556,7 @@ async def run_test(
                 rule_code=exc.rule_code,
                 failed_check=exc.check_id,
                 skipped_checks=tuple(skipped),
+                coverage=tuple(coverage),
             )
         skipped.extend(check.check_id for check in selected if check.check_id not in done)
         await store.set_state(run_id, 'checks_complete')
@@ -525,6 +570,7 @@ async def run_test(
             evidence_count=len(captured),
             skipped_checks=tuple(skipped),
             budget_exhausted=budget_exhausted,
+            coverage=tuple(coverage),
         )
     finally:
         await client.aclose()
@@ -661,6 +707,7 @@ class LiveSession:
         new = [finding for finding in findings if finding.id not in known]
         await self._store.commit_findings(self.run_id, new)
         self.findings.extend(new)
+        await _record_coverage(self._store, self.run_id, check, self.captured)
         return findings
 
 

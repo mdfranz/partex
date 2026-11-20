@@ -37,6 +37,8 @@ matters), then give, in Markdown and under about 200 words:
 - one line on what was tested and the overall picture (if there are no findings, use list_evidence
   to say what was captured: URLs, status codes, notable headers);
 - the findings grouped by severity, each with its ID and what it means for this target;
+- anything list_coverage says was not exercised (outcome not_applicable or needs_follow_up): say so plainly,
+  so a run with no findings is not read as clean;
 - which look benign or expected, and which deserve action;
 - two or three concrete next things the operator could check.
 Do not repeat the raw evidence."""
