@@ -29,10 +29,11 @@ version-disclosure = "partex.checks.version_disclosure:version_disclosure_check"
 # freshly published (possibly compromised) release can't land in the lockfile before it has
 # had time to be noticed and yanked. Relative span, recorded in uv.lock as exclude-newer-span.
 # Urgent fixes: add a reviewed per-package `exclude-newer-package` override, never drop this.
-# TEMPORARILY DISABLED (#107, operator's call) to take pydantic-ai 2.71 / harness+clai2 0.71 before they age
-# past 2 days. Restore `exclude-newer = "2 days"` once those are locked.
+# The cool-off stays on for everything except the pydantic-ai stack, which the operator wants to track as it
+# releases (#107). Each exempt package is listed by name; do not widen this to a global override.
 [tool.uv]
-# exclude-newer = "2 days"
+exclude-newer = "2 days"
+exclude-newer-package = { pydantic-ai-slim = false, pydantic-graph = false, pydantic-ai-harness = false, pydantic-clai2 = false, pydantic-ai-pax = false, pydantic-monty = false, pydantic-monty-client = false, pydantic-monty-runtime = false }
 
 [dependency-groups]
 dev = ["anyio", "inline-snapshot", "pyright", "pytest", "pytest-cov", "ruff"]
