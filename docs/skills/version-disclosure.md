@@ -93,21 +93,26 @@ issues a **strictly bounded 3-request probe set** through `ScopedHttpClient`:
 2. `GET /robots.txt` — static/metadata handler (often served directly by Nginx/Apache/CDN
    bypassing app middleware that strips `Server`, or conversely revealing distinct backend
    routing).
-3. `GET /partex-nonexistent-probe-<run-deterministic-or-random-suffix>` (or with `Accept:
-   text/html` vs `Accept: application/json`) — triggers the target's `404` handler to catch
-   Django `DEBUG=True` route dumps, Rails `RoutingError`, Tomcat version footers, or
-   unhandled error middleware.
+3. `GET /partex-nonexistent-probe-0` — the check's **fixed, deterministic token** (PLAN §12:
+   stable URLs keep evidence and finding IDs comparable across replays of the same engagement;
+   a random or run-varying suffix would break replay comparison) — triggers the target's
+   `404` handler to catch Django `DEBUG=True` route dumps, Rails `RoutingError`, Tomcat
+   version footers, or unhandled error middleware. (Sending it with `Accept: text/html` vs
+   `Accept: application/json` is an acceptable extension as long as the path stays stable.)
 
-**Scope & exclusion safety:**
+**Scope & exclusion safety (spec — the check does not implement these two rules yet, #80):**
 - Before sending any probe, check `Scope` or handle `ScopeViolation` cleanly if an
   engagement scopes `path_prefixes` narrower than `/` (e.g. `/api/v1/` only — in that case,
   anchor probes under the first allowed `path_prefix`, e.g. `/api/v1/` and
   `/api/v1/partex-nonexistent-probe-...`!). This avoids burning refusals when an API
-  engagement restricts `path_prefixes: ["/api"]`.
+  engagement restricts `path_prefixes: ["/api"]`. *Not yet implemented: the current check
+  probes `{origin}/robots.txt` and `{origin}/partex-nonexistent-probe-0` unconditionally, so
+  a narrow-prefix engagement fails with `checks_failed` (#80).*
 - Deduplicate findings by `(header_name, banner_value)` or `(signature_class, normalized_route)`
   across the 3 probes so `Server: nginx/1.24.0` appearing on all three responses emits
   **one** finding citing the primary `ev_*` (or sorted `ev_*` set) rather than three noisy
-  duplicates.
+  duplicates. *Not yet implemented: the engine only merges byte-identical drafts, so the same
+  banner on all three probes currently emits three findings (#80).*
 
 ---
 
@@ -127,13 +132,14 @@ issues a **strictly bounded 3-request probe set** through `ScopedHttpClient`:
 ## 6. Fixture Target App & Test Cases (`PLAN.md` §13.4)
 
 1. **Vulnerable fixture app (`fixtures/target_app/`):**
-   - Emits `Server: PartexFixture/0.1.0 Python/3.14` (or configurable version banner).
+   - Emits `Server: FixtureTarget/2.3.1` (stdlib `http.server` banner; see
+     `fixtures/target_app/app.py`).
    - Unknown path `/partex-nonexistent-probe-*` or error route returns a verbose traceback
      body with internal file frame markers.
    - Live `test` → `verify` transitions both findings from `reported` to `verified`
      (`confirmed`).
 2. **Hardened variant (`fixtures/target_app/` toggle):**
-   - Strips version digits (`Server: PartexFixture`) and returns generic `{"error": "not found"}`.
+   - Strips version digits (`Server: FixtureTarget`) and serves a clean `Not Found` body.
    - Re-running `partex verify <run-id> <finding-id>` yields `not_reproduced` →
      `verification_failed` while preserving original `ev_*` and `fn_*` rows.
 3. **Narrow `path_prefixes` engagement case:**

@@ -4,7 +4,8 @@ Research notes, standards mappings, false-positive guardrails, and stdlib implem
 blueprints for the skills `partex` will test and ship first.
 
 While `skills/<name>/SKILL.md` and `skills/<name>/reference/*.md` hold compact,
-agent-facing operational playbooks (`defer_loading=True`, `PLAN.md` §9–§10), this
+agent-facing operational playbooks (to be surfaced to the agent as deferred capabilities
+via `defer_loading=True`, `PLAN.md` §9–§10, #59), this
 `docs/skills/` directory records the **engineering and security research** behind each
 skill and its paired `PassiveCheck` / `ActiveCheck` implementation (`PARTX_SKILL_PLAN.md`,
 `DEPS.md`).
