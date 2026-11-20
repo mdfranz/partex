@@ -62,12 +62,13 @@ done
 [[ $# -eq 0 || -n $TARGET_URL ]] || TARGET_URL=$1
 [[ -n $ROUTE_SET || $MODEL != *:* ]] || ROUTE=  # a full model string is not routed through a Gateway route
 case $DB in /*) ;; *) DB=$PWD/$DB ;; esac  # absolute, before the cd below (BSD realpath has no -m)
-cd "$(dirname "${BASH_SOURCE[0]}")"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)  # absolute, resolved before the cd (works from any directory)
+cd "$SCRIPT_DIR"
 partex() { uv run --quiet partex "$@"; }
 
 if [[ -n $LIST ]]; then  # saved runs: what was tested, when, how it ended; resume any with --resume RUN_ID
   [[ -e $DB ]] || { echo "no database at $DB (nothing saved yet)" >&2; exit 1; }
-  partex runs --db "$DB" --json | python3 "$(dirname "${BASH_SOURCE[0]}")/scripts/list_runs.py" "$DB" "$0"
+  partex runs --db "$DB" --json | python3 "$SCRIPT_DIR/scripts/list_runs.py" "$DB" "$0"
   exit 0
 fi
 

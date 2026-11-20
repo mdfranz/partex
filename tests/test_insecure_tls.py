@@ -130,6 +130,16 @@ async def test_insecure_hosts_relax_only_the_listed_host(self_signed_server: _Tl
             await client.request('GET', f'https://127.0.0.1:{port}/')
 
 
+async def test_downloaded_assets_are_flagged_too(self_signed_server: _TlsServer, tmp_path: Path) -> None:
+    port = self_signed_server.server_port
+    async with ScopedHttpClient(_engagement(port, verify=False)) as client:
+        artifact = await client.download_asset(f'https://127.0.0.1:{port}/app.js', dest_dir=tmp_path / 'a')
+    assert artifact.tls_verified is False and artifact.model_dump(mode='json')['tls_verified'] is False
+    async with ScopedHttpClient(_engagement(port)) as strict:
+        with pytest.raises(PartexError):
+            await strict.download_asset(f'https://127.0.0.1:{port}/app.js', dest_dir=tmp_path / 'b')
+
+
 async def test_plain_http_is_never_marked_unverified(target_server: Any) -> None:
     engagement = _engagement(target_server.port, verify=False).model_copy(
         update={

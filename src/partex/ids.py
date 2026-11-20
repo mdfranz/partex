@@ -39,7 +39,7 @@ def evidence_id(evidence: Evidence) -> str:
     identically whether captured live or re-imported from a bundle.
     """
     # Extract only the content-bearing fields (kind + the payload)
-    d = evidence.model_dump(mode='json', exclude={'id', 'source', 'secret_fields', 'tls_verified'})
+    d = evidence.model_dump(mode='json', exclude={'id', 'source', 'secret_fields', 'file_path', 'tls_verified'})
     return 'ev_' + sha256_hex(canonical_json(d))[:16]
 
 

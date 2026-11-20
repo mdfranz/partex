@@ -36,10 +36,10 @@ from .checks import HeaderInput, PassiveCheck
 from .engagement import MANIFEST_NAME, check_credentials_available, load_engagement
 from .errors import BudgetExhausted, PartexError, ScopeViolation, ValidationFailed
 from .ids import finding_id
-from .models import Engagement, Evidence, Finding, FindingDraft, HttpEvidence, Scope, TlsPolicy
+from .models import ArtifactEvidence, Engagement, Evidence, Finding, FindingDraft, HttpEvidence, Scope, TlsPolicy
 from .scope import extend_scope
-from .storage import RunState, RunStore
-from .target import ScopedHttpClient
+from .storage import RunState, RunStore, artifact_dir
+from .target import DEFAULT_MAX_ASSET_BYTES, ScopedHttpClient
 
 ENTRY_POINT_GROUP = 'partex.checks'
 MAX_DRAFTS_PER_CHECK = 1000
@@ -507,12 +507,26 @@ class LiveSession:
         self.captured: list[Evidence] = []
         self.findings: list[Finding] = []
         self._store = store
-        self.client = ScopedHttpClient(engagement, source=f'capture:{run_id}', on_capture=self._on_capture)
+        self.client = ScopedHttpClient(
+            engagement,
+            source=f'capture:{run_id}',
+            on_capture=self._on_capture,
+            on_artifact=self._on_artifact,
+            on_failed_send=self._on_failed_send,
+        )
 
     async def _on_capture(self, evidence: HttpEvidence) -> None:
         await self._store.add_evidence(self.run_id, evidence)
         await self._store.add_requests_spent(self.run_id, 1)
         self.captured.append(evidence)
+
+    async def _on_artifact(self, evidence: ArtifactEvidence) -> None:
+        await self._store.add_evidence(self.run_id, evidence)
+        await self._store.add_requests_spent(self.run_id, 1)
+        self.captured.append(evidence)
+
+    async def _on_failed_send(self) -> None:
+        await self._store.add_requests_spent(self.run_id, 1)
 
     @property
     def requests_spent(self) -> int:
@@ -523,6 +537,14 @@ class LiveSession:
     ) -> HttpEvidence:
         """Send one request through the scope gate (raises ``ScopeViolation`` / ``BudgetExhausted`` / ``PartexError``)."""
         return await self.client.request(method, url, headers=headers, body=body)
+
+    async def download_asset(
+        self, url: str, *, headers: HeaderInput | None = None, max_bytes: int = DEFAULT_MAX_ASSET_BYTES
+    ) -> ArtifactEvidence:
+        """Stream a scoped GET-only asset to disk and register its ``ArtifactEvidence``."""
+        return await self.client.download_asset(
+            url, dest_dir=artifact_dir(self._store.path), headers=headers, max_bytes=max_bytes
+        )
 
     async def extend_scope(self, spec: str, *, confirmed_by: str) -> tuple[Scope, Scope]:
         """Add the host/port(s) in *spec* to this session's scope; returns ``(before, after)``.
@@ -535,20 +557,26 @@ class LiveSession:
         after = extend_scope(before, spec)
         if after == before:
             return before, after
+        # Persist the snapshot and the audit row together *before* the scope takes effect: if the write fails
+        # the effective scope, the stored scope and the audit trail all still show the previous scope.
+        try:
+            await self._store.amend_scope(
+                self.run_id,
+                after,
+                args={'spec': spec, 'confirmed_by': confirmed_by},
+                result={
+                    'hosts_before': before.hosts,
+                    'hosts_after': after.hosts,
+                    'ports_before': before.ports,
+                    'ports_after': after.ports,
+                },
+            )
+        except Exception as exc:
+            raise PartexError(
+                f'could not record the scope change, so the scope is unchanged: {exc}', rule_code='scope-persist'
+            ) from exc
         self.client.set_scope(after)
         self.engagement = self.engagement.model_copy(update={'scope': after})
-        await self._store.set_scope_snapshot(self.run_id, after)
-        await self._store.record_tool_call(
-            self.run_id,
-            'scope_amend',
-            {'spec': spec, 'confirmed_by': confirmed_by},
-            {
-                'hosts_before': before.hosts,
-                'hosts_after': after.hosts,
-                'ports_before': before.ports,
-                'ports_after': after.ports,
-            },
-        )
         return before, after
 
     async def run_check(self, check_id: str) -> list[Finding]:

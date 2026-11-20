@@ -142,7 +142,7 @@ def test_no_bypass_api() -> None:
         for name in dir(ScopedHttpClient)
         if not name.startswith('_') and callable(getattr(ScopedHttpClient, name, None))
     }
-    assert public == {'aclose', 'follow_redirect', 'request', 'set_scope'}
+    assert public == {'aclose', 'download_asset', 'follow_redirect', 'request', 'set_scope'}
 
 
 # ── Redirects: captured, never auto-followed, re-validated before follow ───────

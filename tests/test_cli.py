@@ -137,7 +137,8 @@ def test_review_with_findings_exits_3(capsys: pytest.CaptureFixture[str], db: Pa
     assert code == cli.EXIT_FINDINGS
     payload = json.loads(out)
     assert payload['state'] == 'checks_complete'
-    assert payload['checks'] == ['header-security']  # --all: installed passive checks only
+    assert payload['checks'] == ['header-security', 'js-analysis']  # --all: installed passive checks only
+    assert 'js-analysis' in payload['skipped_checks']
     subjects = {finding['subject'] for finding in payload['findings']}
     assert {'cookie:session', 'cookie:remember_token'} <= subjects
 
@@ -390,7 +391,7 @@ def test_checks_json(capsys: pytest.CaptureFixture[str]) -> None:
     code, out, _ = run(capsys, 'checks')
     assert code == cli.EXIT_OK
     kinds = {row['check_id']: row['kind'] for row in json.loads(out)}
-    assert kinds == {'header-security': 'passive', 'version-disclosure': 'active'}
+    assert kinds == {'header-security': 'passive', 'js-analysis': 'passive', 'version-disclosure': 'active'}
 
 
 def test_checks_text(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:

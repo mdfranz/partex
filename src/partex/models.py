@@ -136,7 +136,44 @@ class ConfigEvidence(BaseModel):
         return self
 
 
-type Evidence = HttpEvidence | ConfigEvidence
+class ArtifactAsset(BaseModel):
+    """Metadata for a downloaded full-body asset (e.g. a JavaScript bundle) stored on disk."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    url: str
+    status_code: int
+    headers: Headers
+    content_type: str | None = None
+    sha256: str
+    size_bytes: int
+
+
+class ArtifactEvidence(BaseModel):
+    """Evidence referencing a locally stored full-body asset (mode 0600, content-addressed).
+
+    ``id`` is derived from ``kind`` + ``artifact`` only (§12), excluding ``file_path`` so the
+    ID is machine-independent.
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    id: str
+    kind: Literal['artifact'] = 'artifact'
+    source: str
+    artifact: ArtifactAsset
+    file_path: str | None = None
+    secret_fields: list[str] = Field(default_factory=list)
+    tls_verified: bool = Field(default=True, exclude_if=lambda verified: verified)
+    """``False`` when the download did not verify the certificate (#71); see :class:`HttpEvidence`."""
+
+    @model_validator(mode='after')
+    def _secret_fields_resolve(self) -> Self:
+        _validate_secret_fields(self)
+        return self
+
+
+type Evidence = HttpEvidence | ConfigEvidence | ArtifactEvidence
 
 EvidenceType = Annotated[Evidence, Discriminator('kind')]
 
@@ -363,7 +400,7 @@ def _step(container: Any, part: _PathPart) -> Any:
     raise ValueError(f'step {part!r} does not resolve')
 
 
-def _validate_secret_fields(evidence: HttpEvidence | ConfigEvidence) -> None:
+def _validate_secret_fields(evidence: HttpEvidence | ConfigEvidence | ArtifactEvidence) -> None:
     """Every ``secret_fields`` path must parse and name a string value of this evidence.
 
     Checked at construction so :func:`redact` can never meet a path it cannot apply: a secret
@@ -372,7 +409,12 @@ def _validate_secret_fields(evidence: HttpEvidence | ConfigEvidence) -> None:
     if not evidence.secret_fields:
         return
     data = evidence.model_dump(mode='json')
-    payload = 'http' if isinstance(evidence, HttpEvidence) else 'config'
+    if isinstance(evidence, HttpEvidence):
+        payload = 'http'
+    elif isinstance(evidence, ConfigEvidence):
+        payload = 'config'
+    else:
+        payload = 'artifact'
     for path in evidence.secret_fields:
         try:
             parts = parse_secret_path(path)
