@@ -10,6 +10,7 @@ untrusted data, with bodies shortened for the model (the full capped body is sto
 Each ``http_request`` / ``run_check`` call is recorded in ``tool_calls`` without header values.
 """
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -28,8 +29,8 @@ from pydantic_monty import MountDir
 from ..checks.js_analysis import discover_js_urls
 from ..engine import CheckFailed, CheckSelectionError, LiveSession
 from ..errors import BudgetExhausted, PartexError, ScopeViolation
-from ..models import ArtifactEvidence, Finding, HttpEvidence, redact
-from ..storage import RunStore
+from ..models import REDACTED, ArtifactEvidence, Finding, HttpEvidence, redact
+from ..storage import RunStore, run_reports_dir, write_report
 from .tools import BRIEFING_TAG, REVIEWER_TOOLS, ReviewDeps, frame_untrusted
 
 SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS'})
@@ -225,7 +226,51 @@ async def discover_js_assets(ctx: RunContext[TesterDeps]) -> str:
     )
 
 
-TESTER_TOOLS = (*REVIEWER_TOOLS, http_request, download_asset, discover_js_assets, run_check)
+def _scrub_credentials(text: str, session: LiveSession) -> tuple[str, int]:
+    """Replace any engagement credential value that reached *text* with ``<redacted>``; return it and the count.
+
+    Defense in depth: the model only ever sees redacted tool results, so this should never match.
+    """
+    engagement = session.engagement
+    values = {os.environ.get(var, '') for var in (*engagement.credentials.values(), *engagement.roles.values())}
+    count = 0
+    for value in sorted((v for v in values if v), key=len, reverse=True):
+        count += text.count(value)
+        text = text.replace(value, REDACTED)
+    return text, count
+
+
+async def save_report(ctx: RunContext[TesterDeps], name: str, content: str) -> str:
+    """Save a Markdown report of this session's findings for the operator; it cannot be read back or changed.
+
+    Written under this run's report directory as ``<name>.md``. Reports are for the operator: cite evidence
+    (``ev_``) and finding (``fn_``) IDs instead of pasting bodies, and never include credentials. A name that is
+    already saved in this run is refused; pick another.
+
+    Args:
+        name: 1-64 letters, digits, dots, underscores or hyphens, starting with a letter or digit (no ``.md``).
+        content: The Markdown text, at most 256 KiB.
+    """
+    scrubbed, redactions = _scrub_credentials(content, ctx.deps.session)
+    directory = run_reports_dir(ctx.deps.store.path, ctx.deps.run_id)
+    args = {'name': name, 'size_bytes': len(content.encode())}
+    try:
+        path = await anyio.to_thread.run_sync(write_report, directory, name, scrubbed)
+    except FileExistsError as exc:
+        await _audit(ctx, 'save_report', args, {'refused': 'exists'})
+        raise ToolFailed(f'a report named {name!r} is already saved in this run; pick another name') from exc
+    except ValueError as exc:
+        await _audit(ctx, 'save_report', args, {'refused': 'invalid', 'reason': str(exc)})
+        raise ToolFailed(str(exc)) from exc
+    except OSError as exc:
+        await _audit(ctx, 'save_report', args, {'error': exc.strerror or 'write failed'})
+        raise ToolFailed(f'could not write the report: {exc.strerror or "write failed"}') from exc
+    size = path.stat().st_size
+    await _audit(ctx, 'save_report', args, {'path': str(path), 'size_bytes': size, 'redactions': redactions})
+    return f'saved {path} ({size} bytes)'
+
+
+TESTER_TOOLS = (*REVIEWER_TOOLS, http_request, download_asset, discover_js_assets, run_check, save_report)
 
 CODE_MODE_TOOLS = tuple(tool.__name__ for tool in REVIEWER_TOOLS)
 """The only tools a ``run_code`` snippet can call (#83): the pure, redacted read tools. Everything that can
@@ -266,7 +311,8 @@ shows. Do not probe beyond what the operator asked without saying what you inten
 Tools: http_request (GET, HEAD, OPTIONS only), download_asset (GET-only full-body download for
 large assets such as JS bundles, returning metadata + ev_ ID without the body), discover_js_assets
 (lists <script src> and import URLs from captured evidence without fetching), run_check (registered
-partex checks, e.g. js-analysis; the only way a finding is recorded), and the read tools (list_runs,
+partex checks, e.g. js-analysis; the only way a finding is recorded), save_report (write a Markdown report
+for the operator; it cannot be read back), and the read tools (list_runs,
 list_findings, get_finding, list_evidence, lookup_evidence). list_runs shows earlier sessions against
 this same target; pass a run ID, or run='previous' for the run this session continues from, to read
 one. Earlier runs are read-only.

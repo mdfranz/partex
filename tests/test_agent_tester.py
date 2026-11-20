@@ -6,6 +6,7 @@ local fixture target, and scope refusals are asserted to leave its request log u
 
 import importlib.util
 import json
+import stat
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -17,13 +18,14 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls
 from pydantic_ai.models.test import TestModel
 
 from partex import engine, target
-from partex.agent_adapter import TesterDeps, build_tester_agent, run_agent
+from partex.agent_adapter import CHAT_SETTINGS, TesterDeps, build_tester_agent, run_agent
 from partex.agent_adapter.scope_plugin import ScopeControl, ScopePlugin, current_control
-from partex.agent_adapter.tester import CODE_MODE_TOOLS, MODEL_BODY_CHARS, TESTER_INSTRUCTIONS
+from partex.agent_adapter.tester import CODE_MODE_TOOLS, MODEL_BODY_CHARS, TESTER_INSTRUCTIONS, TESTER_TOOLS
 from partex.agent_adapter.tools import REVIEWER_TOOLS
 from partex.engine import LiveSession, LiveSessionRefused, live_session
 from partex.errors import ScopeViolation
-from partex.storage import RunStore
+from partex.models import REDACTED
+from partex.storage import MAX_REPORT_BYTES, RunStore, artifact_dir, run_reports_dir
 
 _TARGET_APP = Path(__file__).parent.parent / 'fixtures' / 'target_app' / 'app.py'
 
@@ -782,7 +784,9 @@ async def test_report_and_secrets_accept_an_explicit_path_and_report_failures(
 
 def test_the_model_has_no_export_tool_and_the_commands_exist_for_the_operator() -> None:
     names = set(build_tester_agent('test')._function_toolset.tools)  # pyright: ignore[reportPrivateUsage]
-    assert not {name for name in names if 'report' in name or 'secret' in name or 'export' in name}
+    # The operator's /report and /secrets exports stay unreachable by the model (#88). The one allowed exception is
+    # save_report (#104): model-authored text, credential-scrubbed, written to its own directory, never an export.
+    assert not {name for name in names if 'report' in name or 'secret' in name or 'export' in name} - {'save_report'}
 
 
 async def test_plugin_registers_the_export_commands(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
@@ -844,6 +848,77 @@ async def test_run_code_reads_artifacts_and_calls_read_tools(
     )
     assert '/api/v1/users' in out[0]
     assert 'findings' in out[1] or 'partex_untrusted_data' in out[1]
+
+
+async def test_save_report_writes_a_private_audited_file(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        result = await drive(
+            session, tmp_store, [('save_report', {'name': 'summary-1', 'content': '# Findings\n\nSee ev_abc.'})]
+        )
+        (saved,) = tool_returns(result.all_messages())
+        path = run_reports_dir(tmp_store.path, session.run_id) / 'summary-1.md'
+        assert str(path) in str(saved.content)
+        assert path.read_text() == '# Findings\n\nSee ev_abc.'
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(path.parent.parent.stat().st_mode) == 0o700
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert call.tool == 'save_report' and call.args['name'] == 'summary-1'
+        assert 'Findings' not in json.dumps(call.args) + json.dumps(call.result)  # the audit never holds the text
+        assert not any(artifact_dir(tmp_store.path).glob('**/summary-1*'))  # never beside captured evidence
+
+
+@pytest.mark.parametrize(
+    'name', ['', '../x', 'a/b', '/etc/passwd', '.hidden', 'x' * 65, 'a b', 'a\x00b', 'report.md/..', '..']
+)
+async def test_save_report_rejects_bad_names(tmp_store: RunStore, tmp_path: Path, target_app: Any, name: str) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        result = await drive(session, tmp_store, [('save_report', {'name': name, 'content': 'x'})])
+        (failed,) = tool_returns(result.all_messages())
+        assert getattr(failed, 'outcome', None) == 'failed'
+        assert not run_reports_dir(tmp_store.path, session.run_id).exists()  # nothing was created
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert call.result['refused'] == 'invalid'
+
+
+async def test_save_report_refuses_oversize_and_overwrite(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        result = await drive(
+            session,
+            tmp_store,
+            [
+                ('save_report', {'name': 'big', 'content': 'x' * (MAX_REPORT_BYTES + 1)}),
+                ('save_report', {'name': 'one', 'content': 'first'}),
+                ('save_report', {'name': 'one', 'content': 'second'}),
+            ],
+        )
+        big, first, again = tool_returns(result.all_messages())
+        assert getattr(big, 'outcome', None) == 'failed' and 'limit' in str(big.content)
+        assert getattr(first, 'outcome', None) != 'failed'
+        assert getattr(again, 'outcome', None) == 'failed' and 'already saved' in str(again.content)
+        assert (run_reports_dir(tmp_store.path, session.run_id) / 'one.md').read_text() == 'first'
+        assert not (run_reports_dir(tmp_store.path, session.run_id) / 'big.md').exists()
+
+
+async def test_save_report_scrubs_engagement_credential_values(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    eng = engagement(tmp_path, target_app)
+    manifest = json.loads((eng / 'engagement.json').read_text())
+    manifest['credentials'] = {'token': 'PARTEX_CRED_TOKEN'}
+    (eng / 'engagement.json').write_text(json.dumps(manifest))
+    monkeypatch.setenv('PARTEX_CRED_TOKEN', 's3cr3t-value')
+    async with live_session(eng, tmp_store, authorized=True) as session:
+        await drive(session, tmp_store, [('save_report', {'name': 'leak', 'content': 'token is s3cr3t-value, ok'})])
+        text = (run_reports_dir(tmp_store.path, session.run_id) / 'leak.md').read_text()
+        assert 's3cr3t-value' not in text and REDACTED in text
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert call.result['redactions'] == 1
+
+
+def test_save_report_is_a_direct_tool_not_a_code_mode_tool() -> None:
+    assert 'save_report' in {tool.__name__ for tool in TESTER_TOOLS}
+    assert 'save_report' not in CODE_MODE_TOOLS
 
 
 def test_run_code_guidance_is_in_the_prompt() -> None:
@@ -936,3 +1011,8 @@ async def test_run_code_sees_only_this_runs_artifacts(tmp_store: RunStore, tmp_p
     )
     assert "['mine.js']" in out[0]
     assert 'earlier run' not in out[1] and 'another run' not in out[2]
+
+
+def test_session_namer_is_off_for_chat_and_agent() -> None:
+    """CLAI2 caps the namer at 250 output tokens, which a reasoning model spends before answering (#102)."""
+    assert CHAT_SETTINGS.session_namer is False

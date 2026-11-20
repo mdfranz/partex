@@ -37,7 +37,10 @@ from .usage import UsageRecordingModel
 # Explicit CLAI2 settings, so the operator's saved CLAI2 preferences cannot change what the reviewer is:
 # model=None keeps the agent's model (CLAI2's default model would otherwise override it), and Code Mode
 # stays off so the model calls partex's tools natively instead of through a run_code sandbox (RUNTIME.md M5).
-CHAT_SETTINGS = Settings(model=None, code_mode=False, speculative_code_mode=False)
+# The session namer is off too (#102): it is decorative, CLAI2 hard-codes its output cap at 250 tokens so a
+# reasoning model spends it all before answering (OutputTokenLimitExceeded), and it would send engagement
+# conversation content to the model a second time.
+CHAT_SETTINGS = Settings(model=None, code_mode=False, speculative_code_mode=False, session_namer=False)
 
 __all__ = [
     'BRIEFING_PROMPT',
