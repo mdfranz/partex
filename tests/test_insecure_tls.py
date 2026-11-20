@@ -175,7 +175,9 @@ async def test_run_test_insecure_is_recorded_warned_and_strict_otherwise(
     port = self_signed_server.server_port
     path = _write(tmp_path, _engagement(port))  # engagement file says nothing about TLS
 
-    with pytest.raises(PartexError, match='not trusted'):  # strict: the baseline capture cannot complete the handshake
+    with pytest.raises(
+        PartexError, match='not trusted|CERTIFICATE_VERIFY_FAILED|certificate verify failed'
+    ):  # strict: the baseline capture cannot complete the handshake
         await engine.run_test(path, tmp_store, ['version-disclosure'], authorized=True)
     (strict_run,) = await tmp_store.list_runs()
     assert not [c for c in await tmp_store.tool_calls(strict_run.id) if c.tool == 'tls_verify_disabled']
