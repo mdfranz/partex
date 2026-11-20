@@ -17,7 +17,7 @@ from pydantic_ai import RunContext, ToolFailed
 from pydantic_ai.framing import register_tag, wrap
 
 from ..ids import canonical_json
-from ..models import ConfigEvidence, Evidence, Finding, HttpEvidence, redact
+from ..models import ArtifactEvidence, ConfigEvidence, Evidence, Finding, HttpEvidence, redact
 from ..storage import RunReader, RunRecord, RunStore
 
 UNTRUSTED_TAG = register_tag('partex_untrusted_data')
@@ -140,6 +140,17 @@ async def list_findings(ctx: RunContext[ReviewDeps], run: RunChoice = 'current')
 def _evidence_summary(item: Evidence) -> dict[str, Any]:
     if isinstance(item, ConfigEvidence):
         return {'id': item.id, 'kind': item.kind, 'path': item.config.path, 'format': item.config.format}
+    if isinstance(item, ArtifactEvidence):
+        redacted_artifact = cast(ArtifactEvidence, redact(item))
+        return {
+            'id': item.id,
+            'kind': item.kind,
+            'url': redacted_artifact.artifact.url,
+            'status': redacted_artifact.artifact.status_code,
+            'content_type': redacted_artifact.artifact.content_type,
+            'size_bytes': redacted_artifact.artifact.size_bytes,
+            'sha256': redacted_artifact.artifact.sha256,
+        }
     redacted = cast(HttpEvidence, redact(item))  # redaction keeps the evidence kind
     request, response = redacted.http.request, redacted.http.response
     return {

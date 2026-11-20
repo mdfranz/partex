@@ -331,3 +331,8 @@ above stay terse.
    new evidence kind (a harness-captured DOM snapshot) plus a passive check over it —
    revisited through the D-series amendment process (`PARTX_SKILL_PLAN.md` §5) with a
    concrete skill in hand, not before.
+9. **JS AST parsing (`#69`) — decided**: add `tree-sitter` (`>=0.26`) and `tree-sitter-javascript`
+   (`>=0.25`) as locked PyPI runtime dependencies (prebuilt wheels, no `[tool.uv.sources]`
+   override, 2-day cool-off respected). Chosen over `esprima`/`pyjsparser` (unmaintained) and
+   `js2py`/`quickjs` (execute target JS, violating the non-execution boundary). Tree-sitter parses
+   minified and truncated bundles deterministically with error tolerance.
