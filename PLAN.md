@@ -325,6 +325,17 @@ tool — is validated immediately before send:
    `max_requests`. Exhaustion ends active work cleanly (`checks_complete` with what is
    committed), it is not an error.
 
+**Invalid TLS certificates (operator opt-in, #71).** The client verifies certificates against the
+original hostname by default. An operator can accept invalid ones (self-signed, private CA,
+expired, hostname mismatch) with the engagement's `tls: {"verify": false}` (optionally
+`insecure_hosts`, a subset of `scope.hosts`; empty means every in-scope host), `partex test|agent
+--insecure`, or `partex.sh -k`. Only the target client relaxes verification, per host through a
+second transport, so model-provider traffic and other hosts stay strict; the scope gate, DNS pin,
+SNI and Host header are unchanged. The run records a `tls_verify_disabled` audit row and prints a
+warning; each exchange made unverified carries `tls_verified: false` (omitted when true, and not
+part of the evidence ID); a verification replay reuses the original exchange's setting. The model
+has no tool for it. Reporting the certificate itself as a finding is a follow-up.
+
 **Live scope extension (operator only).** In a live `agent` session the operator can add a host
 and port with the CLAI2 slash command `/scope add <host[:port]|url>`, which only *stages* the
 change and shows the exact additions (ports apply to every host in scope); `/scope confirm`

@@ -55,7 +55,7 @@ class VerifyResult:
     counterevidence: str = ''
 
 
-def _engagement_from_snapshot(scope: Scope, origin: str) -> Engagement:
+def _engagement_from_snapshot(scope: Scope, origin: str, *, tls_unverified: bool = False) -> Engagement:
     """Rebuild a minimal engagement from the run's stored scope snapshot.
 
     Verification replays inside the scope the run was *authorized for*, even if
@@ -67,6 +67,11 @@ def _engagement_from_snapshot(scope: Scope, origin: str) -> Engagement:
             'schema_version': 1,
             'target': {'name': 'verify-replay', 'base_url': origin},
             'scope': scope.model_dump(),
+            # A replay reuses how the original exchange was made: certificates unverified only if they were.
+            'tls': {
+                'verify': not tls_unverified,
+                'insecure_hosts': [urlsplit(origin).hostname] if tls_unverified else [],
+            },
             'authorization': {
                 'attestation': 'scope snapshot recorded by the run under verification',
                 'operator': 'partex verify',
@@ -130,7 +135,9 @@ async def run_verification(
             rule_code='verify-no-recipe',
         )
 
-    engagement = _engagement_from_snapshot(run.scope_snapshot, _origin_of(original))
+    engagement = _engagement_from_snapshot(
+        run.scope_snapshot, _origin_of(original), tls_unverified=not original.tls_verified
+    )
     replays: list[Evidence] = []
 
     async def on_capture(evidence: HttpEvidence) -> None:

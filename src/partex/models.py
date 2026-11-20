@@ -108,6 +108,10 @@ class HttpEvidence(BaseModel):
     source: str
     http: HttpExchange
     secret_fields: list[str] = Field(default_factory=list)
+    tls_verified: bool = Field(default=True, exclude_if=lambda verified: verified)
+    """``False`` when the certificate was not verified for this exchange (operator-accepted invalid TLS, #71).
+    Left out of dumps and exports while ``True`` (so strict runs are unchanged), and excluded from the evidence
+    ID, like ``source``, so the same exchange hashes the same either way."""
 
     @model_validator(mode='after')
     def _secret_fields_resolve(self) -> Self:
@@ -268,6 +272,19 @@ class EngagementTarget(BaseModel):
     base_url: str
 
 
+class TlsPolicy(BaseModel):
+    """TLS verification for the target client (#71). Strict by default; relaxed only by the operator.
+
+    ``verify: false`` accepts invalid certificates (self-signed, private CA, expired, hostname mismatch) for
+    ``insecure_hosts``, or for every in-scope host when that list is empty. Never set from a model.
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    verify: bool = True
+    insecure_hosts: list[str] = Field(default_factory=list)
+
+
 class Authorization(BaseModel):
     """Authorization attestation — required before any live traffic."""
 
@@ -285,6 +302,7 @@ class Engagement(BaseModel):
     schema_version: int = 1
     target: EngagementTarget
     scope: Scope
+    tls: TlsPolicy = Field(default_factory=TlsPolicy)
     authorization: Authorization
     credentials: dict[str, str] = Field(default_factory=dict)
     roles: dict[str, str] = Field(default_factory=dict)

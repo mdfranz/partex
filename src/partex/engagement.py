@@ -27,7 +27,7 @@ from typing import Any, cast
 
 from pydantic import ValidationError
 
-from .errors import ValidationFailed
+from .errors import ScopeViolation, ValidationFailed
 from .models import Engagement
 from .scope import check_url, normalize_host, validate_scope
 
@@ -99,6 +99,18 @@ def validate_engagement(data: Any) -> Engagement:
         check_url(engagement.scope, engagement.target.base_url)
     except Exception as exc:
         raise _fail('scope-invalid', f'target.base_url is outside scope: {exc}') from exc
+    # TLS — insecure_hosts only make sense with verify:false and must be in scope.
+    tls = engagement.tls
+    if tls.insecure_hosts and tls.verify:
+        raise _fail('tls-invalid', 'tls.insecure_hosts is set but tls.verify is true; set verify to false')
+    in_scope = {normalize_host(host) for host in engagement.scope.hosts}
+    for host in tls.insecure_hosts:
+        try:
+            normalized = normalize_host(host)
+        except ScopeViolation as exc:
+            raise _fail('tls-invalid', f'tls.insecure_hosts entry {host!r}: {exc}') from exc
+        if normalized not in in_scope:
+            raise _fail('tls-invalid', f'tls.insecure_hosts entry {host!r} is not in scope.hosts')
     return engagement
 
 
@@ -143,6 +155,8 @@ def _rule_code_for(exc: ValidationError) -> str:
         return 'unauthorized'
     if 'credentials' in locations or 'roles' in locations:
         return 'credential-invalid'
+    if 'tls' in locations:
+        return 'tls-invalid'
     return 'scope-invalid'
 
 
