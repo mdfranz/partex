@@ -578,6 +578,11 @@ class LiveSession:
         await self._store.add_requests_spent(self.run_id, 1)
 
     @property
+    def store(self) -> RunStore:
+        """The run store this session writes to (for operator-only exports)."""
+        return self._store
+
+    @property
     def requests_spent(self) -> int:
         return self.client.requests_spent
 

@@ -345,6 +345,15 @@ tool — is validated immediately before send:
    `max_requests`. Exhaustion ends active work cleanly (`checks_complete` with what is
    committed), it is not an error.
 
+**Operator exports (`/report`, `/secrets`, #88).** Two more operator-only slash commands live in the
+same partex CLAI2 plugin as `/scope`; the model has no tool for either. `/report [path]` writes a
+Markdown report of the run from the redacted export payload (default
+`<db>.exports/<run_id>.report.md`). `/secrets [path]` writes the values partex redacts everywhere
+else, JavaScript secret candidates re-extracted from stored artifacts and the `secret_fields` of
+captured HTTP evidence, to a `0600` file in a `0700` directory. Both print only the path and counts,
+never a value, so nothing secret reaches the transcript or the model's context.
+`*.db.artifacts/` and `*.db.exports/` are gitignored.
+
 **Live passive checks (#51).** `partex test` and `partex agent` accept passive and active check IDs.
 After the baseline capture and every active probe, the selected passive checks review all exchanges
 the run captured, so a live run no longer reports zero findings merely because the passive half

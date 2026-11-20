@@ -9,6 +9,7 @@ that changes scope; the scope gate itself stays in ``target.py``.
 from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from pydantic_clai2.commands import Command  # pyright: ignore[reportMissingTypeStubs]
 from pydantic_clai2.plugins import NoSettings, Plugin  # pyright: ignore[reportMissingTypeStubs]
@@ -16,6 +17,7 @@ from pydantic_clai2.plugins import NoSettings, Plugin  # pyright: ignore[reportM
 from ..engine import LiveSession
 from ..errors import PartexError
 from ..models import Scope
+from ..operator_export import exports_dir, write_report, write_secrets
 from ..scope import extend_scope
 
 SCOPE_PLUGIN_ID = 'partex_scope'
@@ -73,6 +75,30 @@ class ScopeControl:
         self.pending = None
         return f'Scope extended and recorded on the run.\n{describe(after)}'
 
+    def _destination(self, args: list[str], suffix: str) -> Path:
+        if args:
+            return Path(args[0]).expanduser().resolve()
+        return exports_dir(self.session.store.path) / f'{self.session.run_id}.{suffix}.md'
+
+    async def report(self, args: list[str]) -> str:
+        """``/report [path]``: Markdown report of this run to disk (redacted). Prints the path and counts only."""
+        try:
+            result = await write_report(self.session.store, self.session.run_id, self._destination(args, 'report'))
+        except (PartexError, OSError) as exc:
+            return f'Report not written: {exc}'
+        return f'Report written to {result.path} ({result.findings} findings, {result.evidence} evidence; secrets redacted).'
+
+    async def secrets(self, args: list[str]) -> str:
+        """``/secrets [path]``: unredacted secret values to a 0600 file. Prints the path and counts, never a value."""
+        try:
+            result = await write_secrets(self.session.store, self.session.run_id, self._destination(args, 'secrets'))
+        except (PartexError, OSError) as exc:
+            return f'Secrets not written: {exc}'
+        return (
+            f'Secrets written to {result.path} (mode 0600): {result.js_secrets} JavaScript candidate(s), '
+            f'{result.evidence_secrets} secret-marked evidence field(s). Values are not shown here.'
+        )
+
     def cancel(self) -> str:
         was, self.pending = self.pending, None
         return 'Pending change dropped.' if was else 'Nothing pending.'
@@ -96,13 +122,24 @@ current_control: ContextVar[ScopeControl | None] = ContextVar('partex_scope_cont
 
 
 class ScopePlugin(Plugin[NoSettings]):
-    """Registers ``/scope`` for the live session; with no session bound it contributes nothing."""
+    """Registers the operator-only ``/scope``, ``/report`` and ``/secrets`` commands for the live session; with no
+    session bound it contributes nothing."""
 
     def get_commands(self) -> Sequence[Command]:
         control = current_control.get()
         if control is None:
             return ()
         return (
+            Command(
+                name='report',
+                description='Write a Markdown report of this run to disk (secrets redacted): /report [path]',
+                handler=control.report,
+            ),
+            Command(
+                name='secrets',
+                description='Write secret values to a 0600 file, never shown in chat: /secrets [path]',
+                handler=control.secrets,
+            ),
             Command(
                 name='scope',
                 description='Show or extend the engagement scope (operator only): /scope add <host[:port]|url>, /scope confirm',

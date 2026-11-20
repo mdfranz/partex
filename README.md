@@ -119,6 +119,7 @@ Available today (`uv run partex --help`):
 | `partex report` | Query | Cross-run rollup of findings, model spend, and tool calls. |
 | `partex checks` | Registry | Installed checks, linked skills, and frontmatter lint. |
 | `partex sandboxes` | Host | Detect which sandboxes (`monty`, `docker`, `podman`, `bubblewrap`) this host can run. |
+| `/report`, `/secrets` (inside `partex agent`) | Operator only | `/report [path]` writes a redacted Markdown report; `/secrets [path]` writes unredacted secret values to a `0600` file and never prints them. The model has no tool for either. |
 | `partex chat <run-id>` | Read-only + Model | Read-only review chat over a saved run (CLAI2 terminal). |
 | `partex agent <engagement>` | Active + Model | Live operator-directed session (with `download_asset`, `discover_js_assets`, and operator-confirmed `/scope add`); requires `--authorized`. |
 
