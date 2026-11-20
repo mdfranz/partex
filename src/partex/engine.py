@@ -43,6 +43,8 @@ from .target import DEFAULT_MAX_ASSET_BYTES, ScopedHttpClient
 
 ENTRY_POINT_GROUP = 'partex.checks'
 MAX_DRAFTS_PER_CHECK = 1000
+DEFAULT_ACTIVE_CHECKS = ('version-disclosure',)
+"""Active checks ``partex test`` runs when none are named."""
 _NOT_RUN = object()
 
 
@@ -295,8 +297,20 @@ class TestResult:
     """True when ``max_requests`` ended active work cleanly (``checks_complete``, not failure)."""
 
 
-def select_active_checks(registry: Mapping[str, Any], selection: Sequence[str]) -> list[Any]:
-    """Resolve *selection* (ordered, de-duplicated) to active checks, or raise :class:`CheckSelectionError`."""
+def is_active_check(check: Any) -> bool:
+    """Active checks send probes (``probe``); every other registered check reviews captured evidence (``review``).
+
+    A check that defines both is treated as active (its probe runs); no installed check does both today.
+    """
+    return callable(getattr(check, 'probe', None))
+
+
+def select_live_checks(registry: Mapping[str, Any], selection: Sequence[str]) -> list[Any]:
+    """Resolve *selection* (ordered, de-duplicated) to active and passive checks, or raise :class:`CheckSelectionError`.
+
+    A live run can run both kinds: active checks probe the target, passive checks review every exchange the run
+    captured (PLAN §6). The selection order is kept; :func:`order_for_live_run` decides what runs when.
+    """
     ordered = list(dict.fromkeys(selection))
     if not ordered:
         raise CheckSelectionError('no checks selected', rule_code='empty-selection')
@@ -306,12 +320,31 @@ def select_active_checks(registry: Mapping[str, Any], selection: Sequence[str]) 
         raise CheckSelectionError(
             f'unknown check(s): {", ".join(unknown)}; available: {available}', rule_code='unknown-check'
         )
-    not_active = [check_id for check_id in ordered if not callable(getattr(registry[check_id], 'probe', None))]
-    if not_active:
+    unusable = [
+        check_id
+        for check_id in ordered
+        if not is_active_check(registry[check_id]) and not callable(getattr(registry[check_id], 'review', None))
+    ]
+    if unusable:
         raise CheckSelectionError(
-            f'not active check(s), cannot run on a live target: {", ".join(not_active)}', rule_code='not-active'
+            f'check(s) with neither probe() nor review(): {", ".join(unusable)}', rule_code='not-runnable'
         )
     return [registry[check_id] for check_id in ordered]
+
+
+def order_for_live_run(selected: Sequence[Any]) -> tuple[list[Any], list[Any]]:
+    """Split *selected* into ``(active, passive)``, each in selection order.
+
+    Active checks run first so passive checks also see the probe traffic; passive checks run last over every
+    exchange the run captured.
+    """
+    return [c for c in selected if is_active_check(c)], [c for c in selected if not is_active_check(c)]
+
+
+def default_live_checks(registry: Mapping[str, Any]) -> list[str]:
+    """The ``partex test`` default: every installed passive check plus the default active set."""
+    passive = [check_id for check_id, check in registry.items() if not is_active_check(check)]
+    return [*passive, *(c for c in DEFAULT_ACTIVE_CHECKS if c in registry)]
 
 
 def _manifest_fingerprint(engagement_path: str | Path) -> str:
@@ -376,11 +409,12 @@ async def run_test(
     Order of gates, all before any socket: check selection, the ``--authorized``
     flag (E2 CLI half), engagement validation (E1–E7), and credential presence
     (E4/E7 run-start half). Then: baseline capture, active checks in selection
-    order, evidence committed **at capture time** and findings **per check** —
+    order, then passive checks over everything captured, evidence committed **at capture time** and findings **per check** —
     a crash or budget exhaustion keeps everything already paid for (§6.1).
     """
     registry = installed_checks() if registry is None else registry
-    selected = select_active_checks(registry, checks)
+    selected = select_live_checks(registry, checks)
+    active, passive = order_for_live_run(selected)
     selected_ids = tuple(check.check_id for check in selected)
 
     async def invalid(rule_code: str, error: str) -> TestResult:
@@ -428,7 +462,7 @@ async def run_test(
     try:
         try:
             await client.request('GET', engagement.target.base_url)
-            for check in selected:
+            for check in active:
                 if not check.applies_to(captured):
                     skipped.append(check.check_id)
                     done.add(check.check_id)
@@ -443,6 +477,21 @@ async def run_test(
                     raise CheckFailed(check.check_id, f'probe left the engagement scope: {exc}') from exc
                 except PartexError as exc:
                     raise CheckFailed(check.check_id, f'probe failed: {exc}') from exc
+                except Exception as exc:
+                    raise CheckFailed(check.check_id, f'raised {type(exc).__name__}: {exc}') from exc
+                committed = _finalize([check], [drafts], captured)
+                await store.commit_findings(run_id, committed)
+                findings.extend(committed)
+                done.add(check.check_id)
+            # Passive checks run last, over every exchange captured so far (baseline and probe traffic), and need
+            # no budget, so they still run after active work was cut short.
+            for check in passive:
+                if not check.applies_to(captured):
+                    skipped.append(check.check_id)
+                    done.add(check.check_id)
+                    continue
+                try:
+                    drafts = await anyio.to_thread.run_sync(check.review, list(captured))
                 except Exception as exc:
                     raise CheckFailed(check.check_id, f'raised {type(exc).__name__}: {exc}') from exc
                 committed = _finalize([check], [drafts], captured)
@@ -628,7 +677,7 @@ async def live_session(
     with the error if the block raised; finalizing is shielded from cancellation.
     """
     registry = installed_checks() if registry is None else registry
-    selected = select_active_checks(registry, checks) if checks else []
+    selected = select_live_checks(registry, checks) if checks else []
     selected_ids = tuple(check.check_id for check in selected)
     try:
         engagement = await _check_live_gates(engagement_path, authorized=authorized, insecure=insecure)
@@ -656,7 +705,8 @@ async def live_session(
     session = LiveSession(run_id=run_id, engagement=engagement, registry=registry, store=store)
     try:
         await session.request('GET', engagement.target.base_url)
-        for check in selected:
+        active, passive = order_for_live_run(selected)
+        for check in (*active, *passive):  # probes first, so passive checks also see their traffic
             if check.applies_to(session.captured):
                 await session.run_check(check.check_id)
         yield session

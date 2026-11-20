@@ -46,7 +46,7 @@ EXIT_FINDINGS = 3
 EXIT_INTERRUPTED = 130
 
 # Selection problems that are bad input (exit 1, PLAN §8) rather than a malformed invocation (exit 2).
-_FATAL_SELECTION_CODES = frozenset({'unknown-check', 'not-passive', 'not-active'})
+_FATAL_SELECTION_CODES = frozenset({'unknown-check', 'not-passive', 'not-active', 'not-runnable'})
 
 
 # ── Shared plumbing ───────────────────────────────────────────────────────────
@@ -146,14 +146,19 @@ def build_parser() -> argparse.ArgumentParser:
     review.set_defaults(handler=_cmd_review)
 
     test = subparsers.add_parser(
-        'test', parents=[with_db], help='live run: capture, active checks (requires --authorized)'
+        'test', parents=[with_db], help='live run: capture, active and passive checks (requires --authorized)'
     )
     test.add_argument('engagement', help='engagement directory or engagement.json path')
     test.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
     test.add_argument('--insecure', action='store_true', help=INSECURE_HELP)
-    test.add_argument(
-        '--checks', default='version-disclosure', help='comma-separated, ordered check ids (default: %(default)s)'
+    test_selection = test.add_mutually_exclusive_group()
+    test_selection.add_argument(
+        '--checks',
+        default=None,
+        help='comma-separated check ids, active and/or passive, de-duplicated '
+        '(default: every installed passive check plus version-disclosure)',
     )
+    test_selection.add_argument('--all', action='store_true', help='run every installed check, active and passive')
     test.add_argument('--no-summary', action='store_true', help='skip the model-backed summary (M4)')
     test.add_argument('--out', default=None, help='also write the canonical JSON export to this file')
     test.set_defaults(handler=_cmd_test)
@@ -317,8 +322,14 @@ def _cmd_review(args: argparse.Namespace) -> int:
 
 
 def _cmd_test(args: argparse.Namespace) -> int:
-    checks = _split_checks(args.checks)
-    engine.select_active_checks(engine.installed_checks(), checks)  # fail before any store is opened
+    registry = engine.installed_checks()
+    if args.all:
+        checks = list(registry)
+    elif args.checks is None:
+        checks = engine.default_live_checks(registry)
+    else:
+        checks = _split_checks(args.checks)
+    engine.select_live_checks(registry, checks)  # fail before any store is opened
     db_path = resolve_db_path(args.db)
 
     async def go() -> engine.TestResult:

@@ -325,6 +325,15 @@ tool — is validated immediately before send:
    `max_requests`. Exhaustion ends active work cleanly (`checks_complete` with what is
    committed), it is not an error.
 
+**Live passive checks (#51).** `partex test` and `partex agent` accept passive and active check IDs.
+After the baseline capture and every active probe, the selected passive checks review all exchanges
+the run captured, so a live run no longer reports zero findings merely because the passive half
+never ran. Findings commit per check in selection order (active checks first, then passive); a
+passive check that does not apply is listed in `skipped_checks`, and one that raises ends the run
+`checks_failed` with earlier findings and all evidence kept. Passive checks still run after the
+request budget ends active work. Default selection for `test`: every installed passive check plus
+`version-disclosure`; `--all` runs every installed check.
+
 **Invalid TLS certificates (operator opt-in, #71).** The client verifies certificates against the
 original hostname by default. An operator can accept invalid ones (self-signed, private CA,
 expired, hostname mismatch) with the engagement's `tls: {"verify": false}` (optionally
