@@ -10,7 +10,14 @@ Checks receive validated evidence and return findings candidates. The engine val
 evidence references and owns persistence. Markdown skills remain guidance. The passive
 pipeline can complete without model calls or a model-code runtime.
 
-## M5 read-only reviewer
+## M5 read-only reviewer and live agent
+
+`partex chat <run-id>` (read-only reviewer) and `partex agent <engagement>` (live session with
+operator-confirmed `/scope add`, `download_asset`, `discover_js_assets`, and `run_check`) are
+implemented over CLAI2 (`load_plugins=False` for `chat`; `ScopePlugin` for `agent`). Host
+sandbox capability detection (`partex sandboxes`, #84) is implemented. Attaching Monty-backed
+`CodeMode` directly to `partex_reviewer_agent` (and live-session Code Mode, #83) plus the
+speculation benchmark below remain open.
 
 Use Monty-backed `CodeMode` for `chat <run-id>` by attaching `CodeMode(tools=['list_findings', 'get_finding', 'lookup_evidence'], eager=True, ..., mount=None, os_access=None)` directly on `partex_reviewer_agent` while keeping CLAI2's `run.code_mode` and `run.speculative_code_mode` disabled (so CLAI2's `WorkspaceCodeMode` does not mount the host working directory). Generated Python can group findings, compare captured headers, and correlate records using `list_findings`, `get_finding`, and `lookup_evidence`. Host tools enforce the current run ID and redact their results before returning them to the snippet. Give the sandbox no filesystem mounts, credentials, shell, network access, or store handles. CLAI2's plugin loading remains disabled.
 

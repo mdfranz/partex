@@ -1,5 +1,7 @@
 # ARTEX Codebase Overview
 
+> **Historical Reference:** This document surveys the external ARTEX codebases studied during initial design. It is **not** a specification of `partex` (which shares no runtime, schema, or code dependency with any ARTEX fork). For `partex`'s current design and status, see [`PLAN.md`](../../PLAN.md) and [`RUNTIME.md`](../../RUNTIME.md).
+
 Three Go-based multi-agent autonomous penetration-testing platforms forked from a
 common upstream (`Autumn-27/ARTEX`), alongside an unrelated Python Flask
 reconnaissance scanner (`ARTEX/`, from `IlyassCODEX/ARTEX`) that shares only the

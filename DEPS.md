@@ -1,13 +1,12 @@
 # Partex dependency decisions and browser automation strategy
 
-> Status: decisions recorded (§8). No code yet. Answers two questions left implicit by
-> `PLAN.md` and `RUNTIME.md`: (1) which Python libraries the engine actually needs beyond the
+> Status: decisions recorded and active (§8). Answers two questions left implicit by
+> `PLAN.md` and `RUNTIME.md`: (1) which Python libraries the engine needs beyond the
 > locked Pydantic AI / Monty stack, and (2) how browser automation should work. **Stance: ParTEx
 > requires active probing via the scoped Python client *and* via browser automation, plus
 > HAR import — the same three paths the original ARTEX frameworks ran** (§5). Sequencing and
-> the browser engine choice are decided in §8; nothing below stays open. Every load-bearing
-> claim cites its source document; disagreements should be recorded against the section
-> numbers here.
+> the browser engine choice are decided in §8; later reviewed additions (e.g. `tree-sitter` in
+> §8.9) are appended there. Every load-bearing claim cites its source document.
 
 ## 1. Relationship to the other docs
 
@@ -35,11 +34,13 @@ checkout pyprojects, November 2026):
 | `pydantic-monty` family | >=1.5.0,<2 | `pydantic-ai-harness[code-mode]` | CLAI2 Code Mode; required by CLAI2 even when Code Mode is off (`RUNTIME.md`) |
 | `opentelemetry-api` | 1.28.0 | `pydantic-ai-slim` | Tracing surface (already imported by the agent stack) |
 
-**Headline claim:** the v1 milestones (M0–M6) need **zero new direct runtime dependencies
-from PyPI**. Everything below is either already in the tree, stdlib, or a deliberate
-non-adoption with a named trigger for revisiting. The post-M6 browser harness (§7) is the
-one scheduled addition — it brings `playwright` (or, on the fallback, `websockets`) as a
-lockfile-pinned dependency of its own milestone, not as a convenience import.
+**Headline claim (initial baseline, amended by §8.9):** the original v1 milestones (M0–M6)
+targeted zero new direct PyPI dependencies beyond the locked agent stack (`httpx2`, `anyio`,
+`pydantic`, `pyyaml`, `rich`, `logfire`, `pydantic-monty`), with `pyyaml` and `logfire`
+explicitly declared in `pyproject.toml` since `partex` imports them directly. The one
+reviewed M0–M6 addition is `tree-sitter` + `tree-sitter-javascript` for deterministic,
+non-executing JS AST analysis (§8.9, #69). The post-M6 browser harness (§7) remains the
+scheduled addition for `playwright` (or `websockets`).
 
 ## 3. Runtime decisions per engine module
 
@@ -150,12 +151,10 @@ itself.
 
 All `pydantic-*` and `pydantic-monty*` packages resolve from PyPI, pinned with hashes in
 `uv.lock` and installed with `uv sync --frozen` (issue #13, superseding the local-checkout rule
-of #1; the November 2026 backdoor — `SOURCES.md` — is why the lockfile hashes are the control).
-All third-party deps resolve from the pinned lockfile. This doc's recommendations preserve that
-posture by *shrinking* the PyPI surface to zero new runtime deps for the v1 milestones, and
-by keeping every later addition a named, reviewable event: `playwright`/`websockets` arrive
-with the scheduled harness milestone (§7), while `ada-url`, PyJWT, and `openapi-core` stay
-behind their §3 triggers.
+of #1; the November 2026 backdoor — `docs/lineage/SOURCES.md` — is why the lockfile hashes are the control).
+All third-party deps resolve from the pinned lockfile. Apart from the reviewed `tree-sitter`
+addition (§8.9, #69), `playwright`/`websockets` arrive with the scheduled harness milestone
+(§7), while `ada-url`, PyJWT, and `openapi-core` stay behind their §3 triggers.
 
 ### 4.1 Locked stack versions
 
@@ -176,9 +175,9 @@ enhancement:
 
 | # | Path | Original framework equivalent | ParTEx role | Status |
 |---|---|---|---|---|
-| 1 | **Scoped HTTP client** (httpx/httpx2) — active probing | Go HTTP client in the forks' active checks and retester loop (`ARCHITECTURE.md`) | `target.py` (`ScopedHttpClient`): baseline capture, active check probes, verification replay, agent `http_request` tool | Core; lands M3 (`PLAN.md` §15) |
-| 2 | **Browser automation harness** | `api-recon` Puppeteer runtime harvesting (`SKILLS.md`); BaaRai's `extension/` browser traffic capture | **Active probing and capture** in real authenticated SPA flows: contexts per `engagement.roles`, mock-stub credential-free discovery, flow driving (login, forms, UI trigger points), every exchange captured into `RunStore` | **Required; scheduled as M7** (`PLAN.md` §15, gate §13.6) |
-| 3 | **HAR import** | The forks' MITM proxy served this role (capture everything the operator's browser does) | `partex import-har`: passive-bundle producer from operator-exported captures — the MITM replacement, since `PLAN.md` §1 forbids interception | **Required; scheduled M3** (`PLAN.md` §8, §17.5) |
+| 1 | **Scoped HTTP client** (httpx/httpx2) — active probing | Go HTTP client in the forks' active checks and retester loop (`docs/lineage/ARCHITECTURE.md`) | `target.py` (`ScopedHttpClient`): baseline capture, active check probes, verification replay, agent `http_request` tool | Landed M3 (`PLAN.md` §15) |
+| 2 | **Browser automation harness** | `api-recon` Puppeteer runtime harvesting (`docs/lineage/SKILLS.md`); BaaRai's `extension/` browser traffic capture | **Active probing and capture** in real authenticated SPA flows: contexts per `engagement.roles`, mock-stub credential-free discovery, flow driving (login, forms, UI trigger points), every exchange captured into `RunStore` | **Required; scheduled as M7** (`PLAN.md` §15, gate §13.6) |
+| 3 | **HAR import** | The forks' MITM proxy served this role (capture everything the operator's browser does) | `partex import-har`: passive-bundle producer from operator-exported captures — the MITM replacement, since `PLAN.md` §1 forbids interception | **Landed M3** (`#28`, `PLAN.md` §8, §17.5) |
 
 Why paths 2 and 3 are load-bearing: the S1 `api-inventory` skill builds its observed surface
 from `HttpExchange` records, and path 1 alone cannot produce the hundreds of authenticated

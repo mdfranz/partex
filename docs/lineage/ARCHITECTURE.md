@@ -1,5 +1,7 @@
 # ARTEX Architecture Comparison
 
+> **Historical Reference:** This document compares the external ARTEX prototypes and Go forks studied during initial design. It is **not** a specification of `partex`.
+
 Four penetration-testing projects sharing a common lineage but diverging
 dramatically in architecture, scope, and priorities. One is a Python script; the
 other three are forks of the same Go multi-agent platform operating at different
@@ -7,9 +9,9 @@ points on the feature-vs-integrity spectrum.
 
 ---
 
-Partex's proposed architecture is in [PLAN.md](PLAN.md). Its passive engine runs installed
+Partex's current architecture is in [`PLAN.md`](../../PLAN.md). Its passive engine runs installed
 Python checks and owns persistence. The CLAI2 reviewer runs generated Python in Monty and
-accesses stored evidence through run-scoped, redacted read tools. See [RUNTIME.md](RUNTIME.md)
+accesses stored evidence through run-scoped, redacted read tools. See [`RUNTIME.md`](../../RUNTIME.md)
 for the execution boundaries and milestone decisions.
 
 ## High-Level Comparison
