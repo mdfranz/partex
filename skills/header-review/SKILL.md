@@ -18,7 +18,7 @@ on API payloads or redirects do not generate false positives.
 ## Scope and Evidence Requirements
 
 - **Passive only.** Inspect only `HttpExchange` records already registered in the run's
-  `RunStore` or `ReviewBundle`.
+  `RunStore` or loaded from an offline bundle (`LoadedBundle` via `partex review`).
 - **Response-type classification.** Classify each exchange before evaluating controls:
   - **HTML document** (`Content-Type: text/html` with `2xx` status): evaluate HSTS, CSP,
     `X-Content-Type-Options`, `Set-Cookie`, and CORS.

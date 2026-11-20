@@ -28,7 +28,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.models.wrapper import WrapperModel
 
 # Later issues append 'tests.plugins.<module>' entries here without editing fixture bodies.
-pytest_plugins: list[str] = ['plugins.store']
+pytest_plugins: list[str] = ['plugins.store', 'plugins.target_app']
 
 
 class HermeticNetworkError(RuntimeError):

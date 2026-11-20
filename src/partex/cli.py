@@ -25,6 +25,7 @@ from . import engine
 from .engine import CheckSelectionError
 from .errors import PartexError
 from .export import IncludeSecretsWarning, export_run_data, write_run_export
+from .har_io import export_bundle, import_har
 from .ids import canonical_json
 from .registry import build_registry
 from .report import gather_report_payload, render_report_text
@@ -173,6 +174,26 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument('--include-secrets', action='store_true', help='emit secret_fields unredacted (warns)')
     show.add_argument('--out', default=None, help='write to this file instead of stdout')
     show.set_defaults(handler=_cmd_show)
+
+    import_har_cmd = subparsers.add_parser(
+        'import-har', parents=[common], help='build a passive-reviewable bundle from an operator-exported HAR'
+    )
+    import_har_cmd.add_argument('har', help='HAR file (operator capture; the MITM-free input path)')
+    import_har_cmd.add_argument('--out', required=True, help='bundle directory to write (bundle.json + evidence/)')
+    import_har_cmd.add_argument(
+        '--target', default=None, help='target origin entries must match (default: the most frequent request origin)'
+    )
+    import_har_cmd.set_defaults(handler=_cmd_import_har)
+
+    export_bundle_cmd = subparsers.add_parser(
+        'export-bundle', parents=[with_db], help="write a run's captures as a passive-reviewable bundle"
+    )
+    export_bundle_cmd.add_argument('run_id', help='run id (run_…)')
+    export_bundle_cmd.add_argument('--out', required=True, help='bundle directory to write (bundle.json + evidence/)')
+    export_bundle_cmd.add_argument(
+        '--include-secrets', action='store_true', help='emit secret_fields unredacted (warns)'
+    )
+    export_bundle_cmd.set_defaults(handler=_cmd_export_bundle)
 
     checks = subparsers.add_parser('checks', parents=[common], help='list installed checks')
     checks.add_argument('--json', action='store_true', help='JSON output even on a TTY')
@@ -448,6 +469,70 @@ def _cmd_show(args: argparse.Namespace) -> int:
         out.write_text(rendered, encoding='utf-8')
     else:
         sys.stdout.write(rendered)
+    return EXIT_OK
+
+
+# ── import-har / export-bundle (issue #28; DEPS.md §3.6) ─────────────────────
+
+
+def _cmd_import_har(args: argparse.Namespace) -> int:
+    result = import_har(args.har, args.out, target=args.target)
+    if _wants_json():
+        _print_json(
+            {
+                'root': str(result.root),
+                'base_url': result.base_url,
+                'target_name': result.target_name,
+                'evidence_count': result.evidence_count,
+                'dropped_out_of_scope': result.dropped_out_of_scope,
+                'dropped_hosts': result.dropped_hosts,
+                'dropped_oversize': result.dropped_oversize,
+                'duplicates': result.duplicates,
+            }
+        )
+    else:
+        print(f'imported {result.evidence_count} entries into {result.root} (target {result.base_url})')
+        drops: list[str] = []
+        if result.dropped_out_of_scope:
+            histogram = ', '.join(f'{host} {count}' for host, count in result.dropped_hosts.items())
+            drops.append(f'{result.dropped_out_of_scope} out-of-scope ({histogram})')
+        if result.dropped_oversize:
+            drops.append(f'{result.dropped_oversize} oversize')
+        if result.duplicates:
+            drops.append(f'{result.duplicates} duplicates')
+        if drops:
+            print(f'dropped: {", ".join(drops)}')
+        print(f'review it with: partex review {result.root} --checks header-security')
+    return EXIT_OK
+
+
+def _cmd_export_bundle(args: argparse.Namespace) -> int:
+    db_path = resolve_db_path(args.db)
+
+    async def go():
+        async with await RunReader.open(db_path) as reader:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', IncludeSecretsWarning)  # surfaced once below, on stderr
+                return await export_bundle(reader, args.run_id, args.out, include_secrets=args.include_secrets)
+
+    result = anyio.run(go)
+    if args.include_secrets:
+        print('warning: bundle includes unredacted secrets (--include-secrets)', file=sys.stderr)
+    if _wants_json():
+        _print_json(
+            {
+                'root': str(result.root),
+                'run_id': result.run_id,
+                'base_url': result.base_url,
+                'target_name': result.target_name,
+                'evidence_count': result.evidence_count,
+                'redacted': result.redacted,
+            }
+        )
+    else:
+        state = 'secrets redacted' if result.redacted else 'secrets included (--include-secrets)'
+        print(f'exported {result.evidence_count} evidence items from {result.run_id} into {result.root} ({state})')
+        print(f'review it with: partex review {result.root} --checks header-security')
     return EXIT_OK
 
 
