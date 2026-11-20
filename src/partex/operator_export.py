@@ -109,7 +109,12 @@ def render_markdown_report(payload: dict[str, Any], run_id: str) -> str:
     coverage: list[dict[str, Any]] = payload['coverage']
     if coverage:
         lines += ['', '## Coverage', '']
-        lines += [f'- {c["surface"]} / {c["risk_area"]}: {c["status"]}' for c in coverage]
+        lines += [
+            f'- {c["surface"]} / {c["risk_area"]}: {c["outcome"]} ({c["reason"]})'
+            if c['reason']
+            else f'- {c["surface"]} / {c["risk_area"]}: {c["outcome"]}'
+            for c in coverage
+        ]
     if payload['summary'] is not None:
         lines += ['', '## Summary', '', payload['summary']['narrative']]
     lines += ['', '_Secrets are redacted in this report._', '']
