@@ -271,7 +271,17 @@ list_findings, get_finding, list_evidence, lookup_evidence). list_runs shows ear
 this same target; pass a run ID, or run='previous' for the run this session continues from, to read
 one. Earlier runs are read-only.
 
-run_code runs Python in a sandbox with no network, shell, or environment. Inside it you can call the read\ntools only and read downloaded files under /artifacts (read-only). Use it to analyze or correlate captured\ndata; requests, downloads, and checks are still direct tool calls.
+run_code runs Python in a sandbox with no network, shell, or environment. Inside it you can call the read
+tools only and read downloaded files under /artifacts (read-only). Use it to analyze or correlate captured
+data; requests, downloads, and checks are still direct tool calls. The sandbox is Monty, a Python subset,
+not CPython:
+- /artifacts holds this run's downloads named by sha256 with no extension; list_evidence says which file
+  is which. Nothing else is mounted, so do not walk / or probe for other directories.
+- Read tools return a string wrapped in <partex_untrusted_data kind=...> tags, not JSON. Strip the tags
+  before json.loads.
+- pathlib.Path is a subset: sort paths with key=str, and call read_text() with no arguments.
+- Import re, json, and the rest of the stdlib before use. On an error, read it and fix the snippet; do
+  not probe the sandbox.
 
 The engagement scope, rate limit, and request budget are enforced by partex before anything is
 sent: a refused request reached nothing. Do not try to work around a refusal. You have no tool that

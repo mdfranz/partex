@@ -19,7 +19,7 @@ from pydantic_ai.models.test import TestModel
 from partex import engine, target
 from partex.agent_adapter import TesterDeps, build_tester_agent, run_agent
 from partex.agent_adapter.scope_plugin import ScopeControl, ScopePlugin, current_control
-from partex.agent_adapter.tester import CODE_MODE_TOOLS, MODEL_BODY_CHARS
+from partex.agent_adapter.tester import CODE_MODE_TOOLS, MODEL_BODY_CHARS, TESTER_INSTRUCTIONS
 from partex.agent_adapter.tools import REVIEWER_TOOLS
 from partex.engine import LiveSession, LiveSessionRefused, live_session
 from partex.errors import ScopeViolation
@@ -844,6 +844,44 @@ async def test_run_code_reads_artifacts_and_calls_read_tools(
     )
     assert '/api/v1/users' in out[0]
     assert 'findings' in out[1] or 'partex_untrusted_data' in out[1]
+
+
+def test_run_code_guidance_is_in_the_prompt() -> None:
+    """The Monty-vs-CPython guidance (#103) is present and no literal ``\\n`` leaked into the prompt."""
+    assert '\\n' not in TESTER_INSTRUCTIONS
+    for phrase in ('Monty, a Python subset', 'sha256', '<partex_untrusted_data', 'key=str', 'read_text()'):
+        assert phrase in TESTER_INSTRUCTIONS
+
+
+async def test_run_code_guidance_patterns_work_in_the_sandbox(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    """What the prompt tells the model to do (#103) actually runs in Monty."""
+    artifacts = tmp_path / 'arts'
+    artifacts.mkdir()
+    (artifacts / ('b' * 8)).write_text('two')
+    (artifacts / ('a' * 8)).write_text('one')
+    out, _ = await run_snippets(
+        tmp_store,
+        tmp_path,
+        target_app,
+        [
+            (
+                'import pathlib\n'
+                'files = sorted(pathlib.Path("/artifacts").iterdir(), key=str)\n'
+                'print([(p.name, p.read_text()) for p in files])'
+            ),
+            (
+                'import re, json\n'
+                'text = await list_findings()\n'
+                'inner = re.sub(r"</?partex_untrusted_data[^>]*>", "", text).strip()\n'
+                'print(type(json.loads(inner)).__name__)'
+            ),
+        ],
+        artifacts,
+    )
+    assert "[('aaaaaaaa', 'one'), ('bbbbbbbb', 'two')]" in out[0]
+    assert 'list' in out[1] or 'dict' in out[1]
 
 
 @pytest.mark.parametrize(
