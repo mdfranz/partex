@@ -1,6 +1,7 @@
 """Tests proving the hermetic test harness guards trip and allow safe local paths (PLAN §14)."""
 
 import socket
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -87,8 +88,13 @@ def test_allows_loopback_ipv4_connect() -> None:
             conn.close()
 
 
-def test_allows_unix_domain_socket(tmp_path: Path) -> None:
-    sock_path = str(tmp_path / 'local.sock')
+def test_allows_unix_domain_socket() -> None:
+    # AF_UNIX paths are limited to ~104 bytes; macOS's pytest tmp_path is longer, so use a short directory.
+    with tempfile.TemporaryDirectory(prefix='ptx', dir='/tmp') as directory:
+        _unix_socket_round_trip(str(Path(directory) / 's'))
+
+
+def _unix_socket_round_trip(sock_path: str) -> None:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
         server.bind(sock_path)
         server.listen(1)
