@@ -105,6 +105,7 @@ Available today (`uv run partex --help`):
 | `partex show <run-id>` | Export | Canonical export of a run, secrets redacted by default. |
 | `partex report` | Query | Cross-run rollup of findings, model spend and tool calls. |
 | `partex checks` | Registry | Installed checks, linked skills and frontmatter lint. |
+| `/report`, `/secrets` (inside `partex agent`) | Operator only | `/report [path]` writes a redacted Markdown report; `/secrets [path]` writes unredacted secret values to a `0600` file and never prints them. The model has no tool for either. |
 | `partex chat <run-id>` | Read-only + Model | Read-only review chat over a saved run (CLAI2 terminal). |
 | `partex agent <engagement>` | Active + Model | Live operator-directed session, including operator-confirmed `/scope add`; requires `--authorized`. |
 

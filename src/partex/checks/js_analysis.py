@@ -9,8 +9,8 @@ import hashlib
 import math
 import re
 from collections import Counter
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field
 from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
@@ -72,6 +72,9 @@ class JsAnalysisResult:
     sinks: tuple[tuple[str, int], ...]  # (sink_name, line)
     import_urls: tuple[str, ...]
     has_syntax_errors: bool
+    secret_values: tuple[tuple[str, int, str], ...] = field(default=(), repr=False)
+    """(key_or_kind, line, value) for the operator-only ``/secrets`` export. Never put these in a finding,
+    a log or a model-visible result."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,15 +228,17 @@ def _analyze(source: bytes) -> JsAnalysisResult:
     endpoints: set[str] = set()
     secrets: list[tuple[str, int]] = []
     seen_secrets: set[tuple[str, int]] = set()
+    secret_values: list[tuple[str, int, str]] = []
     versions: list[tuple[str, str, int]] = []
     sourcemaps: list[tuple[str, int]] = []
     sinks: list[tuple[str, int]] = []
     import_urls: list[str] = []
 
-    def add_secret(kind: str, line: int) -> None:
+    def add_secret(kind: str, line: int, value: str) -> None:
         entry = (kind, line)
         if entry not in seen_secrets:
             seen_secrets.add(entry)
+            secret_values.append((kind, line, value))
             secrets.append(entry)
 
     def check_key_value(key: str | None, value_node: tree_sitter.Node | None, line: int) -> None:
@@ -243,7 +248,7 @@ def _analyze(source: bytes) -> JsAnalysisResult:
         if val is None or not val.strip():
             return
         if _SECRET_KEY_RE.search(key) and _looks_like_secret(val):
-            add_secret(key, line)
+            add_secret(key, line, val)
         if _VERSION_KEY_RE.fullmatch(key) and _VERSION_VAL_RE.fullmatch(val.strip()):
             versions.append((key, val, line))
 
@@ -313,7 +318,7 @@ def _analyze(source: bytes) -> JsAnalysisResult:
             if _API_PATH_RE.match(val):
                 endpoints.add(_clean_endpoint(val))
             if _SECRET_VALUE_RE.match(val):
-                add_secret('token-literal', line)
+                add_secret('token-literal', line, val)
 
     return JsAnalysisResult(
         endpoints=tuple(sorted(endpoints)),
@@ -323,6 +328,7 @@ def _analyze(source: bytes) -> JsAnalysisResult:
         sinks=tuple(sorted(sinks)),
         import_urls=tuple(dict.fromkeys(import_urls)),
         has_syntax_errors=tree.root_node.has_error,
+        secret_values=tuple(sorted(secret_values)),
     )
 
 
@@ -356,6 +362,16 @@ def _read_js_source(item: Evidence) -> tuple[bytes | None, str, bool, str | None
     body = item.http.response.body
     assert body is not None
     return body.encode('utf-8'), item.http.request.url, item.http.response.body_note == 'truncated', None
+
+
+def iter_js_sources(evidence: Sequence[Evidence]) -> Iterator[tuple[str, str, bytes]]:
+    """Yield ``(evidence_id, url, source_bytes)`` for each readable JavaScript evidence item."""
+    for item in evidence:
+        if not _is_js_evidence(item):
+            continue
+        data, url, _, _ = _read_js_source(item)
+        if data is not None:
+            yield item.id, url, data
 
 
 def discover_js_urls(evidence: Sequence[Evidence], scope: Scope | None = None) -> JsDiscovery:
