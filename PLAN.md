@@ -325,6 +325,15 @@ tool — is validated immediately before send:
    `max_requests`. Exhaustion ends active work cleanly (`checks_complete` with what is
    committed), it is not an error.
 
+**Operator exports (`/report`, `/secrets`, #88).** Two more operator-only slash commands live in the
+same partex CLAI2 plugin as `/scope`; the model has no tool for either. `/report [path]` writes a
+Markdown report of the run from the redacted export payload (default
+`<db>.exports/<run_id>.report.md`). `/secrets [path]` writes the values partex redacts everywhere
+else, JavaScript secret candidates re-extracted from stored artifacts and the `secret_fields` of
+captured HTTP evidence, to a `0600` file in a `0700` directory. Both print only the path and counts,
+never a value, so nothing secret reaches the transcript or the model's context.
+`*.db.artifacts/` and `*.db.exports/` are gitignored.
+
 **Invalid TLS certificates (operator opt-in, #71).** The client verifies certificates against the
 original hostname by default. An operator can accept invalid ones (self-signed, private CA,
 expired, hostname mismatch) with the engagement's `tls: {"verify": false}` (optionally

@@ -629,3 +629,104 @@ async def test_failed_scope_persist_leaves_scope_snapshot_and_audit_unchanged(
         monkeypatch.setattr(target, '_default_resolver', lambda host: '127.0.0.1')
         assert 'extended' in await control.handle(['confirm'])
         assert (await session.request('GET', url)).http.response.status_code == 200
+
+
+# ── operator-only exports: /report and /secrets (issue #88) ───────────────────
+
+_SECRET_VALUE = 'sk-live-ABCDEF0123456789'
+_COOKIE_VALUE = 'sessionid=top-secret-cookie-value'
+
+
+async def _seed_secrets(session: LiveSession) -> None:
+    """A stored JS artifact holding a secret-shaped value, and an HTTP exchange with a Set-Cookie."""
+    import hashlib
+
+    from partex.ids import evidence_id
+    from partex.models import ArtifactAsset, ArtifactEvidence, HttpEvidence, HttpExchange, HttpRequest, HttpResponse
+    from partex.storage import artifact_dir
+
+    data = f"const cfg = {{apiKey: '{_SECRET_VALUE}'}}; fetch('/api/v1/users');".encode()
+    digest = hashlib.sha256(data).hexdigest()
+    directory = artifact_dir(session.store.path)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / digest).write_bytes(data)
+    artifact = ArtifactEvidence(
+        id='',
+        source='capture:test',
+        artifact=ArtifactAsset(
+            url='https://app.example.test/main.js',
+            status_code=200,
+            headers=[('Content-Type', 'application/javascript')],
+            content_type='application/javascript',
+            sha256=digest,
+            size_bytes=len(data),
+        ),
+        file_path=str(directory / digest),
+    )
+    cookie = HttpEvidence(
+        id='',
+        source='capture:test',
+        http=HttpExchange(
+            request=HttpRequest(method='GET', url='https://app.example.test/login', headers=[]),
+            response=HttpResponse(status_code=200, headers=[('Set-Cookie', _COOKIE_VALUE)], body='ok'),
+        ),
+        secret_fields=['$.http.response.headers[0][1]'],
+    )
+    for item in (artifact, cookie):
+        stored = item.model_copy(update={'id': evidence_id(item)})
+        await session.store.add_evidence(session.run_id, stored)
+
+
+async def test_report_and_secrets_commands_write_private_files_and_never_echo_values(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    import stat
+
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        await _seed_secrets(session)
+        control = ScopeControl(session)
+
+        said_report = await control.report([])
+        said_secrets = await control.secrets([])
+        for message in (said_report, said_secrets):  # what the operator sees (and could end up in a transcript)
+            assert _SECRET_VALUE not in message and _COOKIE_VALUE not in message
+        assert '1 JavaScript candidate' in said_secrets and '1 secret-marked' in said_secrets
+
+        report = next(p for p in (tmp_store.path.parent / f'{tmp_store.path.name}.exports').glob('*.report.md'))
+        secrets = next(p for p in (tmp_store.path.parent / f'{tmp_store.path.name}.exports').glob('*.secrets.md'))
+        report_text, secrets_text = report.read_text(), secrets.read_text()
+        assert f'# Partex report: {session.run_id}' in report_text and '## Evidence' in report_text
+        assert _SECRET_VALUE not in report_text and _COOKIE_VALUE not in report_text  # reports stay redacted
+        assert _SECRET_VALUE in secrets_text and _COOKIE_VALUE in secrets_text and 'UNREDACTED' in secrets_text
+        assert 'apiKey' in secrets_text and 'Set-Cookie' in secrets_text
+        for path in (report, secrets):
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(report.parent.stat().st_mode) == 0o700
+
+
+async def test_report_and_secrets_accept_an_explicit_path_and_report_failures(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        control = ScopeControl(session)
+        dest = tmp_path / 'out' / 'my-report.md'
+        assert str(dest) in await control.report([str(dest)])
+        assert dest.is_file()
+        blocker = tmp_path / 'afile'
+        blocker.write_text('x')
+        assert 'not written' in await control.secrets([str(blocker / 'nested.md')])  # parent is a file
+
+
+def test_the_model_has_no_export_tool_and_the_commands_exist_for_the_operator() -> None:
+    names = set(build_tester_agent('test')._function_toolset.tools)  # pyright: ignore[reportPrivateUsage]
+    assert not {name for name in names if 'report' in name or 'secret' in name or 'export' in name}
+
+
+async def test_plugin_registers_the_export_commands(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        token = current_control.set(ScopeControl(session))
+        try:
+            commands = ScopePlugin.__new__(ScopePlugin).get_commands()
+        finally:
+            current_control.reset(token)
+    assert {command.name for command in commands} == {'scope', 'report', 'secrets'}
