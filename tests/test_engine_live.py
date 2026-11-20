@@ -11,7 +11,15 @@ from pathlib import Path
 
 import pytest
 
-from partex.engine import CheckSelectionError, run_test, select_active_checks
+from partex.engine import (
+    CheckFailed,
+    CheckSelectionError,
+    default_live_checks,
+    installed_checks,
+    order_for_live_run,
+    run_test,
+    select_live_checks,
+)
 from partex.storage import RunStore
 
 # tmp_store comes from the root conftest's pytest_plugins (registered there by #8).
@@ -76,17 +84,39 @@ def engagement_dir(tmp_path: Path, server: object, **scope: object) -> Path:
 # ── Selection ────────────────────────────────────────────────────────────────
 
 
-def test_select_active_rejects_passive_and_unknown() -> None:
-    registry = {'header-security': object(), 'version-disclosure': object()}
+def test_select_live_accepts_passive_and_active_and_rejects_unknown() -> None:
+    class Passive:
+        check_id = 'p'
+
+        def review(self, evidence: object) -> list[object]:
+            return []
+
+    class Active:
+        check_id = 'a'
+
+        async def probe(self, evidence: object, client: object) -> list[object]:
+            return []
+
+    registry = {'p': Passive(), 'a': Active(), 'neither': object()}
+    selected = select_live_checks(registry, ['p', 'a', 'p'])
+    assert [c.check_id for c in selected] == ['p', 'a']  # ordered, de-duplicated
+    active, passive = order_for_live_run(selected)
+    assert [c.check_id for c in active] == ['a'] and [c.check_id for c in passive] == ['p']
     with pytest.raises(CheckSelectionError) as excinfo:
-        select_active_checks(registry, ['header-security'])
-    assert excinfo.value.rule_code == 'not-active'
+        select_live_checks(registry, ['nope'])
+    assert excinfo.value.rule_code == 'unknown-check' and 'available' in str(excinfo.value)
     with pytest.raises(CheckSelectionError) as excinfo:
-        select_active_checks(registry, ['nope'])
-    assert excinfo.value.rule_code == 'unknown-check'
-    with pytest.raises(CheckSelectionError) as excinfo:
-        select_active_checks(registry, [])
+        select_live_checks(registry, [])
     assert excinfo.value.rule_code == 'empty-selection'
+    with pytest.raises(CheckSelectionError) as excinfo:
+        select_live_checks(registry, ['neither'])
+    assert excinfo.value.rule_code == 'not-runnable'
+
+
+def test_default_live_checks_are_every_passive_check_plus_version_disclosure() -> None:
+    defaults = default_live_checks(installed_checks())
+    assert 'header-security' in defaults and defaults[-1] == 'version-disclosure'
+    assert 'js-analysis' in defaults
 
 
 async def test_selection_is_ordered_and_deduplicated(target_app: object, tmp_path: Path, tmp_store: RunStore) -> None:
@@ -281,3 +311,109 @@ async def test_scope_violating_probe_is_a_check_failure(
     assert result.state == 'checks_failed'
     assert result.failed_check == 'out-of-scope'
     assert 'scope' in (result.error or '')
+
+
+# ── Passive checks in the live pipeline (issue #51) ───────────────────────────
+
+
+async def test_live_run_runs_active_then_passive_and_passive_sees_probe_traffic(
+    target_app: object, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    registry = installed_checks()
+    seen: dict[str, int] = {}
+
+    class Spy:
+        """A passive check that records how many exchanges it was shown, and when it ran."""
+
+        check_id = 'spy'
+        version = '1'
+        title = 'spy'
+        description = 'spy'
+
+        def applies_to(self, evidence: Sequence[object]) -> bool:
+            return True
+
+        def review(self, evidence: Sequence[object]) -> list[object]:
+            seen['exchanges'] = len(evidence)
+            return []
+
+    result = await run_test(
+        engagement_dir(tmp_path, target_app),
+        tmp_store,
+        ['spy', 'header-security', 'version-disclosure'],  # passive first in the selection
+        authorized=True,
+        registry={**registry, 'spy': Spy()},
+    )
+    assert result.state == 'checks_complete'
+    kinds = {finding.check_id for finding in result.findings}
+    assert {'header-security', 'version-disclosure'} <= kinds  # both kinds of findings from one live run
+    assert seen['exchanges'] == result.evidence_count > 1  # passive saw the baseline *and* the probes
+    captured_ids = {item.id for item in await tmp_store.evidence(result.run_id)}
+    for finding in result.findings:
+        assert set(finding.evidence_ids) <= captured_ids  # cites only this run's evidence
+    assert result.selected_checks == ('spy', 'header-security', 'version-disclosure')
+
+
+async def test_passive_check_that_does_not_apply_is_reported_skipped(
+    target_app: object, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    class Never:
+        check_id = 'never'
+        version = '1'
+        title = 'never'
+        description = 'never'
+
+        def applies_to(self, evidence: Sequence[object]) -> bool:
+            return False
+
+        def review(self, evidence: Sequence[object]) -> list[object]:
+            raise AssertionError('must not run')
+
+    result = await run_test(
+        engagement_dir(tmp_path, target_app), tmp_store, ['never'], authorized=True, registry={'never': Never()}
+    )
+    assert result.state == 'checks_complete' and result.skipped_checks == ('never',)
+
+
+async def test_raising_passive_check_fails_the_run_but_keeps_earlier_findings_and_evidence(
+    target_app: object, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    registry = installed_checks()
+
+    class Boom:
+        check_id = 'boom'
+        version = '1'
+        title = 'boom'
+        description = 'boom'
+
+        def applies_to(self, evidence: Sequence[object]) -> bool:
+            return True
+
+        def review(self, evidence: Sequence[object]) -> list[object]:
+            raise RuntimeError('kaput')
+
+    result = await run_test(
+        engagement_dir(tmp_path, target_app),
+        tmp_store,
+        ['version-disclosure', 'header-security', 'boom'],
+        authorized=True,
+        registry={**registry, 'boom': Boom()},
+    )
+    assert result.state == 'checks_failed' and result.failed_check == 'boom' and 'kaput' in (result.error or '')
+    stored = await tmp_store.findings(result.run_id)
+    assert {f.check_id for f in stored} >= {'version-disclosure', 'header-security'}  # committed before the failure
+    assert len(await tmp_store.evidence(result.run_id)) == result.evidence_count > 0
+    assert CheckFailed  # the failure surfaced as CheckFailed rather than a crash
+
+
+async def test_passive_checks_still_run_after_the_budget_ends_active_work(
+    target_app: object, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    result = await run_test(
+        engagement_dir(tmp_path, target_app, max_requests=1),
+        tmp_store,
+        ['version-disclosure', 'header-security'],
+        authorized=True,
+    )
+    assert result.state == 'checks_complete' and result.budget_exhausted
+    assert 'header-security' in {f.check_id for f in result.findings}  # baseline alone is enough for passive review

@@ -436,6 +436,19 @@ def test_live_test_text_output(capsys: pytest.CaptureFixture[str], db: Path, mon
     assert 'unauthorized' in err
 
 
+def test_live_test_checks_and_all_are_mutually_exclusive_and_unknown_ids_fail(
+    capsys: pytest.CaptureFixture[str], db: Path
+) -> None:
+    engagement = str(FIXTURES / 'engagements' / 'valid')
+    code, _, err = run(capsys, 'test', engagement, '--all', '--checks', 'header-security', '--db', str(db))
+    assert code == cli.EXIT_USAGE and 'not allowed with' in err
+    code, _, err = run(capsys, 'test', engagement, '--authorized', '--checks', 'nope', '--db', str(db))
+    assert code == cli.EXIT_FATAL and 'unknown check' in err and 'available:' in err
+    assert (
+        run(capsys, 'test', engagement, '--checks', 'header-security', '--db', str(db))[0] == cli.EXIT_FATAL
+    )  # passive IDs now accepted, then the gate refuses
+
+
 # ── Logfire opt-in (§11.1) ────────────────────────────────────────────────────
 
 
