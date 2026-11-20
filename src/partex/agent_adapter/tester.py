@@ -12,6 +12,7 @@ Each ``http_request`` / ``run_check`` call is recorded in ``tool_calls`` without
 
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urljoin
 
@@ -19,6 +20,8 @@ import anyio.to_thread
 from pydantic_ai import Agent, ModelRetry, RunContext, ToolFailed
 from pydantic_ai.framing import wrap
 from pydantic_ai.models import Model
+from pydantic_ai_harness.code_mode import CodeMode, CodeModeResourceLimits
+from pydantic_monty import MountDir
 
 from ..checks.js_analysis import discover_js_urls
 from ..engine import CheckFailed, CheckSelectionError, LiveSession
@@ -222,6 +225,37 @@ async def discover_js_assets(ctx: RunContext[TesterDeps]) -> str:
 
 TESTER_TOOLS = (*REVIEWER_TOOLS, http_request, download_asset, discover_js_assets, run_check)
 
+CODE_MODE_TOOLS = tuple(tool.__name__ for tool in REVIEWER_TOOLS)
+"""The only tools a ``run_code`` snippet can call (#83): the pure, redacted read tools. Everything that can
+reach the target (``http_request``, ``download_asset``, ``run_check``) stays a direct tool call, so scope,
+rate limit, budget, and audit apply to it exactly as before."""
+
+ARTIFACTS_MOUNT = '/artifacts'
+CODE_MODE_MAX_TOOL_CALLS = 50
+CODE_MODE_LIMITS = CodeModeResourceLimits(max_duration_seconds=10.0, max_memory=256 * 1024 * 1024)
+
+
+def code_mode_capability(artifacts_dir: Path | None) -> CodeMode[TesterDeps]:
+    """Monty ``run_code`` over the read tools and, if given, the run's downloaded artifacts (read-only).
+
+    No ``os_access`` (no env, clock, or other filesystem), no network, no shell; fresh sandbox state per
+    session (#83, RUNTIME.md).
+    """
+    mount = (
+        MountDir(virtual_path=ARTIFACTS_MOUNT, host_path=artifacts_dir, mode='read-only')
+        if artifacts_dir is not None
+        else None
+    )
+    return CodeMode(
+        tools=list(CODE_MODE_TOOLS),
+        eager=True,
+        mount=mount,
+        os_access=None,
+        max_tool_calls=CODE_MODE_MAX_TOOL_CALLS,
+        resource_limits=CODE_MODE_LIMITS,
+    )
+
+
 TESTER_INSTRUCTIONS = """\
 You help a security operator test one target interactively, under a written authorization. The
 operator directs; you send the requests they ask for, run checks, and explain what the evidence
@@ -234,6 +268,8 @@ partex checks, e.g. js-analysis; the only way a finding is recorded), and the re
 list_findings, get_finding, list_evidence, lookup_evidence). list_runs shows earlier sessions against
 this same target; pass a run ID, or run='previous' for the run this session continues from, to read
 one. Earlier runs are read-only.
+
+run_code runs Python in a sandbox with no network, shell, or environment. Inside it you can call the read\ntools only and read downloaded files under /artifacts (read-only). Use it to analyze or correlate captured\ndata; requests, downloads, and checks are still direct tool calls.
 
 The engagement scope, rate limit, and request budget are enforced by partex before anything is
 sent: a refused request reached nothing. Do not try to work around a refusal. You have no tool that
@@ -251,8 +287,13 @@ already covered. Prefer a few short bullets over prose. Offer detail rather than
 result is large, give the headline and the IDs and ask before expanding. Never pad to look thorough."""
 
 
-def build_tester_agent(model: Model | str, *, briefing: str | None = None) -> Agent[TesterDeps, str]:
-    """Construct the tester for *model*; *briefing* (shown at session start) is added as framed context."""
+def build_tester_agent(
+    model: Model | str, *, briefing: str | None = None, artifacts_dir: Path | None = None
+) -> Agent[TesterDeps, str]:
+    """Construct the tester for *model*; *briefing* (shown at session start) is added as framed context.
+
+    *artifacts_dir* is mounted read-only at ``/artifacts`` inside ``run_code`` (#83).
+    """
     instructions = TESTER_INSTRUCTIONS
     if briefing:
         instructions += (
@@ -266,6 +307,7 @@ def build_tester_agent(model: Model | str, *, briefing: str | None = None) -> Ag
         output_type=str,
         instructions=instructions,
         tools=TESTER_TOOLS,
+        capabilities=[code_mode_capability(artifacts_dir)],
         defer_model_check=True,
     )
 

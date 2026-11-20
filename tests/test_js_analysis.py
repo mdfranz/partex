@@ -3,6 +3,7 @@
 import hashlib
 import json
 import stat
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ import httpx2
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 
 from partex.agent_adapter import TesterDeps, build_tester_agent
 from partex.checks.js_analysis import (
@@ -310,7 +311,19 @@ def _scripted(calls: list[tuple[str, dict[str, Any]]]) -> FunctionModel:
             return ModelResponse(parts=[ToolCallPart(name, args, tool_call_id=f'call_{index}')])
         return ModelResponse(parts=[TextPart('done')])
 
-    return FunctionModel(respond)
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        # Code Mode (#83) makes the tester agent stream its model requests.
+        for part in respond(messages, info).parts:
+            if isinstance(part, TextPart):
+                yield part.content
+            elif isinstance(part, ToolCallPart):
+                yield {
+                    0: DeltaToolCall(
+                        name=part.tool_name, json_args=part.args_as_json_str(), tool_call_id=part.tool_call_id
+                    )
+                }
+
+    return FunctionModel(respond, stream_function=stream)
 
 
 def _tool_returns(messages: list[ModelMessage]) -> list[ToolReturnPart]:

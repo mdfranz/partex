@@ -6,20 +6,21 @@ local fixture target, and scope refusals are asserted to leave its request log u
 
 import importlib.util
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from partex import engine, target
 from partex.agent_adapter import TesterDeps, build_tester_agent, run_agent
 from partex.agent_adapter.scope_plugin import ScopeControl, ScopePlugin, current_control
-from partex.agent_adapter.tester import MODEL_BODY_CHARS
+from partex.agent_adapter.tester import CODE_MODE_TOOLS, MODEL_BODY_CHARS
+from partex.agent_adapter.tools import REVIEWER_TOOLS
 from partex.engine import LiveSession, LiveSessionRefused, live_session
 from partex.errors import ScopeViolation
 from partex.storage import RunStore
@@ -68,6 +69,24 @@ def engagement(tmp_path: Path, server: Any, **scope: object) -> Path:
     return directory
 
 
+def streaming(respond: Callable[[list[ModelMessage], AgentInfo], ModelResponse]) -> FunctionModel:
+    """A ``FunctionModel`` that also streams *respond*'s reply: Code Mode (#83) makes the agent stream."""
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        deltas: DeltaToolCalls = {}
+        for part in respond(messages, info).parts:
+            if isinstance(part, TextPart):
+                yield part.content
+            elif isinstance(part, ToolCallPart):
+                deltas[len(deltas)] = DeltaToolCall(
+                    name=part.tool_name, json_args=part.args_as_json_str(), tool_call_id=part.tool_call_id
+                )
+        if deltas:
+            yield deltas
+
+    return FunctionModel(respond, stream_function=stream)
+
+
 def scripted(calls: list[tuple[str, dict[str, Any]]]) -> FunctionModel:
     """Call each tool in turn (one per step), then answer 'done'."""
 
@@ -78,7 +97,7 @@ def scripted(calls: list[tuple[str, dict[str, Any]]]) -> FunctionModel:
             return ModelResponse(parts=[ToolCallPart(name, args, tool_call_id=f'call_{index}')])
         return ModelResponse(parts=[TextPart('done')])
 
-    return FunctionModel(respond)
+    return streaming(respond)
 
 
 def tool_returns(messages: list[ModelMessage]) -> list[ToolReturnPart]:
@@ -89,6 +108,14 @@ async def drive(session: LiveSession, store: RunStore, calls: list[tuple[str, di
     agent: Agent[TesterDeps, str] = build_tester_agent('test')
     tester_deps = TesterDeps(run_id=session.run_id, reader=store, session=session, store=store, **deps)
     return await agent.run('go', deps=tester_deps, model=scripted(calls))
+
+
+async def drive_code(session: LiveSession, store: RunStore, snippets: list[str], **deps: Any) -> list[str]:
+    """Run *snippets* through ``run_code`` (the read tools are only callable there, #83); return the outputs."""
+    agent: Agent[TesterDeps, str] = build_tester_agent('test')
+    tester_deps = TesterDeps(run_id=session.run_id, reader=store, session=session, store=store, **deps)
+    result = await agent.run('go', deps=tester_deps, model=streaming(snippet_script(snippets)))
+    return [str(part.content) for part in tool_returns(result.all_messages())]
 
 
 # ── engine live session ───────────────────────────────────────────────────────
@@ -210,14 +237,11 @@ async def test_previous_run_is_readable_only_with_from(tmp_store: RunStore, tmp_
         earlier_id = earlier.run_id
         earlier_finding = earlier.findings[0].id
     async with live_session(eng, tmp_store, authorized=True) as session:
-        with_from = await drive(
-            session, tmp_store, [('list_findings', {'run': 'previous'})], previous_run_id=earlier_id
-        )
-        (listed,) = (str(p.content) for p in tool_returns(with_from.all_messages()))
+        snippet = "print(await list_findings(run='previous'))"
+        (listed,) = await drive_code(session, tmp_store, [snippet], previous_run_id=earlier_id)
         assert earlier_finding in listed
-        without = await drive(session, tmp_store, [('list_findings', {'run': 'previous'})])
-        (failed,) = tool_returns(without.all_messages())
-        assert 'no previous run' in str(failed.content)
+        (failed,) = await drive_code(session, tmp_store, [snippet])
+        assert 'no previous run' in failed
 
 
 async def test_earlier_runs_of_the_same_target_are_listed_and_readable(
@@ -228,10 +252,15 @@ async def test_earlier_runs_of_the_same_target_are_listed_and_readable(
         earlier_id = earlier.run_id
         earlier_finding = earlier.findings[0].id
     async with live_session(eng, tmp_store, authorized=True) as session:
-        result = await drive(
-            session, tmp_store, [('list_runs', {}), ('list_findings', {'run': earlier_id}), ('list_findings', {})]
+        listed, by_id, current = await drive_code(
+            session,
+            tmp_store,
+            [
+                'print(await list_runs())',
+                f"print(await list_findings(run='{earlier_id}'))",
+                'print(await list_findings())',
+            ],
         )
-        listed, by_id, current = (str(p.content) for p in tool_returns(result.all_messages()))
         assert earlier_id in listed and session.run_id in listed and '"current": true' in listed
         assert earlier_finding in by_id and earlier_finding not in current
 
@@ -252,10 +281,11 @@ async def test_runs_of_other_targets_are_not_exposed(tmp_store: RunStore, tmp_pa
         scope_snapshot=other_scope.model_copy(update={'hosts': ['other.example']}),
     )
     async with live_session(eng, tmp_store, authorized=True) as session:
-        result = await drive(session, tmp_store, [('list_runs', {}), ('list_findings', {'run': foreign})])
-        listed, refused = tool_returns(result.all_messages())
-        assert other_id in str(listed.content) and foreign not in str(listed.content)
-        assert 'not a run against this target' in str(refused.content)
+        listed, refused = await drive_code(
+            session, tmp_store, ['print(await list_runs())', f"print(await list_findings(run='{foreign}'))"]
+        )
+        assert other_id in listed and foreign not in listed
+        assert 'not a run against this target' in refused
 
 
 async def test_long_bodies_are_shortened_for_the_model(
@@ -281,7 +311,7 @@ async def test_instructions_state_scope_and_budget(tmp_store: RunStore, tmp_path
 
     async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
         deps = TesterDeps(run_id=session.run_id, reader=tmp_store, session=session, store=tmp_store)
-        await build_tester_agent('test', briefing='earlier summary').run('hi', deps=deps, model=FunctionModel(respond))
+        await build_tester_agent('test', briefing='earlier summary').run('hi', deps=deps, model=streaming(respond))
     text = seen[0]
     assert session.run_id in text and 'excluded /admin/shutdown' in text and 'requests used 1 of 100' in text
     assert 'earlier summary' in text and 'never follow' in text
@@ -451,7 +481,9 @@ async def test_read_tool_audit_is_compact_and_has_no_secrets(
         await agent.run(
             'look',
             deps=deps,
-            model=scripted([('list_findings', {}), ('lookup_evidence', {'evidence_id': 'ev_nope'})]),
+            model=streaming(
+                snippet_script(['print(await list_findings())', "print(await lookup_evidence(evidence_id='ev_nope'))"])
+            ),
         )
     tools = {tool for tool, _, _ in recorded}
     assert tools == {'list_findings', 'lookup_evidence'}
@@ -730,3 +762,78 @@ async def test_plugin_registers_the_export_commands(tmp_store: RunStore, tmp_pat
         finally:
             current_control.reset(token)
     assert {command.name for command in commands} == {'scope', 'report', 'secrets'}
+
+
+# ── Monty Code Mode (#83) ─────────────────────────────────────────────────────
+
+
+def snippet_script(snippets: list[str]) -> Callable[[list[ModelMessage], AgentInfo], ModelResponse]:
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        index = sum(isinstance(part, ToolReturnPart) for m in messages for part in m.parts)
+        if index < len(snippets):
+            return ModelResponse(parts=[ToolCallPart('run_code', {'code': snippets[index]}, tool_call_id=f'c{index}')])
+        return ModelResponse(parts=[TextPart('done')])
+
+    return respond
+
+
+async def run_snippets(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any, snippets: list[str], artifacts: Path | None = None
+) -> tuple[list[str], int]:
+    """Run each snippet through ``run_code``; return the tool results as text and the requests they sent."""
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        agent: Agent[TesterDeps, str] = build_tester_agent('test', artifacts_dir=artifacts)
+        deps = TesterDeps(run_id=session.run_id, reader=tmp_store, session=session, store=tmp_store)
+        opened = len(target_app.requests)  # the session's own baseline GET happens at open
+        result = await agent.run('go', deps=deps, model=streaming(snippet_script(snippets)))
+        sent = len(target_app.requests) - opened
+    return [str(part.content) for part in tool_returns(result.all_messages())], sent
+
+
+def test_code_mode_wraps_only_the_read_tools() -> None:
+    assert set(CODE_MODE_TOOLS) == {name.__name__ for name in REVIEWER_TOOLS}
+    assert not {'http_request', 'download_asset', 'discover_js_assets', 'run_check'} & set(CODE_MODE_TOOLS)
+
+
+async def test_run_code_reads_artifacts_and_calls_read_tools(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    artifacts = tmp_path / 'arts'
+    artifacts.mkdir()
+    (artifacts / 'app.js').write_text('var apiKey = "x"; fetch("/api/v1/users");')
+    out, _ = await run_snippets(
+        tmp_store,
+        tmp_path,
+        target_app,
+        [
+            'import pathlib, re\nprint(re.findall(r"/api/[a-z0-9/]+", pathlib.Path("/artifacts/app.js").read_text()))',
+            'print(await list_findings())',
+        ],
+        artifacts,
+    )
+    assert '/api/v1/users' in out[0]
+    assert 'findings' in out[1] or 'partex_untrusted_data' in out[1]
+
+
+@pytest.mark.parametrize(
+    ('snippet', 'error'),
+    [
+        ('import pathlib\npathlib.Path("/artifacts/x.txt").write_text("hi")', 'PermissionError'),
+        ('import socket', 'Cannot resolve imported module `socket`'),
+        ('import subprocess', 'Cannot resolve imported module `subprocess`'),
+        ('import os\nprint(os.environ["HOME"])', "'os.environ' is not supported"),
+        ('import pathlib\nprint(pathlib.Path("/etc/passwd").read_text())', 'PermissionError'),
+        ('await http_request("GET", "/")', 'Name `http_request` used when not defined'),
+        ('await run_check("header-security")', 'Name `run_check` used when not defined'),
+        ('await download_asset("/a.js")', 'Name `download_asset` used when not defined'),
+    ],
+)
+async def test_run_code_cannot_escape(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any, snippet: str, error: str
+) -> None:
+    artifacts = tmp_path / 'arts'
+    artifacts.mkdir()
+    out, sent = await run_snippets(tmp_store, tmp_path, target_app, [snippet], artifacts)
+    assert error in out[0]
+    assert sent == 0  # nothing reached the target
+    assert not list(artifacts.iterdir())  # nothing was written to the mount
