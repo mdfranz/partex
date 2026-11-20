@@ -23,6 +23,8 @@ from rich.markdown import Markdown
 from rich.rule import Rule
 
 from .. import engine
+from ..bundle import LoadedBundle, load_bundle
+from ..probes import plan_seed_probes, plan_summary, seed_lines
 from ..storage import RunReader, RunStore
 from .reviewer import BRIEFING_PROMPT, build_reviewer_agent
 from .scope_plugin import SCOPE_PLUGIN_FACTORY, SCOPE_PLUGIN_ID, ScopeControl, current_control
@@ -64,6 +66,11 @@ async def brief(model: Model | str, deps: ReviewDeps, console: Console) -> str |
     return result.output
 
 
+def _load_seed_bundle(path: Path) -> LoadedBundle:
+    """Validate the operator's seed bundle before any store or socket opens (fail fast, #76)."""
+    return load_bundle(path)
+
+
 async def _pause_on(summary: str | None, console: Console) -> None:
     """CLAI2 takes over the screen and shows only its own transcript; let the operator read the briefing
     first. It stays in the terminal's scrollback above the session."""
@@ -94,6 +101,7 @@ async def run_agent(
     insecure: bool = False,
     checks: tuple[str, ...] = ('version-disclosure',),
     from_run: str | None = None,
+    bundle: Path | None = None,
     briefing: bool = True,
     console: Console | None = None,
 ) -> str:
@@ -101,15 +109,32 @@ async def run_agent(
 
     The engine does the gates (``--authorized``, E1–E7, credentials) before any socket, the baseline
     capture, and the selected active *checks*; the session's run is finalized when the chat ends.
+    With *bundle*, the imported capture's surface (method+URL candidates, scope-filtered against
+    this engagement, #76) is exposed to the session read-only — shown to the operator, included in
+    the agent's context, and recorded as a ``seed_surface`` audit row; nothing is sent automatically.
     Returns the session's run ID.
     """
     console = console or Console()
+    seed_bundle = await anyio.to_thread.run_sync(_load_seed_bundle, bundle) if bundle is not None else None
     async with await RunStore.open(db_path) as store:
         if from_run is not None:
             await store.get_run(from_run)  # unknown run → StoreError(run-not-found) before any socket
         async with engine.live_session(
             engagement_path, store, authorized=authorized, insecure=insecure, checks=checks
         ) as session:
+            seed_plan = None
+            if seed_bundle is not None:
+                seed_plan = await anyio.to_thread.run_sync(lambda: plan_seed_probes(seed_bundle, session.engagement))
+                lines = seed_lines(seed_plan)
+                console.print(f'[dim]seed surface from {bundle}: {plan_summary(seed_plan)}[/]')
+                # Read-only exposure, still audited: what the session was told about (paths only,
+                # no credentials — candidates never carry header values).
+                await store.record_tool_call(
+                    session.run_id,
+                    'seed_surface',
+                    {'bundle': str(bundle), 'candidates': len(lines)},
+                    {'paths': list(lines)},
+                )
             # Record every model turn (briefing, chat) and every read-tool call to this run (§7, #54),
             # so the run is auditable offline, not only through the gateway/Logfire.
             recorded = UsageRecordingModel(model, store=store, run_id=session.run_id, role='tester')
@@ -124,6 +149,7 @@ async def run_agent(
                 audit=audit,
                 session=session,
                 store=store,
+                seed_surface=seed_lines(seed_plan) if seed_plan is not None else (),
             )
             summary = await brief(recorded, deps, console) if briefing else None
             await _pause_on(summary, console)

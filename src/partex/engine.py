@@ -47,6 +47,7 @@ from .models import (
     Scope,
     TlsPolicy,
 )
+from .probes import SeedPlan, plan_seed_probes
 from .scope import extend_scope
 from .storage import RunState, RunStore, artifact_dir
 from .target import DEFAULT_MAX_ASSET_BYTES, ScopedHttpClient
@@ -336,6 +337,13 @@ class TestResult:
     """True when ``max_requests`` ended active work cleanly (``checks_complete``, not failure)."""
     coverage: tuple[CoverageEntry, ...] = field(default=())
     """What the checks report they did or did not exercise (``check_observed`` ledger entries, #53)."""
+    seeded_count: int = 0
+    """Seeded bundle-surface probes actually sent (#76); ``0`` when no ``seed_bundle`` was given."""
+    seed_plan: SeedPlan | None = None
+    """The plan behind :attr:`seeded_count` — candidates plus every reported drop count."""
+    seed_skipped: int = 0
+    """Seeds refused by the scope gate at send time. Always 0: candidates are pre-filtered with
+    the same gate, so a non-zero value means a logic bug, not a target condition."""
 
 
 def is_active_check(check: Any) -> bool:
@@ -444,12 +452,17 @@ async def run_test(
     authorized: bool,
     insecure: bool = False,
     registry: Mapping[str, Any] | None = None,
+    seed_bundle: str | Path | None = None,
+    max_seed: int | None = None,
 ) -> TestResult:
     """Run the live path against the engagement at *engagement_path*.
 
     Order of gates, all before any socket: check selection, the ``--authorized``
-    flag (E2 CLI half), engagement validation (E1–E7), and credential presence
-    (E4/E7 run-start half). Then: baseline capture, active checks in selection
+    flag (E2 CLI half), engagement validation (E1–E7), credential presence
+    (E4/E7 run-start half), and — when *seed_bundle* is given — bundle validation and
+    planning (candidates are method+URL only, scope-filtered against this engagement, #76).
+    Then: baseline capture, seeded probes (in bundle registration order, so active checks'
+    ``applies_to`` sees the seeded evidence), active checks in selection
     order, then passive checks over everything captured, evidence committed **at capture time** and findings **per check** —
     a crash or budget exhaustion keeps everything already paid for (§6.1).
     """
@@ -474,6 +487,14 @@ async def run_test(
         engagement = await _check_live_gates(engagement_path, authorized=authorized, insecure=insecure)
     except _GateRefused as exc:
         return await invalid(exc.rule_code or 'engagement-invalid', str(exc))
+
+    seed_plan: SeedPlan | None = None
+    if seed_bundle is not None:
+        try:
+            loaded_seed = await anyio.to_thread.run_sync(lambda: load_bundle(seed_bundle))
+        except ValidationFailed as exc:
+            return await invalid(exc.rule_code or 'bundle-invalid', f'seed bundle {seed_bundle}: {exc}')
+        seed_plan = plan_seed_probes(loaded_seed, engagement, limit=max_seed)
 
     run_id = await store.create_run(
         input_kind='engagement',
@@ -501,9 +522,25 @@ async def run_test(
         captured.append(evidence)
 
     client = ScopedHttpClient(engagement, source=f'capture:{run_id}', on_capture=on_capture)
+    seeded = 0
+    seed_skipped = 0
     try:
         try:
             await client.request('GET', engagement.target.base_url)
+            # Seeded bundle-surface probes (#76): right after the baseline so active checks see
+            # the seeded evidence. Candidates are pre-filtered with the same scope gate, so a
+            # refusal here is a logic bug — counted, never a run failure (the #80 lesson).
+            if seed_plan is not None:
+                for candidate in seed_plan.candidates:
+                    try:
+                        await client.request(candidate.method, candidate.url)
+                        seeded += 1
+                    except BudgetExhausted:
+                        # Rule 5: exhaustion ends seeding cleanly, like active work.
+                        budget_exhausted = True
+                        break
+                    except ScopeViolation:
+                        seed_skipped += 1
             for check in active:
                 if not check.applies_to(captured):
                     skipped.append(check.check_id)
@@ -557,6 +594,9 @@ async def run_test(
                 failed_check=exc.check_id,
                 skipped_checks=tuple(skipped),
                 coverage=tuple(coverage),
+                seeded_count=seeded,
+                seed_plan=seed_plan,
+                seed_skipped=seed_skipped,
             )
         skipped.extend(check.check_id for check in selected if check.check_id not in done)
         await store.set_state(run_id, 'checks_complete')
@@ -571,6 +611,9 @@ async def run_test(
             skipped_checks=tuple(skipped),
             budget_exhausted=budget_exhausted,
             coverage=tuple(coverage),
+            seeded_count=seeded,
+            seed_plan=seed_plan,
+            seed_skipped=seed_skipped,
         )
     finally:
         await client.aclose()
