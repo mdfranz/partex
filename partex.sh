@@ -72,6 +72,8 @@ if [[ -n $LIST ]]; then  # saved runs + available sandboxes; resume any with --r
   echo "sandboxes:"
   partex sandboxes --json | python3 -c 'import json, sys
 for s in json.load(sys.stdin):
+    if "available" not in s:
+        continue
     mark = "ok" if s["available"] else "no"
     print("  %-12s [%s]  %s" % (s["name"], mark, s["detail"]))'
   exit 0
