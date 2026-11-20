@@ -66,9 +66,20 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)  # absolute, resolved b
 cd "$SCRIPT_DIR"
 partex() { uv run --quiet partex "$@"; }
 
-if [[ -n $LIST ]]; then  # saved runs: what was tested, when, how it ended; resume any with --resume RUN_ID
-  [[ -e $DB ]] || { echo "no database at $DB (nothing saved yet)" >&2; exit 1; }
-  partex runs --db "$DB" --json | python3 "$SCRIPT_DIR/scripts/list_runs.py" "$DB" "$0"
+if [[ -n $LIST ]]; then  # saved runs + available sandboxes; resume any with --resume RUN_ID
+  if [[ -e $DB ]]; then
+    partex runs --db "$DB" --json | python3 "$SCRIPT_DIR/scripts/list_runs.py" "$DB" "$0"
+  else
+    echo "no database at $DB (nothing saved yet)"
+  fi
+  echo
+  echo "sandboxes:"
+  partex sandboxes --json | python3 -c 'import json, sys
+for s in json.load(sys.stdin):
+    if "available" not in s:
+        continue
+    mark = "ok" if s["available"] else "no"
+    print("  %-12s [%s]  %s" % (s["name"], mark, s["detail"]))'
   exit 0
 fi
 
