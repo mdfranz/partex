@@ -49,7 +49,7 @@ from .models import (
 )
 from .probes import SeedPlan, plan_seed_probes
 from .scope import extend_scope
-from .storage import RunState, RunStore, artifact_dir
+from .storage import RunState, RunStore, run_artifact_dir
 from .target import DEFAULT_MAX_ASSET_BYTES, ScopedHttpClient
 
 ENTRY_POINT_GROUP = 'partex.checks'
@@ -686,7 +686,7 @@ class LiveSession:
     ) -> ArtifactEvidence:
         """Stream a scoped GET-only asset to disk and register its ``ArtifactEvidence``."""
         return await self.client.download_asset(
-            url, dest_dir=artifact_dir(self._store.path), headers=headers, max_bytes=max_bytes
+            url, dest_dir=run_artifact_dir(self._store.path, self.run_id), headers=headers, max_bytes=max_bytes
         )
 
     async def extend_scope(self, spec: str, *, confirmed_by: str) -> tuple[Scope, Scope]:

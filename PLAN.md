@@ -802,6 +802,8 @@ the agent in the CLAI2 [`chat()` terminal client](pydantic-ai/src/pydantic_clai2
 via `agent.run()`/`agent.iter()` with `UsageLimits` inside `async with agent:`, never through
 the terminal:
 
+**Live-session Code Mode (#83):** `partex agent` attaches Monty `CodeMode` to the tester over the read tools only, with a read-only `/artifacts` mount and no network, shell, or env; the scoped HTTP, download and `run_check` tools stay direct calls outside the sandbox (RUNTIME.md).
+
 **`chat <run-id>` — read-only reviewer** (unchanged in scope from the earlier design): three
 run-scoped read tools (`list_findings`, `get_finding`, `lookup_evidence`), `load_plugins=False`,
 skill playbooks registered as on-demand deferred capabilities (`defer_loading=True`),

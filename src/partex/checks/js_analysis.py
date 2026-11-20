@@ -336,13 +336,17 @@ def _read_artifact(item: ArtifactEvidence) -> tuple[bytes | None, str | None]:
     """Read a stored artifact only if it is the content-addressed file ``partex`` wrote for it.
 
     ``file_path`` is not part of the evidence ID, so imported or edited evidence could name any local file.
-    The file must sit in an ``*.artifacts`` directory, be named by the declared sha256, and hash to it.
+    The file must sit in an ``*.artifacts`` directory (directly, or in a ``<run_id>`` subdirectory of it),
+    be named by the declared sha256, and hash to it.
     """
     if item.file_path is None:
         return None, 'artifact has no local file_path'
     path = Path(item.file_path)
     digest = item.artifact.sha256
-    if path.name != digest or not path.parent.name.endswith('.artifacts'):
+    in_artifacts = path.parent.name.endswith('.artifacts') or (
+        path.parent.parent.name.endswith('.artifacts') and path.parent.name.startswith('run_')
+    )
+    if path.name != digest or not in_artifacts:
         return None, 'artifact file_path is not a partex artifact file'
     try:
         data = path.read_bytes()

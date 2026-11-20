@@ -3,6 +3,7 @@
 import hashlib
 import json
 import stat
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ import httpx2
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 
 from partex.agent_adapter import TesterDeps, build_tester_agent
 from partex.checks.js_analysis import (
@@ -34,7 +35,7 @@ from partex.models import (
     redact,
 )
 from partex.registry import build_registry
-from partex.storage import RunStore, artifact_dir
+from partex.storage import RunStore, artifact_dir, run_artifact_dir
 from partex.target import MAX_BODY_BYTES, ScopedHttpClient
 
 pytest_plugins = ['plugins.target_server']
@@ -310,7 +311,19 @@ def _scripted(calls: list[tuple[str, dict[str, Any]]]) -> FunctionModel:
             return ModelResponse(parts=[ToolCallPart(name, args, tool_call_id=f'call_{index}')])
         return ModelResponse(parts=[TextPart('done')])
 
-    return FunctionModel(respond)
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        # Code Mode (#83) makes the tester agent stream its model requests.
+        for part in respond(messages, info).parts:
+            if isinstance(part, TextPart):
+                yield part.content
+            elif isinstance(part, ToolCallPart):
+                yield {
+                    0: DeltaToolCall(
+                        name=part.tool_name, json_args=part.args_as_json_str(), tool_call_id=part.tool_call_id
+                    )
+                }
+
+    return FunctionModel(respond, stream_function=stream)
 
 
 def _tool_returns(messages: list[ModelMessage]) -> list[ToolReturnPart]:
@@ -393,7 +406,8 @@ async def test_agent_download_asset_and_js_analysis_e2e(tmp_store: RunStore, tmp
             assert 'sk-fixture-secret-value-9876543210' not in check_text
 
             # Stored artifact file exists beside the DB with mode 0600.
-            artifacts = list(artifact_dir(tmp_store.path).iterdir())
+            assert not [p for p in artifact_dir(tmp_store.path).iterdir() if p.is_file()]  # nothing flat
+            artifacts = list(run_artifact_dir(tmp_store.path, session.run_id).iterdir())
             assert len(artifacts) == 1
             assert stat.S_IMODE(artifacts[0].stat().st_mode) == 0o600
 
