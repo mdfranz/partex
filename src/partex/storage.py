@@ -18,6 +18,8 @@ Deviations from the PLAN §7 DDL, both required by existing contracts:
 """
 
 import json
+import os
+import re
 import sqlite3
 import threading
 import uuid
@@ -284,6 +286,39 @@ def run_artifact_dir(db_path: Path, run_id: str) -> Path:
     The database-wide directory also holds earlier runs' downloads, possibly from other targets.
     """
     return artifact_dir(db_path) / run_id
+
+
+def run_reports_dir(db_path: Path, run_id: str) -> Path:
+    """This run's own report directory, ``<db>.reports/<run_id>/`` (mode 0700): where ``save_report`` writes (#104).
+
+    Kept apart from ``<db>.artifacts`` so model-written text never sits beside, or overwrites, captured evidence.
+    """
+    return db_path.parent / f'{db_path.name}.reports' / run_id
+
+
+REPORT_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}')
+"""A report name: a plain file stem, no path separators, no leading dot, at most 64 characters."""
+MAX_REPORT_BYTES = 256 * 1024
+
+
+def write_report(directory: Path, name: str, content: str) -> Path:
+    """Write ``<directory>/<name>.md`` (file ``0600``, directory ``0700``), refusing to overwrite; return the path.
+
+    Raises ``ValueError`` for a bad name or oversize content and ``FileExistsError`` for a same-name report.
+    """
+    if REPORT_NAME.fullmatch(name) is None:
+        raise ValueError('report name must be 1-64 characters of letters, digits, dot, underscore or hyphen')
+    data = content.encode()
+    if len(data) > MAX_REPORT_BYTES:
+        raise ValueError(f'report is {len(data)} bytes; the limit is {MAX_REPORT_BYTES}')
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(directory.parent, 0o700)
+    os.chmod(directory, 0o700)
+    path = directory / f'{name}.md'
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'wb') as handle:
+        handle.write(data)
+    return path
 
 
 def _now() -> str:
