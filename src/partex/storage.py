@@ -278,6 +278,14 @@ def artifact_dir(db_path: Path) -> Path:
     return db_path.parent / f'{db_path.name}.artifacts'
 
 
+def run_artifact_dir(db_path: Path, run_id: str) -> Path:
+    """This run's own artifact directory, ``<db>.artifacts/<run_id>/``: what a ``run_code`` sandbox may read (#83).
+
+    The database-wide directory also holds earlier runs' downloads, possibly from other targets.
+    """
+    return artifact_dir(db_path) / run_id
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec='microseconds')
 

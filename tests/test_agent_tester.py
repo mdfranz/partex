@@ -837,3 +837,33 @@ async def test_run_code_cannot_escape(
     assert error in out[0]
     assert sent == 0  # nothing reached the target
     assert not list(artifacts.iterdir())  # nothing was written to the mount
+
+
+async def test_run_code_sees_only_this_runs_artifacts(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    """The mount is the run's own directory: earlier runs' downloads (maybe other targets') stay invisible (#83)."""
+    from partex.storage import artifact_dir, run_artifact_dir
+
+    first = tmp_path / 'first'
+    first.mkdir()
+    async with live_session(engagement(first, target_app), tmp_store, authorized=True, checks=()) as session:
+        shared = artifact_dir(tmp_store.path)
+        mine = run_artifact_dir(tmp_store.path, session.run_id)
+        other = shared / 'run_someoneelse'
+        for directory in (mine, other):
+            directory.mkdir(parents=True)
+        (shared / 'flat-old-download').write_text('from an earlier run, flat layout')
+        (other / 'other-run-file').write_text('another run, maybe another target')
+        (mine / 'mine.js').write_text('var mine = 1;')
+    out, _ = await run_snippets(
+        tmp_store,
+        tmp_path,
+        target_app,
+        [
+            'import pathlib\nprint(sorted(p.name for p in pathlib.Path("/artifacts").rglob("*")))',
+            'import pathlib\nprint(pathlib.Path("/artifacts/../flat-old-download").read_text())',
+            'import pathlib\nprint(pathlib.Path("/artifacts/run_someoneelse/other-run-file").read_text())',
+        ],
+        mine,
+    )
+    assert "['mine.js']" in out[0]
+    assert 'earlier run' not in out[1] and 'another run' not in out[2]

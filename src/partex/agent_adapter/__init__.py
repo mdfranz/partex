@@ -25,7 +25,7 @@ from rich.rule import Rule
 from .. import engine
 from ..bundle import LoadedBundle, load_bundle
 from ..probes import plan_seed_probes, plan_summary, seed_lines
-from ..storage import RunReader, RunStore, artifact_dir
+from ..storage import RunReader, RunStore, run_artifact_dir
 from .reviewer import BRIEFING_PROMPT, build_reviewer_agent
 from .scope_plugin import SCOPE_PLUGIN_FACTORY, SCOPE_PLUGIN_ID, ScopeControl, current_control
 from .tester import TesterDeps, build_tester_agent
@@ -153,7 +153,7 @@ async def run_agent(
             )
             summary = await brief(recorded, deps, console) if briefing else None
             await _pause_on(summary, console)
-            artifacts = artifact_dir(store.path)
+            artifacts = run_artifact_dir(store.path, session.run_id)
             artifacts.mkdir(mode=0o700, parents=True, exist_ok=True)
             agent = build_tester_agent(recorded, briefing=summary, artifacts_dir=artifacts)
             # The operator-only /scope command is a CLAI2 plugin (slash commands exist only as plugins). A

@@ -22,14 +22,15 @@ benchmark below remain open.
 Use Monty-backed `CodeMode` for `chat <run-id>` by attaching `CodeMode(tools=['list_findings', 'get_finding', 'lookup_evidence'], eager=True, ..., mount=None, os_access=None)` directly on `partex_reviewer_agent` while keeping CLAI2's `run.code_mode` and `run.speculative_code_mode` disabled (so CLAI2's `WorkspaceCodeMode` does not mount the host working directory). Generated Python can group findings, compare captured headers, and correlate records using `list_findings`, `get_finding`, and `lookup_evidence`. Host tools enforce the current run ID and redact their results before returning them to the snippet. Give the sandbox no filesystem mounts, credentials, shell, network access, or store handles. CLAI2's plugin loading remains disabled.
 
 **Live session (`partex agent`, #83).** `partex_tester_agent` carries `CodeMode(tools=[...read tools...],
-eager=True, mount=MountDir('/artifacts', <db>.artifacts, 'read-only'), os_access=None,
+eager=True, mount=MountDir('/artifacts', <db>.artifacts/<run_id>, 'read-only'), os_access=None,
 max_tool_calls=50, resource_limits=...)`. The model gets one `run_code` tool whose Python runs in Monty
 with no network, shell, env, clock, or filesystem beyond the read-only `/artifacts` mount; `import socket`
 and `import subprocess` fail and a write to the mount raises `PermissionError`. Only the pure read tools
 (`list_runs`, `list_findings`, `get_finding`, `list_evidence`, `list_coverage`, `lookup_evidence`) are wrapped, so
 they are callable *only* from `run_code`. `http_request`, `download_asset`, `discover_js_assets` and `run_check`
 stay direct tool calls: scope, rate limit, budget and audit apply exactly as before, and a snippet that names
-one gets an undefined-name error. Wrapped calls still write their `tool_calls` audit rows. CLAI2's
+one gets an undefined-name error. Downloads are stored per run (`<db>.artifacts/<run_id>/`) and only the
+current run's directory is mounted, so earlier runs' files (possibly from other targets) stay invisible. Wrapped calls still write their `tool_calls` audit rows. CLAI2's
 `run.code_mode` stays off and `coder` stays unloaded. State is fresh per session.
 
 Start with fresh sandbox state for each review invocation. State may live across turns within

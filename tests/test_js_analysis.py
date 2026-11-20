@@ -35,7 +35,7 @@ from partex.models import (
     redact,
 )
 from partex.registry import build_registry
-from partex.storage import RunStore, artifact_dir
+from partex.storage import RunStore, artifact_dir, run_artifact_dir
 from partex.target import MAX_BODY_BYTES, ScopedHttpClient
 
 pytest_plugins = ['plugins.target_server']
@@ -406,7 +406,8 @@ async def test_agent_download_asset_and_js_analysis_e2e(tmp_store: RunStore, tmp
             assert 'sk-fixture-secret-value-9876543210' not in check_text
 
             # Stored artifact file exists beside the DB with mode 0600.
-            artifacts = list(artifact_dir(tmp_store.path).iterdir())
+            assert not [p for p in artifact_dir(tmp_store.path).iterdir() if p.is_file()]  # nothing flat
+            artifacts = list(run_artifact_dir(tmp_store.path, session.run_id).iterdir())
             assert len(artifacts) == 1
             assert stat.S_IMODE(artifacts[0].stat().st_mode) == 0o600
 
