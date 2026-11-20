@@ -91,6 +91,7 @@ async def run_agent(
     model: Model | str,
     *,
     authorized: bool,
+    insecure: bool = False,
     checks: tuple[str, ...] = ('version-disclosure',),
     from_run: str | None = None,
     briefing: bool = True,
@@ -106,7 +107,9 @@ async def run_agent(
     async with await RunStore.open(db_path) as store:
         if from_run is not None:
             await store.get_run(from_run)  # unknown run → StoreError(run-not-found) before any socket
-        async with engine.live_session(engagement_path, store, authorized=authorized, checks=checks) as session:
+        async with engine.live_session(
+            engagement_path, store, authorized=authorized, insecure=insecure, checks=checks
+        ) as session:
             # Record every model turn (briefing, chat) and every read-tool call to this run (§7, #54),
             # so the run is auditable offline, not only through the gateway/Logfire.
             recorded = UsageRecordingModel(model, store=store, run_id=session.run_id, role='tester')

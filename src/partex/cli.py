@@ -34,6 +34,10 @@ from .telemetry import LOG_FILE_ENV, announce, configure_telemetry, resolve_log_
 
 DB_ENV = 'PARTEX_DB'
 LOGFIRE_ENV = 'PARTEX_LOGFIRE'
+INSECURE_HELP = (
+    'accept invalid TLS certificates (self-signed, expired, hostname mismatch) for this run; also '
+    'engagement tls.verify=false. Recorded on the run, never available to the model'
+)
 
 EXIT_OK = 0
 EXIT_FATAL = 1
@@ -146,6 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     test.add_argument('engagement', help='engagement directory or engagement.json path')
     test.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
+    test.add_argument('--insecure', action='store_true', help=INSECURE_HELP)
     test.add_argument(
         '--checks', default='version-disclosure', help='comma-separated, ordered check ids (default: %(default)s)'
     )
@@ -233,6 +238,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent.add_argument('engagement', help='engagement directory or engagement.json path')
     agent.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
+    agent.add_argument('--insecure', action='store_true', help=INSECURE_HELP)
     agent.add_argument(
         '--model', required=True, help='as for chat: a model string, or a bare name with --gateway-route'
     )
@@ -317,7 +323,9 @@ def _cmd_test(args: argparse.Namespace) -> int:
 
     async def go() -> engine.TestResult:
         async with await RunStore.open(db_path) as store:
-            result = await engine.run_test(args.engagement, store, checks, authorized=bool(args.authorized))
+            result = await engine.run_test(
+                args.engagement, store, checks, authorized=bool(args.authorized), insecure=bool(args.insecure)
+            )
             await _write_export(store, result.run_id, args.out)
             return result
 
@@ -605,6 +613,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             db_path,
             model,
             authorized=bool(args.authorized),
+            insecure=bool(args.insecure),
             checks=checks,
             from_run=args.from_run,
             briefing=not args.no_briefing,

@@ -39,7 +39,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal, Self
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import anyio
 import httpx2
@@ -60,7 +60,7 @@ from partex.models import (
     Scope,
     get_header,
 )
-from partex.scope import check_url, parse_scoped_url, validate_scope
+from partex.scope import check_url, normalize_host, parse_scoped_url, validate_scope
 
 type Resolver = Callable[[str], str]
 
@@ -210,12 +210,23 @@ class _PinnedTransport(httpx2.AsyncHTTPTransport):
     resolved once per run; the ``Host`` header (set when the request was built)
     and the ``sni_hostname`` extension keep the original hostname for header
     routing, SNI, and certificate verification.
+
+    Certificates are verified unless ``is_insecure(host)`` says the operator accepted invalid TLS for that
+    host (#71); only then is a second, non-verifying transport used, so one host never weakens another.
     """
 
-    def __init__(self, pins: dict[str, str], *, inner: httpx2.AsyncBaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        pins: dict[str, str],
+        *,
+        inner: httpx2.AsyncBaseTransport | None = None,
+        is_insecure: Callable[[str], bool] | None = None,
+    ) -> None:
         super().__init__(trust_env=False)
         self._pins = pins
         self._inner = inner
+        self._is_insecure = is_insecure
+        self._insecure_transport: httpx2.AsyncHTTPTransport | None = None
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         host = request.url.host
@@ -225,7 +236,16 @@ class _PinnedTransport(httpx2.AsyncHTTPTransport):
             request.extensions = {**request.extensions, 'sni_hostname': host}
         if self._inner is not None:
             return await self._inner.handle_async_request(request)
+        if request.url.scheme == 'https' and self._is_insecure is not None and self._is_insecure(host):
+            if self._insecure_transport is None:
+                self._insecure_transport = httpx2.AsyncHTTPTransport(trust_env=False, verify=False)
+            return await self._insecure_transport.handle_async_request(request)
         return await super().handle_async_request(request)
+
+    async def aclose(self) -> None:
+        if self._insecure_transport is not None:
+            await self._insecure_transport.aclose()
+        await super().aclose()
 
 
 class ScopedHttpClient:
@@ -272,7 +292,7 @@ class ScopedHttpClient:
             budget if budget is not None else RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps)
         )
         self._client = httpx2.AsyncClient(
-            transport=_PinnedTransport(self._pins, inner=transport),
+            transport=_PinnedTransport(self._pins, inner=transport, is_insecure=self._tls_unverified),
             follow_redirects=False,
             timeout=timeout,
         )
@@ -281,6 +301,19 @@ class ScopedHttpClient:
     def requests_spent(self) -> int:
         """Number of in-scope requests sent under this client's budget."""
         return self._budget.requests_spent
+
+    def _tls_unverified(self, host: str) -> bool:
+        """Whether the operator accepted invalid TLS for *host* (engagement ``tls``; never a model choice)."""
+        tls = self._engagement.tls
+        if tls.verify:
+            return False
+        try:
+            normalized = normalize_host(host)
+        except ScopeViolation:
+            return False
+        if not tls.insecure_hosts:
+            return True  # verify:false with no list means every in-scope host
+        return normalized in {normalize_host(h) for h in tls.insecure_hosts}
 
     def set_scope(self, scope: Scope) -> None:
         """Swap in an operator-extended scope; every later request is gated by it (budgets are unchanged).
@@ -438,6 +471,7 @@ class ScopedHttpClient:
             artifact=asset,
             file_path=str(final_path),
             secret_fields=secret_fields,
+            tls_verified=not (urlsplit(url).scheme == 'https' and self._tls_unverified(urlsplit(url).hostname or '')),
         )
         evidence = evidence.model_copy(update={'id': evidence_id(evidence)})
         if self._on_artifact is not None:
@@ -532,6 +566,7 @@ class ScopedHttpClient:
             source=self._source,
             http=HttpExchange(request=request_model, response=response_model),
             secret_fields=self._secret_fields(request_model, body, response_model),
+            tls_verified=not (urlsplit(url).scheme == 'https' and self._tls_unverified(urlsplit(url).hostname or '')),
         )
         evidence = evidence.model_copy(update={'id': evidence_id(evidence)})
         if self._on_capture is not None:

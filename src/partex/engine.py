@@ -20,6 +20,7 @@ opens sockets only through the scoped target client.
 import hashlib
 import importlib.metadata
 import os
+import sys
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -35,7 +36,7 @@ from .checks import HeaderInput, PassiveCheck
 from .engagement import MANIFEST_NAME, check_credentials_available, load_engagement
 from .errors import BudgetExhausted, PartexError, ScopeViolation, ValidationFailed
 from .ids import finding_id
-from .models import ArtifactEvidence, Engagement, Evidence, Finding, FindingDraft, HttpEvidence, Scope
+from .models import ArtifactEvidence, Engagement, Evidence, Finding, FindingDraft, HttpEvidence, Scope, TlsPolicy
 from .scope import extend_scope
 from .storage import RunState, RunStore, artifact_dir
 from .target import DEFAULT_MAX_ASSET_BYTES, ScopedHttpClient
@@ -325,7 +326,29 @@ class _GateRefused(PartexError):
     """A live gate failed before any socket; the caller records the run as ``invalid``."""
 
 
-async def _check_live_gates(engagement_path: str | Path, *, authorized: bool) -> Engagement:
+def _apply_insecure(engagement: Engagement, insecure: bool) -> Engagement:
+    """``--insecure`` turns verification off for this run, keeping any ``insecure_hosts`` the file lists."""
+    if not insecure or not engagement.tls.verify:
+        return engagement
+    return engagement.model_copy(update={'tls': TlsPolicy(verify=False, insecure_hosts=engagement.tls.insecure_hosts)})
+
+
+async def _record_tls_policy(store: RunStore, run_id: str, engagement: Engagement) -> None:
+    """Audit and announce a run that does not verify certificates; silent for the strict default (#71)."""
+    tls = engagement.tls
+    if tls.verify:
+        return
+    hosts = tls.insecure_hosts or list(engagement.scope.hosts)
+    await store.record_tool_call(
+        run_id,
+        'tls_verify_disabled',
+        {'hosts': hosts, 'all_in_scope_hosts': not tls.insecure_hosts},
+        {'verified': False},
+    )
+    print(f'partex: warning: TLS certificate verification is DISABLED for {", ".join(hosts)}', file=sys.stderr)
+
+
+async def _check_live_gates(engagement_path: str | Path, *, authorized: bool, insecure: bool = False) -> Engagement:
     """The live gates, all before any socket: ``--authorized`` (E2 CLI half), E1–E7, credentials present."""
     if not authorized:
         raise _GateRefused('--authorized is required for every live command', rule_code='unauthorized')
@@ -336,7 +359,7 @@ async def _check_live_gates(engagement_path: str | Path, *, authorized: bool) ->
     missing = check_credentials_available(engagement)
     if missing:
         raise _GateRefused(f'credential env vars not set: {", ".join(missing)}', rule_code='credential-missing')
-    return engagement
+    return _apply_insecure(engagement, insecure)
 
 
 async def run_test(
@@ -345,6 +368,7 @@ async def run_test(
     checks: Sequence[str],
     *,
     authorized: bool,
+    insecure: bool = False,
     registry: Mapping[str, Any] | None = None,
 ) -> TestResult:
     """Run the live path against the engagement at *engagement_path*.
@@ -372,7 +396,7 @@ async def run_test(
         return TestResult(run_id, 'invalid', selected_ids, error=message, rule_code=rule_code)
 
     try:
-        engagement = await _check_live_gates(engagement_path, authorized=authorized)
+        engagement = await _check_live_gates(engagement_path, authorized=authorized, insecure=insecure)
     except _GateRefused as exc:
         return await invalid(exc.rule_code or 'engagement-invalid', str(exc))
 
@@ -385,6 +409,7 @@ async def run_test(
         authorized=True,
         scope_snapshot=engagement.scope,
     )
+    await _record_tls_policy(store, run_id, engagement)
 
     captured: list[Evidence] = []
     findings: list[Finding] = []
@@ -591,6 +616,7 @@ async def live_session(
     store: RunStore,
     *,
     authorized: bool,
+    insecure: bool = False,
     checks: Sequence[str] = (),
     registry: Mapping[str, Any] | None = None,
 ) -> AsyncGenerator[LiveSession]:
@@ -605,7 +631,7 @@ async def live_session(
     selected = select_active_checks(registry, checks) if checks else []
     selected_ids = tuple(check.check_id for check in selected)
     try:
-        engagement = await _check_live_gates(engagement_path, authorized=authorized)
+        engagement = await _check_live_gates(engagement_path, authorized=authorized, insecure=insecure)
     except _GateRefused as exc:
         run_id = await store.create_run(
             input_kind='engagement',
@@ -626,6 +652,7 @@ async def live_session(
         authorized=True,
         scope_snapshot=engagement.scope,
     )
+    await _record_tls_policy(store, run_id, engagement)
     session = LiveSession(run_id=run_id, engagement=engagement, registry=registry, store=store)
     try:
         await session.request('GET', engagement.target.base_url)

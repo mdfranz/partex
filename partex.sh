@@ -15,6 +15,8 @@
 #   -f, --from RUN_ID        let the new session read an earlier run [RUN_ID]
 #       --resume [RUN_ID]    read-only chat on an earlier run, no traffic and no target URL needed; the
 #                            latest run if RUN_ID is omitted [CHAT_ONLY=1, RUN_ID]
+#   -k, --insecure           accept invalid TLS certificates (self-signed, expired, mismatch) for the target
+#                            [PARTEX_INSECURE=1]; recorded on the run, never available to the model
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
 #       --no-tui             run `partex test` + show only [NO_TUI=1]
 #   -h, --help
@@ -35,6 +37,7 @@ ROUTE_SET=${PARTEX_GATEWAY_ROUTE+1}
 DB=${PARTEX_DB:-partex-probe.db}
 ATTESTATION=${PARTEX_ATTESTATION:-}
 LIST=
+INSECURE=${PARTEX_INSECURE:+1}
 RESUME=${CHAT_ONLY:+1}
 NO_TUI=${NO_TUI:-}
 RUN_ID=${RUN_ID:-}   # with --resume: the run to open; otherwise the run to read (--from)
@@ -46,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     -d|--db) DB=${2?$1 needs a value}; shift 2 ;;
     -f|--from) RUN_ID=${2?$1 needs a value}; shift 2 ;;
     --resume) RESUME=1; shift; if [[ ${1:-} == run_* ]]; then RUN_ID=$1; shift; fi ;;
+    -k|--insecure) INSECURE=1; shift ;;
     -l|--list) LIST=1; shift ;;
     --no-tui) NO_TUI=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -90,6 +94,7 @@ fi
 host=${BASH_REMATCH[2]} port=${BASH_REMATCH[4]:-$([[ ${BASH_REMATCH[1]} == https ]] && echo 443 || echo 80)}
 json_str() { python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$1"; }
 
+TLS_JSON=; [[ -z $INSECURE ]] || TLS_JSON='"tls": {"verify": false},'
 eng=$(mktemp -d "${TMPDIR:-/tmp}/partex-engagement.XXXXXX")
 trap 'rc=$?; rm -rf "$eng"; exit $rc' EXIT  # keep the exit status (bash 3.2 would return the trap's)
 cat > "$eng/engagement.json" <<JSON
@@ -104,6 +109,7 @@ cat > "$eng/engagement.json" <<JSON
     "max_rps": 2,
     "max_requests": 50
   },
+  $TLS_JSON
   "authorization": {"attestation": $(json_str "$ATTESTATION"), "operator": $(json_str "${USER:-operator}")},
   "suggested_checks": ["version-disclosure"]
 }
