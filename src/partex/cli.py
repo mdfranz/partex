@@ -29,6 +29,7 @@ from .har_io import export_bundle, import_har
 from .ids import canonical_json
 from .registry import build_registry
 from .report import gather_report_payload, render_report_text
+from .sandboxes import detect_sandboxes, sandboxes_as_dicts
 from .storage import RunReader, RunRecord, RunStore
 from .telemetry import LOG_FILE_ENV, announce, configure_telemetry, resolve_log_path
 
@@ -245,6 +246,12 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument('--from', dest='from_run', default=None, help='earlier run the agent may read (run_…)')
     agent.add_argument('--no-briefing', action='store_true', help='open the chat without the opening summary')
     agent.set_defaults(handler=_cmd_agent)
+
+    sandboxes = subparsers.add_parser(
+        'sandboxes', parents=[common], help='detect which sandboxes (monty, docker, podman, bubblewrap) are usable'
+    )
+    sandboxes.add_argument('--json', action='store_true', help='output JSON')
+    sandboxes.set_defaults(handler=_cmd_sandboxes)
     return parser
 
 
@@ -646,6 +653,17 @@ def _cmd_verify(args: argparse.Namespace) -> int:
         print(f'detail: {result.detail}')
         print(f'counterevidence: {result.counterevidence}')
     # A recorded verdict is a completed command (§6): confirmed, not_reproduced and inconclusive all exit 0.
+    return EXIT_OK
+
+
+def _cmd_sandboxes(args: argparse.Namespace) -> int:
+    statuses = detect_sandboxes()
+    if _wants_json(args.json):
+        _print_json(sandboxes_as_dicts(statuses))
+    else:
+        for status in statuses:
+            mark = 'available' if status.available else 'unavailable'
+            print(f'{status.name:<12} {mark:<12} {status.detail}')
     return EXIT_OK
 
 
