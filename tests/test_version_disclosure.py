@@ -11,6 +11,7 @@ from partex.checks.version_disclosure import (
     UNKNOWN_PROBE_PATH,
     version_disclosure_check,
 )
+from partex.errors import ScopeViolation
 from partex.ids import evidence_id
 from partex.models import Finding, FindingDraft, HttpEvidence, HttpExchange, HttpRequest, HttpResponse
 
@@ -176,3 +177,117 @@ def test_verify_match_error_page_finding() -> None:
     fixed = exchange('/x', status=404, body='Not Found')
     assert version_disclosure_check.verify_match(finding, original, still_leaky) is True
     assert version_disclosure_check.verify_match(finding, original, fixed) is False
+
+
+# ── Probe anchoring and dedup (#80) ──────────────────────────────────────────
+
+
+class ScopeRefusingClient(CannedClient):
+    """A fake client that raises ScopeViolation for URLs outside *allowed* prefixes."""
+
+    def __init__(self, responses: list[HttpEvidence], allowed: tuple[str, ...]) -> None:
+        super().__init__(responses)
+        self._allowed = allowed
+        self.refused: list[str] = []
+
+    async def request(self, method: str, url: str, *, headers: object = None, body: object = None) -> HttpEvidence:
+        path = url.split('fixture.test:8443', 1)[1]
+        if not any(
+            path == prefix or path.startswith(prefix if prefix.endswith('/') else prefix + '/')
+            for prefix in self._allowed
+        ):
+            self.refused.append(f'{method} {url}')
+            raise ScopeViolation(f'{path} is outside the engagement scope')
+        return await super().request(method, url)
+
+
+async def test_probe_anchors_under_narrow_path_prefixes() -> None:
+    """A /api/v1-scoped engagement probes /api/v1/... — never the refused site root (#80)."""
+    baseline = exchange('/api/v1/x', headers={'server': 'FixtureTarget/2.3.1'})
+    client = ScopeRefusingClient(
+        [
+            exchange('/api/v1/robots.txt'),
+            exchange(f'/api/v1{UNKNOWN_PROBE_PATH}', status=404, body='Fatal error: /var/www/x'),
+        ],
+        allowed=('/api/v1',),
+    )
+    drafts = await version_disclosure_check.probe([baseline], client)
+    assert client.requested == [
+        f'GET {BASE_URL}/api/v1/robots.txt',
+        f'GET {BASE_URL}/api/v1{UNKNOWN_PROBE_PATH}',
+    ]
+    assert not client.refused  # anchored probes are in scope on the first try
+    assert any('stack trace' in draft.title.lower() for draft in drafts)
+
+
+async def test_probe_falls_back_to_root_when_anchor_refused() -> None:
+    """An excluded anchored path falls back to the site-root probe before giving up."""
+    baseline = exchange('/api/x', headers={'server': 'FixtureTarget/2.3.1'})
+    served = {
+        '/robots.txt': exchange('/robots.txt'),
+        UNKNOWN_PROBE_PATH: exchange(UNKNOWN_PROBE_PATH, status=404),
+    }
+
+    class AnchorsRefused:
+        def __init__(self) -> None:
+            self.requested: list[str] = []
+
+        async def request(self, method: str, url: str, *, headers: object = None, body: object = None) -> HttpEvidence:
+            self.requested.append(f'{method} {url}')
+            path = url.split('fixture.test:8443', 1)[1]
+            if path.startswith('/api'):
+                raise ScopeViolation(f'{path} is outside the engagement scope')
+            return served[path]
+
+    client = AnchorsRefused()
+    drafts = await version_disclosure_check.probe([baseline], client)
+    assert client.requested == [
+        f'GET {BASE_URL}/api/robots.txt',  # anchored, refused (free — no wire bytes)
+        f'GET {BASE_URL}/robots.txt',  # root fallback, served
+        f'GET {BASE_URL}/api{UNKNOWN_PROBE_PATH}',  # anchored, refused
+        f'GET {BASE_URL}{UNKNOWN_PROBE_PATH}',  # root fallback, served
+    ]
+    assert [draft.subject for draft in drafts] == ['header:server']
+
+
+async def test_probe_skips_gracefully_when_all_paths_refused() -> None:
+    """Both anchored and root probes refused → no drafts from probes, no ScopeViolation escape."""
+    baseline = exchange('/api/x', headers={'server': 'FixtureTarget/2.3.1'})
+    client = ScopeRefusingClient([], allowed=())
+    drafts = await version_disclosure_check.probe([baseline], client)
+    assert client.refused  # every attempt was refused, all before any wire bytes
+    assert [draft.subject for draft in drafts] == ['header:server']  # only the baseline scan
+
+
+async def test_same_banner_across_probes_is_one_finding() -> None:
+    """`Server: nginx/1.24.0` on baseline, robots, and the 404 → one draft, primary evidence."""
+    banner = {'server': 'nginx/1.24.0'}
+    baseline = exchange('/', headers=banner)
+    client = CannedClient(
+        [exchange('/robots.txt', headers=banner), exchange(UNKNOWN_PROBE_PATH, status=404, headers=banner)]
+    )
+    drafts = await version_disclosure_check.probe([baseline], client)
+    server_drafts = [draft for draft in drafts if draft.subject == 'header:server']
+    assert len(server_drafts) == 1
+    assert server_drafts[0].evidence_ids == [baseline.id]
+
+
+async def test_distinct_banners_are_distinct_findings() -> None:
+    baseline = exchange('/', headers={'server': 'nginx/1.24.0'})
+    client = CannedClient(
+        [
+            exchange('/robots.txt', headers={'x-generator': 'Drupal 9.4.7'}),
+            exchange(UNKNOWN_PROBE_PATH, status=404),
+        ]
+    )
+    drafts = await version_disclosure_check.probe([baseline], client)
+    subjects = {draft.subject for draft in drafts}
+    assert subjects == {'header:server', 'header:x-generator'}
+
+
+def test_generator_banner_is_info_server_banner_is_low() -> None:
+    """Skill mapping: server/runtime identifiers are low; generator hints are info."""
+    generator = version_disclosure_check._drafts_for(exchange(headers={'x-generator': 'WordPress 6.4.2'}))
+    assert len(generator) == 1 and generator[0].severity == 'info'
+    server = version_disclosure_check._drafts_for(exchange(headers={'server': 'nginx/1.24.0'}))
+    assert len(server) == 1 and server[0].severity == 'low'

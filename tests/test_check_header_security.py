@@ -117,7 +117,7 @@ def test_clean_https_response_all_headers_present():
         resp_headers={
             'Content-Type': 'text/html; charset=utf-8',
             'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
-            'Content-Security-Policy': "default-src 'self'",
+            'Content-Security-Policy': "default-src 'self'; frame-ancestors 'none'",
             'X-Content-Type-Options': 'nosniff',
             'Set-Cookie': 'SESSID=abc; Secure; HttpOnly; SameSite=Lax',
         },
@@ -498,7 +498,10 @@ def test_cors_wildcard_with_credentials():
     titles = _findings_by_title(findings)
     assert 'Permissive CORS with credentials' in titles
     f = titles['Permissive CORS with credentials']
-    assert f.severity == 'high'
+    # #38: browsers reject the literal pair; the exploitable reflected-origin variant
+    # needs an active probe — passive review rates it medium, not high.
+    assert f.severity == 'medium'
+    assert 'reflected-origin' in f.description
 
 
 def test_cors_null_with_credentials():
@@ -718,8 +721,9 @@ def test_lowercase_header_names_are_recognized():
         resp_headers={
             'content-type': 'text/html',
             'strict-transport-security': 'max-age=31536000; includeSubDomains',
-            'content-security-policy': "default-src 'self'",
+            'content-security-policy': "default-src 'self'; frame-ancestors 'none'",
             'x-content-type-options': 'nosniff',
+            'x-frame-options': 'deny',
         },
     )
     assert HeaderSecurityCheck().review([ev]) == []
@@ -758,7 +762,408 @@ def test_every_finding_has_a_subject():
     assert subjects == {
         'header:strict-transport-security',
         'header:content-security-policy',
+        'header:frame-ancestors',
         'header:x-content-type-options',
         'cookie:sessionid',
         'header:access-control-allow-origin',
     }
+
+
+# ── HSTS precision (#38): quoted and malformed max-age ────────────────────────
+
+
+def test_hsts_quoted_max_age_accepted():
+    """RFC 6797 permits a quoted max-age value; it must not be treated as malformed."""
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Strict-Transport-Security': 'max-age="31536000"; includeSubDomains',
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    assert 'Weak HSTS policy' not in titles
+    assert 'Malformed HSTS max-age directive' not in titles
+
+
+def test_hsts_malformed_max_age_is_its_own_finding():
+    """An unparseable max-age is a malformed-directive finding, not max-age=0."""
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Strict-Transport-Security': 'max-age=soon',
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    f = titles['Malformed HSTS max-age directive']
+    assert f.severity == 'low'
+    assert 'max-age=soon' in f.description
+    assert 'Weak HSTS policy' not in titles
+
+
+def test_hsts_without_max_age_directive_is_malformed():
+    """HSTS with no max-age directive communicates no validity period — its own finding."""
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Strict-Transport-Security': 'includeSubDomains',
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    assert 'Malformed HSTS max-age directive' in titles
+    assert 'Weak HSTS policy' not in titles
+
+
+# ── Session-cookie classification precision (#38) ────────────────────────────
+
+
+def test_cookie_name_substring_false_positives_gone():
+    """`sid` inside `inside`, `user` inside `user_prefs` must not look like session cookies."""
+    check = HeaderSecurityCheck()
+    for name in ('inside', 'user_prefs'):
+        ev = _http_evidence(
+            url='https://example.test/',
+            resp_headers={'Content-Type': 'text/html', 'Set-Cookie': f'{name}=x'},
+        )
+        titles = _findings_by_title(check.review([ev]))
+        assert 'Weak Set-Cookie attributes' not in titles, f'{name} must not be flagged'
+
+
+def test_csrf_double_submit_cookie_does_not_require_httponly():
+    """CSRF double-submit cookies are read by the app's own JS; HttpOnly would break them."""
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Set-Cookie': 'csrftoken=x; Secure; SameSite=Strict',
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    assert 'Weak Set-Cookie attributes' not in titles
+
+
+def test_csrf_double_submit_cookie_still_needs_secure():
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Set-Cookie': 'XSRF-TOKEN=x; HttpOnly; SameSite=Strict',
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    f = titles['Weak Set-Cookie attributes']
+    assert 'Secure' in f.description
+    assert 'HttpOnly' not in f.description
+
+
+def test_cookie_classification_token_examples():
+    """camelCase and classic whole names still classify (refreshToken, JSESSIONID, __Host-sid)."""
+    for name in ('refreshToken', 'JSESSIONID', '__Host-sid', 'access_key', 'login_id'):
+        assert _is_session_cookie(name) is True, f'{name} should be session-like'
+    for name in ('inside', 'user_prefs', '_ga', 'utm_source', 'lang', 'theme'):
+        assert _is_session_cookie(name) is False, f'{name} should not be session-like'
+
+
+# ── CSP precision (#38) and combined policies / report-only (#52) ─────────────
+
+
+def test_csp_nonce_suppresses_unsafe_inline():
+    """CSP2+ ignores 'unsafe-inline' when a nonce or hash is present."""
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Content-Security-Policy': "script-src 'nonce-abc123' 'unsafe-inline' 'strict-dynamic' https:",
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    assert 'Unsafe Content-Security-Policy' not in titles
+
+
+def test_csp_nonce_with_unsafe_eval_still_flagged():
+    """'unsafe-eval' is honored alongside nonces — it stays a finding."""
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Content-Security-Policy': "script-src 'nonce-abc123' 'unsafe-eval'",
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    f = titles['Unsafe Content-Security-Policy']
+    assert "'unsafe-eval'" in f.description
+    assert "'unsafe-inline'" not in f.description
+
+
+def test_multiple_enforced_csp_headers_intersect():
+    """Browsers apply every enforced policy; a weakness counts only if all permit it."""
+    check = HeaderSecurityCheck()
+    safe = [
+        ('Content-Type', 'text/html'),
+        ('Content-Security-Policy', "default-src 'self'"),
+        ('Content-Security-Policy', "script-src 'unsafe-inline'"),
+    ]
+    titles = _findings_by_title(check.review([_http_evidence(resp_headers=safe)]))
+    assert 'Unsafe Content-Security-Policy' not in titles
+
+    both_unsafe = [
+        ('Content-Type', 'text/html'),
+        ('Content-Security-Policy', "default-src 'unsafe-inline'"),
+        ('Content-Security-Policy', "script-src 'unsafe-inline'"),
+    ]
+    titles = _findings_by_title(check.review([_http_evidence(resp_headers=both_unsafe)]))
+    assert 'Unsafe Content-Security-Policy' in titles
+
+
+def test_csp_report_only_stricter_note():
+    """Enforced CSP unsafe + report-only clean: the finding names the unenforced stricter policy."""
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers=[
+            ('Content-Type', 'text/html'),
+            ('Content-Security-Policy', "script-src 'unsafe-inline'"),
+            ('Content-Security-Policy-Report-Only', "script-src 'self'"),
+        ],
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    f = titles['Unsafe Content-Security-Policy']
+    assert 'report-only policy is deployed but not enforced' in f.description
+
+
+def test_csp_missing_with_report_only_notes_remediation_context():
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Content-Security-Policy-Report-Only': "default-src 'self'",
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    f = titles['Missing Content-Security-Policy header']
+    assert 'report-only policy is deployed but not enforced' in f.description
+
+
+# ── Framing controls (#52) ────────────────────────────────────────────────────
+
+
+def test_missing_framing_control():
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={'Content-Type': 'text/html'},
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    f = titles['Missing framing policy']
+    assert f.subject == 'header:frame-ancestors'
+    assert f.severity == 'low'
+
+
+def test_xfo_deny_and_sameorigin_are_controls():
+    check = HeaderSecurityCheck()
+    for value in ('DENY', 'SAMEORIGIN'):
+        ev = _http_evidence(
+            url='https://example.test/',
+            resp_headers={'Content-Type': 'text/html', 'X-Frame-Options': value},
+        )
+        titles = _findings_by_title(check.review([ev]))
+        assert 'Missing framing policy' not in titles, value
+
+
+def test_xfo_allow_from_is_treated_as_missing():
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'X-Frame-Options': 'ALLOW-FROM https://partner.test',
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    f = titles['Missing framing policy']
+    assert 'obsolete' in f.description
+
+
+def test_frame_ancestors_none_controls_framing():
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Content-Security-Policy': "frame-ancestors 'none'",
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    assert 'Missing framing policy' not in titles
+    assert 'Weak frame-ancestors policy' not in titles
+
+
+def test_frame_ancestors_explicit_origins_are_clean():
+    """Case, port, and trailing slash in explicit host sources are not weak."""
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Content-Security-Policy': "frame-ancestors 'self' https://Partner.Example.com:8443/",
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    assert 'Weak frame-ancestors policy' not in titles
+    assert 'Missing framing policy' not in titles
+
+
+def test_frame_ancestors_weak_sources():
+    check = HeaderSecurityCheck()
+    cases = [
+        ('frame-ancestors *', 'wildcard (*)', 'medium'),
+        ('frame-ancestors https:', 'bare scheme source https:', 'medium'),
+        ('frame-ancestors http://partner.test', 'plaintext http: source http://partner.test', 'low'),
+        ("frame-ancestors 'self' localhost", 'loopback host localhost', 'low'),
+        ('frame-ancestors https://*.github.io', 'shared-hosting wildcard subdomain *.github.io', 'low'),
+    ]
+    for policy, source, severity in cases:
+        ev = _http_evidence(
+            url='https://example.test/',
+            resp_headers={'Content-Type': 'text/html', 'Content-Security-Policy': policy},
+        )
+        titles = _findings_by_title(check.review([ev]))
+        f = titles['Weak frame-ancestors policy']
+        assert f.severity == severity, policy
+        assert source in f.description, policy
+        assert 'Missing framing policy' not in titles, policy
+
+
+def test_multiple_enforced_csp_framing_intersection():
+    """Framing needs frame-ancestors in every enforced policy; 'none' anywhere blocks."""
+    check = HeaderSecurityCheck()
+    controlled = [
+        ('Content-Type', 'text/html'),
+        ('Content-Security-Policy', "frame-ancestors 'none'"),
+        ('Content-Security-Policy', "frame-ancestors 'self'"),
+    ]
+    titles = _findings_by_title(check.review([_http_evidence(resp_headers=controlled)]))
+    assert 'Missing framing policy' not in titles
+    assert 'Weak frame-ancestors policy' not in titles
+
+    one_missing_fa = [
+        ('Content-Type', 'text/html'),
+        ('Content-Security-Policy', "frame-ancestors 'none'"),
+        ('Content-Security-Policy', "default-src 'self'"),
+    ]
+    titles = _findings_by_title(check.review([_http_evidence(resp_headers=one_missing_fa)]))
+    assert 'Missing framing policy' in titles
+
+
+def test_framing_report_only_does_not_enforce():
+    ev = _http_evidence(
+        url='https://example.test/',
+        resp_headers={
+            'Content-Type': 'text/html',
+            'Content-Security-Policy-Report-Only': "frame-ancestors 'none'",
+        },
+    )
+    titles = _findings_by_title(HeaderSecurityCheck().review([ev]))
+    f = titles['Missing framing policy']
+    assert 'report-only' in f.description
+
+
+def test_framing_not_required_on_api_or_redirect():
+    check = HeaderSecurityCheck()
+    api = _http_evidence(
+        url='https://example.test/api',
+        resp_headers={'Content-Type': 'application/json'},
+        resp_body='{}',
+    )
+    redirect = _http_evidence(
+        url='https://example.test/old',
+        status=301,
+        resp_headers={'Location': '/new'},
+        resp_body=None,
+    )
+    for ev in (api, redirect):
+        titles = _findings_by_title(check.review([ev]))
+        assert 'Missing framing policy' not in titles
+
+
+# ── Per-host aggregation (#38) ────────────────────────────────────────────────
+
+
+def test_aggregation_one_finding_per_host_and_class():
+    """50 missing-HSTS exchanges on one host → one finding citing all 50 evidence IDs."""
+    check = HeaderSecurityCheck()
+    evs = [
+        _http_evidence(url=f'https://example.test/path{i}', resp_headers={'Content-Type': 'text/html'})
+        for i in range(50)
+    ]
+    findings = check.review(evs)
+    hsts = [f for f in findings if f.title == 'Missing HSTS header']
+    assert len(hsts) == 1
+    assert len(hsts[0].evidence_ids) == 50
+    assert 'example.test' in hsts[0].description
+    assert '50 captured response' in hsts[0].description
+
+
+def test_aggregation_separates_hosts():
+    check = HeaderSecurityCheck()
+    evs = [
+        _http_evidence(url='https://a.example.test/', resp_headers={'Content-Type': 'text/html'}),
+        _http_evidence(url='https://b.example.test/', resp_headers={'Content-Type': 'text/html'}),
+    ]
+    findings = [f for f in check.review(evs) if f.title == 'Missing HSTS header']
+    assert len(findings) == 2
+    assert {f.evidence_ids[0] for f in findings} == {evs[0].id, evs[1].id}
+
+
+def test_aggregation_unions_cookie_attribute_gaps():
+    """The same cookie set with different gaps across responses → one finding, unioned attrs."""
+    check = HeaderSecurityCheck()
+    evs = [
+        _http_evidence(
+            url='https://example.test/1',
+            resp_headers={'Content-Type': 'text/html', 'Set-Cookie': 'sid=x; HttpOnly; SameSite=Lax'},
+        ),
+        _http_evidence(
+            url='https://example.test/2',
+            resp_headers={'Content-Type': 'text/html', 'Set-Cookie': 'sid=x; Secure; SameSite=Lax'},
+        ),
+        _http_evidence(
+            url='https://example.test/3',
+            resp_headers={'Content-Type': 'text/html', 'Set-Cookie': 'sid=x; HttpOnly; SameSite=None'},
+        ),
+    ]
+    findings = [f for f in check.review(evs) if f.subject == 'cookie:sid']
+    assert len(findings) == 1
+    f = findings[0]
+    assert len(f.evidence_ids) == 3
+    assert f.severity == 'medium'  # the union (Secure, HttpOnly) has more than one gap
+    for attr in ('Secure', 'HttpOnly'):
+        assert attr in f.description
+
+
+def test_aggregation_keeps_cors_variants_apart():
+    """Wildcard and null ACAO are distinct weaknesses of the same title → separate findings."""
+    check = HeaderSecurityCheck()
+    evs = [
+        _http_evidence(
+            url='https://example.test/a',
+            resp_headers={
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Credentials': 'true',
+            },
+            resp_body='{}',
+        ),
+        _http_evidence(
+            url='https://example.test/b',
+            resp_headers={
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': 'null',
+                'Access-Control-Allow-Credentials': 'true',
+            },
+            resp_body='{}',
+        ),
+    ]
+    findings = [f for f in check.review(evs) if f.title == 'Permissive CORS with credentials']
+    assert len(findings) == 2
+    ids = {finding_id(f.check_id, f.subject, f.title, f.evidence_ids) for f in findings}
+    assert len(ids) == 2  # distinct weaknesses, not one merged finding
+    descriptions = ' | '.join(f.description for f in findings)
+    assert '* ' in descriptions and 'null' in descriptions
