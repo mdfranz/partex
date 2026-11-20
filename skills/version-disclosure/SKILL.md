@@ -20,12 +20,18 @@ replayable `verify_recipe`.
 - **Authorized live runs only.** All probes execute through the engagement-scoped target
   client (`--authorized` + valid `engagement.json` scope). Never bypass `Scope` host,
   path prefix, exclusion, or `max_rps` / `max_requests` limits.
-- **Minimal probe set.** Do not fuzz or brute-force paths. Issue targeted baseline probes:
-  1. `GET /` — inspect `Server`, `X-Powered-By`, `X-AspNet-Version`, and `X-Generator`
-     headers on the root response.
-  2. `GET /robots.txt` — check standard metadata responses for server/framework banners.
-  3. `GET /partex-nonexistent-probe-<token>` — trigger a `404` or error handler to inspect
-     default error pages for version strings, framework names, or stack traces.
+- **Minimal probe set.** Do not fuzz or brute-force paths. Issue targeted baseline probes
+  anchored under the engagement's allowed `path_prefixes` (root `/` when unscoped, or
+  e.g. `/api/...` when scoped to `/api`):
+  1. `GET <prefix>/` — inspect `Server`, `X-Powered-By`, `X-AspNet-Version`, and `X-Generator`
+     headers on the baseline response.
+  2. `GET <prefix>/robots.txt` — check standard metadata responses for server/framework banners.
+  3. `GET <prefix>/partex-nonexistent-probe-0` — trigger a `404` or error handler to inspect
+     default error pages for version strings, framework names, or stack traces. If
+     excluded/out-of-scope, skip and record `error-page:not-exercised`.
+- **Cross-probe deduplication.** Identical `(header_name, banner_value)` pairs observed across
+  multiple probes emit one finding citing the primary evidence. `X-Generator` emits `info`;
+  server/runtime banners emit `low`.
 
 ## Check Mapping (`version-disclosure`)
 

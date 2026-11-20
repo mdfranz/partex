@@ -100,19 +100,18 @@ issues a **strictly bounded 3-request probe set** through `ScopedHttpClient`:
    version footers, or unhandled error middleware. (Sending it with `Accept: text/html` vs
    `Accept: application/json` is an acceptable extension as long as the path stays stable.)
 
-**Scope & exclusion safety (spec — the check does not implement these two rules yet, #80):**
-- Before sending any probe, check `Scope` or handle `ScopeViolation` cleanly if an
-  engagement scopes `path_prefixes` narrower than `/` (e.g. `/api/v1/` only — in that case,
-  anchor probes under the first allowed `path_prefix`, e.g. `/api/v1/` and
-  `/api/v1/partex-nonexistent-probe-...`!). This avoids burning refusals when an API
-  engagement restricts `path_prefixes: ["/api"]`. *Not yet implemented: the current check
-  probes `{origin}/robots.txt` and `{origin}/partex-nonexistent-probe-0` unconditionally, so
-  a narrow-prefix engagement fails with `checks_failed` (#80).*
-- Deduplicate findings by `(header_name, banner_value)` or `(signature_class, normalized_route)`
-  across the 3 probes so `Server: nginx/1.24.0` appearing on all three responses emits
-  **one** finding citing the primary `ev_*` (or sorted `ev_*` set) rather than three noisy
-  duplicates. *Not yet implemented: the engine only merges byte-identical drafts, so the same
-  banner on all three probes currently emits three findings (#80).*
+**Scope & exclusion safety:**
+- Probes anchor under the engagement's allowed prefix (derived from the baseline request
+  path or `scope.path_prefixes`, e.g. `/api/robots.txt` and
+  `/api/partex-nonexistent-probe-0` when scoped to `/api`), so narrow-prefix API
+  engagements complete `checks_complete` without tripping root-path `ScopeViolation`s.
+  If an exclusion or scope rule still blocks a probe, that probe is skipped cleanly; when
+  the error-page probe is skipped, an `info` `error-page:not-exercised` finding records
+  that error pages were not exercised.
+- Banner findings are deduplicated by `(header_name, banner_value)` across the baseline and
+  probe exchanges, emitting **one** finding citing the primary `ev_*` rather than noisy
+  per-probe duplicates. Server/runtime version banners (`Server`, `X-Powered-By`,
+  `X-AspNet-Version`, `X-AspNetMvc-Version`) emit `low`; `X-Generator` hints emit `info`.
 
 ---
 
