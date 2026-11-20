@@ -1300,7 +1300,11 @@ No §13 experiment is recorded as passed here until its gate has evidence.
    MITM-proxy capture path, since §1 forbids interception. The scoped client stays the only
    engine-driven live-capture door; the M7 browser harness (§13.6) is the sanctioned
    browser-flow capture and probing path, and agent-driven browsing enters through `browser_*`
-   tools over that harness, never a shell.
+   tools over that harness, never a shell. The capture→probe bridge is **seeding, not replay**
+   (#76): `probes.py` turns an imported bundle's surface into method+URL candidates,
+   scope-filtered against the live engagement (never byte-for-byte replay, never carrying
+   captured credentials), sent through the same scoped client by `partex test --bundle` and
+   exposed read-only to `partex agent --bundle`.
 6. **Chat annotation**: should `chat` gain append-only operator notes (never findings
    mutation), needing a notes table and a read-only-plus-notes store handle?
 7. **CLAI2 session reuse**: should the run record store the agent/chat `session_id` so

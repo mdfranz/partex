@@ -27,6 +27,7 @@ from .errors import PartexError
 from .export import IncludeSecretsWarning, export_run_data, write_run_export
 from .har_io import export_bundle, import_har
 from .ids import canonical_json
+from .probes import seed_summary
 from .registry import build_registry
 from .report import gather_report_payload, render_report_text
 from .sandboxes import detect_sandboxes, sandboxes_as_dicts
@@ -176,6 +177,17 @@ def build_parser() -> argparse.ArgumentParser:
     test_selection.add_argument('--all', action='store_true', help='run every installed check, active and passive')
     test.add_argument('--no-summary', action='store_true', help='skip the model-backed summary (M4)')
     test.add_argument('--out', default=None, help='also write the canonical JSON export to this file')
+    test.add_argument(
+        '--bundle',
+        default=None,
+        help="seed the run with an imported bundle's captured surface (import-har or export-bundle output, #76)",
+    )
+    test.add_argument(
+        '--max-seed',
+        type=_positive_int,
+        default=None,
+        help='cap on seeded probes from --bundle (drops are reported, not silent)',
+    )
     test.set_defaults(handler=_cmd_test)
 
     runs = subparsers.add_parser('runs', parents=[with_db], help='list runs')
@@ -269,6 +281,11 @@ def build_parser() -> argparse.ArgumentParser:
         help='active checks run before the chat opens (comma-separated; default: %(default)s)',
     )
     agent.add_argument('--from', dest='from_run', default=None, help='earlier run the agent may read (run_…)')
+    agent.add_argument(
+        '--bundle',
+        default=None,
+        help="expose an imported bundle's surface to the session read-only (nothing is sent automatically, #76)",
+    )
     agent.add_argument('--no-briefing', action='store_true', help='open the chat without the opening summary')
     agent.set_defaults(handler=_cmd_agent)
 
@@ -351,12 +368,21 @@ def _cmd_test(args: argparse.Namespace) -> int:
     else:
         checks = _split_checks(args.checks)
     engine.select_live_checks(registry, checks)  # fail before any store is opened
+    if args.max_seed is not None and args.bundle is None:
+        print('partex: usage: --max-seed requires --bundle', file=sys.stderr)
+        return EXIT_USAGE
     db_path = resolve_db_path(args.db)
 
     async def go() -> engine.TestResult:
         async with await RunStore.open(db_path) as store:
             result = await engine.run_test(
-                args.engagement, store, checks, authorized=bool(args.authorized), insecure=bool(args.insecure)
+                args.engagement,
+                store,
+                checks,
+                authorized=bool(args.authorized),
+                insecure=bool(args.insecure),
+                seed_bundle=args.bundle,
+                max_seed=args.max_seed,
             )
             await _write_export(store, result.run_id, args.out)
             return result
@@ -372,6 +398,17 @@ def _cmd_test(args: argparse.Namespace) -> int:
                 'authorized': result.authorized,
                 'evidence_count': result.evidence_count,
                 'budget_exhausted': result.budget_exhausted,
+                'seeded_count': result.seeded_count,
+                'seed_plan': None
+                if result.seed_plan is None
+                else {
+                    'candidates': len(result.seed_plan.candidates),
+                    'dropped_out_of_scope': result.seed_plan.dropped_out_of_scope,
+                    'dropped_methods': result.seed_plan.dropped_methods,
+                    'dropped_duplicates': result.seed_plan.dropped_duplicates,
+                    'dropped_capped': result.seed_plan.dropped_capped,
+                },
+                'seed_skipped': result.seed_skipped,
                 'findings': _finding_rows(result.findings),
                 'error': result.error,
                 'rule_code': result.rule_code,
@@ -383,6 +420,8 @@ def _cmd_test(args: argparse.Namespace) -> int:
     else:
         print(f'run {result.run_id}: {result.state}')
         print(f'requests spent: {result.requests_spent}  checks: {", ".join(result.selected_checks)}')
+        if result.seed_plan is not None:
+            print(seed_summary(result.seed_plan, result.seeded_count, seed_skipped=result.seed_skipped))
         if result.budget_exhausted:
             print('budget exhausted: active work ended cleanly')
         if result.skipped_checks:
@@ -641,6 +680,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
 
         anyio.run(check_from)  # unknown store or run: exit 1 before a model, a run row, or a socket
     model = resolve_model(args.model, gateway_route=args.gateway_route)
+    bundle = Path(args.bundle) if args.bundle is not None else None
     run_id = anyio.run(
         partial(
             run_agent,
@@ -651,6 +691,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             insecure=bool(args.insecure),
             checks=checks,
             from_run=args.from_run,
+            bundle=bundle,
             briefing=not args.no_briefing,
         )
     )
