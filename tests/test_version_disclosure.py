@@ -291,3 +291,43 @@ def test_generator_banner_is_info_server_banner_is_low() -> None:
     assert len(generator) == 1 and generator[0].severity == 'info'
     server = version_disclosure_check._drafts_for(exchange(headers={'server': 'nginx/1.24.0'}))
     assert len(server) == 1 and server[0].severity == 'low'
+
+
+# ── Catch-all detection (issue #53) ───────────────────────────────────────────
+
+
+def _page(url: str, status: int, body: str, content_type: str = 'text/html') -> HttpEvidence:
+    exchange = HttpExchange(
+        request=HttpRequest(method='GET', url=url, headers=[]),
+        response=HttpResponse(status_code=status, headers=[('Content-Type', content_type)], body=body),
+    )
+    item = HttpEvidence(id='', source='capture:test', http=exchange)
+    return item.model_copy(update={'id': evidence_id(item)})
+
+
+def test_is_catch_all_ignores_per_request_tokens_and_matches_the_html_shell() -> None:
+    from partex.checks.version_disclosure import is_catch_all
+
+    shell = '<html><script nonce="abc123def456" src="/main.js"></script><body>app</body></html>'
+    other = '<html><script nonce="zzz999yyy888" src="/main.js"></script><body>app</body></html>'
+    base = _page('https://a.test/', 200, shell)
+    assert is_catch_all(base, _page('https://a.test/partex-nonexistent-probe-0', 200, other))
+    # Different body but the same script/stylesheet references: still the same shell.
+    shell_two = '<html><script src="/main.js"></script><body>loading...</body></html>'
+    assert is_catch_all(base, _page('https://a.test/partex-nonexistent-probe-0', 200, shell_two))
+    # A real error: 404, or a 200 that is a different page.
+    assert not is_catch_all(base, _page('https://a.test/partex-nonexistent-probe-0', 404, shell))
+    assert not is_catch_all(base, _page('https://a.test/partex-nonexistent-probe-0', 200, '<html>Not Found</html>'))
+    plain = '<script src="/main.js"></script> but served as plain text'
+    assert not is_catch_all(base, _page('https://a.test/x', 200, plain, content_type='text/plain'))  # not an HTML shell
+
+
+def test_coverage_cites_the_probe_and_baseline_for_a_catch_all() -> None:
+    from partex.checks.version_disclosure import VersionDisclosureCheck
+
+    shell = '<html><script src="/main.js"></script></html>'
+    base = _page('https://a.test/', 200, shell)
+    probe = _page('https://a.test/partex-nonexistent-probe-0', 200, shell)
+    (entry,) = VersionDisclosureCheck().coverage([base, probe])
+    assert entry.outcome == 'not_applicable' and set(entry.evidence_ids) == {base.id, probe.id}
+    assert VersionDisclosureCheck().coverage([]) == []

@@ -111,6 +111,7 @@ def test_agent_is_named_and_needs_no_credentials_to_build() -> None:
     assert agent.name == 'partex_reviewer_agent'
     assert sorted(agent._function_toolset.tools) == [  # pyright: ignore[reportPrivateUsage]
         'get_finding',
+        'list_coverage',
         'list_evidence',
         'list_findings',
         'list_runs',
@@ -202,6 +203,7 @@ def test_reviewer_has_no_write_or_network_tools() -> None:
         'list_runs',
         'list_findings',
         'get_finding',
+        'list_coverage',
         'list_evidence',
         'lookup_evidence',
     }

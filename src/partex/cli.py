@@ -93,6 +93,20 @@ def _finding_rows(findings: Sequence[Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _coverage_gaps(entries: Sequence[dict[str, Any]]) -> list[str]:
+    """Ledger entries the operator should not read as a clean result: not exercised, or needing follow-up."""
+    return [
+        f'  not exercised: {entry["surface"]} / {entry["risk_area"]} ({entry["outcome"]}): {entry["reason"]}'
+        for entry in entries
+        if entry['outcome'] in ('not_applicable', 'needs_follow_up')
+    ]
+
+
+def _print_coverage_gaps(entries: Sequence[dict[str, Any]]) -> None:
+    for line in _coverage_gaps(entries):
+        print(line)
+
+
 def _print_findings_text(findings: Sequence[Any]) -> None:
     if not findings:
         print('no findings')
@@ -363,6 +377,7 @@ def _cmd_test(args: argparse.Namespace) -> int:
                 'rule_code': result.rule_code,
                 'failed_check': result.failed_check,
                 'skipped_checks': list(result.skipped_checks),
+                'coverage': [entry.model_dump(mode='json') for entry in result.coverage],
             }
         )
     else:
@@ -374,6 +389,7 @@ def _cmd_test(args: argparse.Namespace) -> int:
             print(f'skipped: {", ".join(result.skipped_checks)}')
         if result.error:
             print(f'error: {result.error}', file=sys.stderr)
+        _print_coverage_gaps([entry.model_dump(mode='json') for entry in result.coverage])
         _print_findings_text(result.findings)
     return _run_exit_code(result.state, bool(result.findings))
 
@@ -456,6 +472,7 @@ def _render_text(payload: dict[str, Any], run_id: str) -> str:
     for finding in findings:
         lines.append(f'  [{finding["severity"]}] {finding["title"]} — {finding["subject"]} ({finding["status"]})')
         lines.append(f'      {finding["id"]}  evidence: {", ".join(finding["evidence_ids"])}')
+    lines.extend(_coverage_gaps(payload.get('coverage', [])))
     for verification in payload['verifications']:
         lines.append(f'verification {verification["id"]}: {verification["verdict"]} for {verification["finding_id"]}')
     if payload['summary'] is not None:

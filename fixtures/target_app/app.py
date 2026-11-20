@@ -7,7 +7,8 @@ surface the validation experiments need:
   security headers (deliberately vulnerable).
 - ``/robots.txt`` — plain metadata response (the banner rides along).
 - any unknown path — a ``404`` whose body is a fake **stack trace** with
-  absolute paths (the verbose-error surface).
+  absolute paths (the verbose-error surface), or, with ``catch_all`` set, ``200``
+  with the normal app shell (a single-page-app catch-all route, #53).
 - ``/admin/shutdown`` — an in-scope-shaped path that fixture engagements put
   in ``scope.exclusions`` (the scope-gate decoy).
 
@@ -50,6 +51,8 @@ class _FixtureApp(http.server.BaseHTTPRequestHandler):
             self._send(200, 'text/html', INDEX_HTML)
         elif path == '/robots.txt':
             self._send(200, 'text/plain', 'User-agent: *\nDisallow: /admin/\n')
+        elif server.catch_all:
+            self._send(200, 'text/html', INDEX_HTML)  # SPA-style catch-all: no error handler is ever reached
         else:
             # Unknown paths get the verbose error page — the deliberately
             # vulnerable default handler (including /admin/shutdown).  The
@@ -79,6 +82,8 @@ class _FixtureAppServer(http.server.ThreadingHTTPServer):
         # fixed between the finding and the replay (PLAN §13.4: the hardened
         # variant yields `not_reproduced`).
         self.hardened: bool = False
+        # SPA variant (#53): unknown paths answer 200 with the app shell instead of an error page.
+        self.catch_all: bool = False
 
     @property
     def base_url(self) -> str:

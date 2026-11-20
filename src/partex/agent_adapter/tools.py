@@ -163,6 +163,20 @@ def _evidence_summary(item: Evidence) -> dict[str, Any]:
     }
 
 
+async def list_coverage(ctx: RunContext[ReviewDeps], run: RunChoice = 'current') -> str:
+    """List what a run's checks report they did or did not exercise (the coverage ledger).
+
+    Use it before calling a run clean: an entry with outcome ``not_applicable`` or ``needs_follow_up`` means
+    that area was not meaningfully tested (for example a catch-all route that never reached the error handler).
+
+    Args:
+        run: ``current`` (default), ``previous``, or a run ID from ``list_runs``.
+    """
+    entries = await ctx.deps.reader.coverage(await _run_id(ctx.deps, run))
+    await _audit_read(ctx.deps, 'list_coverage', {'run': run}, {'count': len(entries)})
+    return frame_untrusted('coverage', [entry.model_dump(mode='json') for entry in entries])
+
+
 async def list_evidence(ctx: RunContext[ReviewDeps], run: RunChoice = 'current') -> str:
     """List everything a run captured, in capture order: request, status, response headers, body size.
 
@@ -210,4 +224,4 @@ async def lookup_evidence(ctx: RunContext[ReviewDeps], evidence_id: str, run: Ru
     return frame_untrusted('evidence', json.loads(canonical_json(redact(evidence).model_dump(mode='json'))))
 
 
-REVIEWER_TOOLS = (list_runs, list_findings, get_finding, list_evidence, lookup_evidence)
+REVIEWER_TOOLS = (list_runs, list_findings, get_finding, list_evidence, list_coverage, lookup_evidence)

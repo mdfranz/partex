@@ -32,6 +32,13 @@ replayable `verify_recipe`.
   root (e.g. `https://host/api/v1/`), probes anchor under the baseline capture's directory
   (`/api/v1/robots.txt`, `/api/v1/partex-nonexistent-probe-0`); a scope refusal falls back
   to the root path once and is then skipped cleanly — it never fails the run.
+- **A clean error page is not the same as an untested one (#53).** The check records a coverage
+  entry (`error-page-disclosure`, source `check_observed`) for the unknown-path probe: `reported`
+  when the response exposed stack traces, `no_issue_found` when it reached a real error response
+  without disclosure, and `not_applicable` when it did not exercise the error handler at all, either
+  because the path returned `2xx` with the baseline's page (a catch-all / single-page-app route) or
+  because the probe was refused by the engagement scope. Report `not_applicable` as "not tested", never
+  as "clean"; a manual next step is an unknown path under an API prefix the app exposes.
 - **One finding per banner.** The same `(header, banner value)` seen on several responses is
   one finding citing the primary evidence, not a finding per probe.
 

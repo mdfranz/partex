@@ -115,6 +115,14 @@ issues a **strictly bounded 3-request probe set** through `ScopedHttpClient`:
   findings. Severity follows the check mapping: server/runtime identifiers (`Server`,
   `X-Powered-By`, `X-AspNet-Version`, `X-AspNetMvc-Version`) are `low`; `X-Generator`-class
   CMS hints are `info`.
+- **Catch-all detection and the coverage ledger (#53).** After the probes, the check records a
+  `check_observed` coverage entry for the `error-page-disclosure` risk area. The unknown-path probe is a
+  **catch-all** when it answers `2xx` and its body equals the baseline's after stripping per-request
+  tokens (nonces, integrity attributes, long random strings), or it is HTML that references the same
+  scripts and stylesheets. A catch-all, or a probe the scope refused, is `not_applicable` with a reason and
+  cites the probe and baseline evidence; no finding is emitted. `partex test` and `partex show` list these
+  as "not exercised" and the reviewer's `list_coverage` tool exposes them to chat briefings, so a run with
+  no findings is not read as clean. A server-error-shaped follow-up probe is left as a manual next step.
 
 ---
 

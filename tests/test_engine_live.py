@@ -417,3 +417,85 @@ async def test_passive_checks_still_run_after_the_budget_ends_active_work(
     )
     assert result.state == 'checks_complete' and result.budget_exhausted
     assert 'header-security' in {f.check_id for f in result.findings}  # baseline alone is enough for passive review
+
+
+# ── Catch-all routes and the coverage ledger (issue #53) ──────────────────────
+
+
+async def test_catch_all_target_records_error_handler_not_reached(
+    target_app: object, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    target_app.catch_all = True  # pyright: ignore[reportAttributeAccessIssue]
+    result = await run_test(engagement_dir(tmp_path, target_app), tmp_store, ['version-disclosure'], authorized=True)
+    assert result.state == 'checks_complete'
+    assert not [f for f in result.findings if f.subject == 'error-page']  # nothing to report, and not "clean" either
+    (entry,) = result.coverage
+    assert (entry.risk_area, entry.outcome, entry.source) == (
+        'error-page-disclosure',
+        'not_applicable',
+        'check_observed',
+    )
+    assert 'catch-all' in entry.reason and len(entry.evidence_ids) == 2  # the probe and the baseline
+    stored = await tmp_store.coverage(result.run_id)
+    assert [(c.risk_area, c.outcome) for c in stored] == [('error-page-disclosure', 'not_applicable')]
+
+
+async def test_real_error_handler_is_reported_in_coverage(
+    target_app: object, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    result = await run_test(engagement_dir(tmp_path, target_app), tmp_store, ['version-disclosure'], authorized=True)
+    assert any(f.subject == 'error-page' for f in result.findings)  # existing behavior unchanged
+    (entry,) = result.coverage
+    assert entry.outcome == 'reported' and 'stack traces' in entry.reason
+
+    target_app.hardened = True  # pyright: ignore[reportAttributeAccessIssue]
+    clean_dir = tmp_path / 'again'
+    clean_dir.mkdir()
+    clean = await run_test(engagement_dir(clean_dir, target_app), tmp_store, ['version-disclosure'], authorized=True)
+    (clean_entry,) = clean.coverage
+    assert clean_entry.outcome == 'no_issue_found'
+
+
+async def test_probe_refused_by_scope_is_recorded_as_not_exercised(
+    target_app: object, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    # Exclude the unknown-path probe (and robots.txt): the check cannot reach the error handler at all.
+    result = await run_test(
+        engagement_dir(tmp_path, target_app, exclusions=['/partex-nonexistent-probe-0', '/robots.txt']),
+        tmp_store,
+        ['version-disclosure'],
+        authorized=True,
+    )
+    assert result.state == 'checks_complete'
+    (entry,) = result.coverage
+    assert entry.outcome == 'not_applicable' and 'refused by the engagement scope' in entry.reason
+
+
+async def test_a_bad_coverage_hook_fails_the_run_like_a_bad_draft(
+    target_app: object, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    class BadCoverage:
+        check_id = 'bad-coverage'
+        version = '1'
+        title = 'bad'
+        description = 'bad'
+
+        def applies_to(self, evidence: Sequence[object]) -> bool:
+            return True
+
+        async def probe(self, evidence: Sequence[object], client: object) -> list[object]:
+            return []
+
+        def coverage(self, evidence: Sequence[object]) -> list[object]:
+            return [
+                {'surface': 's', 'risk_area': 'r', 'outcome': 'no_issue_found', 'source': 'agent_reported'},
+            ]
+
+    result = await run_test(
+        engagement_dir(tmp_path, target_app),
+        tmp_store,
+        ['bad-coverage'],
+        authorized=True,
+        registry={'bad-coverage': BadCoverage()},
+    )
+    assert result.state == 'checks_failed' and 'check_observed' in (result.error or '')
