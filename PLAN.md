@@ -354,6 +354,13 @@ captured HTTP evidence, to a `0600` file in a `0700` directory. Both print only 
 never a value, so nothing secret reaches the transcript or the model's context.
 `*.db.artifacts/` and `*.db.exports/` are gitignored.
 
+**Skills as deferred capabilities (#59).** `chat` and `agent` offer each discovered skill as a
+`Capability(defer_loading=True)`: the model sees only the skill's one-line description in a catalog and
+calls `load_capability` to pull the playbook (`SKILL.md` body plus `reference/*.md`, capped) into context
+on demand. Playbooks whose checks are not installed (unfinished drafts) are left out of the catalog;
+`--skill-dir` adds extra roots. Skills stay data, read as Markdown and never imported or executed, and
+findings are still recorded only by checks.
+
 **Live passive checks (#51).** `partex test` and `partex agent` accept passive and active check IDs.
 After the baseline capture and every active probe, the selected passive checks review all exchanges
 the run captured, so a live run no longer reports zero findings merely because the passive half
