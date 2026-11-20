@@ -134,13 +134,14 @@ issues a **strictly bounded 3-request probe set** through `ScopedHttpClient`:
 ## 6. Fixture Target App & Test Cases (`PLAN.md` §13.4)
 
 1. **Vulnerable fixture app (`fixtures/target_app/`):**
-   - Emits `Server: PartexFixture/0.1.0 Python/3.14` (or configurable version banner).
+   - Emits `Server: FixtureTarget/2.3.1` (stdlib `http.server` banner; see
+     `fixtures/target_app/app.py`).
    - Unknown path `/partex-nonexistent-probe-*` or error route returns a verbose traceback
      body with internal file frame markers.
    - Live `test` → `verify` transitions both findings from `reported` to `verified`
      (`confirmed`).
 2. **Hardened variant (`fixtures/target_app/` toggle):**
-   - Strips version digits (`Server: PartexFixture`) and returns generic `{"error": "not found"}`.
+   - Strips version digits (`Server: FixtureTarget`) and serves a clean `Not Found` body.
    - Re-running `partex verify <run-id> <finding-id>` yields `not_reproduced` →
      `verification_failed` while preserving original `ev_*` and `fn_*` rows.
 3. **Narrow `path_prefixes` engagement case:**
