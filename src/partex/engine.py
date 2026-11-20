@@ -532,20 +532,26 @@ class LiveSession:
         after = extend_scope(before, spec)
         if after == before:
             return before, after
+        # Persist the snapshot and the audit row together *before* the scope takes effect: if the write fails
+        # the effective scope, the stored scope and the audit trail all still show the previous scope.
+        try:
+            await self._store.amend_scope(
+                self.run_id,
+                after,
+                args={'spec': spec, 'confirmed_by': confirmed_by},
+                result={
+                    'hosts_before': before.hosts,
+                    'hosts_after': after.hosts,
+                    'ports_before': before.ports,
+                    'ports_after': after.ports,
+                },
+            )
+        except Exception as exc:
+            raise PartexError(
+                f'could not record the scope change, so the scope is unchanged: {exc}', rule_code='scope-persist'
+            ) from exc
         self.client.set_scope(after)
         self.engagement = self.engagement.model_copy(update={'scope': after})
-        await self._store.set_scope_snapshot(self.run_id, after)
-        await self._store.record_tool_call(
-            self.run_id,
-            'scope_amend',
-            {'spec': spec, 'confirmed_by': confirmed_by},
-            {
-                'hosts_before': before.hosts,
-                'hosts_after': after.hosts,
-                'ports_before': before.ports,
-                'ports_after': after.ports,
-            },
-        )
         return before, after
 
     async def run_check(self, check_id: str) -> list[Finding]:

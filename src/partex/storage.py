@@ -702,14 +702,24 @@ class RunStore(_Reads):
 
         await self._db.run(lambda conn: _transaction(conn, write))
 
-    async def set_scope_snapshot(self, run_id: str, scope: Scope) -> None:
-        """Replace the run's scope snapshot with the current (operator-extended) scope."""
+    async def amend_scope(self, run_id: str, scope: Scope, *, args: Any, result: Any) -> str:
+        """Replace the run's scope snapshot and append its ``scope_amend`` audit row in one transaction.
+
+        Either both land or neither does, so the stored scope and the audit trail cannot disagree.
+        Callers redact secrets first. Returns the audit row's call ID.
+        """
+        call_id = 'tc_' + uuid.uuid4().hex
 
         def write(conn: sqlite3.Connection) -> None:
             _get_run(conn, run_id)
             conn.execute('UPDATE runs SET scope_snapshot = ? WHERE id = ?', (scope.model_dump_json(), run_id))
+            conn.execute(
+                'INSERT INTO tool_calls (run_id, call_id, tool, args, result, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+                (run_id, call_id, 'scope_amend', _json(args), _json(result), _now()),
+            )
 
         await self._db.run(lambda conn: _transaction(conn, write))
+        return call_id
 
     # ── passive: one transaction at the end (§6.1) ──
 
