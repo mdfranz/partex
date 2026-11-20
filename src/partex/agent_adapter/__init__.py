@@ -7,9 +7,11 @@ tester's scoped ``http_request`` and ``run_check`` added (#54).
 """
 
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import anyio.to_thread
+from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.exceptions import AgentRunError
 from pydantic_ai.models import Model
 
@@ -79,7 +81,13 @@ async def _pause_on(summary: str | None, console: Console) -> None:
 
 
 async def run_chat(
-    run_id: str, db_path: Path, model: Model | str, *, briefing: bool = True, console: Console | None = None
+    run_id: str,
+    db_path: Path,
+    model: Model | str,
+    *,
+    briefing: bool = True,
+    skills: Sequence[AgentCapability[ReviewDeps]] = (),
+    console: Console | None = None,
 ) -> None:
     """Open *run_id* in *db_path* read-only, print a briefing (unless disabled), then start the chat."""
     console = console or Console()
@@ -88,7 +96,7 @@ async def run_chat(
         deps = ReviewDeps(run_id=run_id, reader=reader)
         summary = await brief(model, deps, console) if briefing else None
         await _pause_on(summary, console)
-        agent = build_reviewer_agent(model, briefing=summary)
+        agent = build_reviewer_agent(model, briefing=summary, skills=skills)
         await chat(agent, deps=deps, load_plugins=False, console=console, settings=CHAT_SETTINGS)
 
 
@@ -103,6 +111,7 @@ async def run_agent(
     from_run: str | None = None,
     bundle: Path | None = None,
     briefing: bool = True,
+    skills: Sequence[AgentCapability[TesterDeps]] = (),
     console: Console | None = None,
 ) -> str:
     """Open a new live session on *engagement_path*, brief, then let the operator direct probes in CLAI2.
@@ -153,7 +162,7 @@ async def run_agent(
             )
             summary = await brief(recorded, deps, console) if briefing else None
             await _pause_on(summary, console)
-            agent = build_tester_agent(recorded, briefing=summary)
+            agent = build_tester_agent(recorded, briefing=summary, skills=skills)
             # The operator-only /scope command is a CLAI2 plugin (slash commands exist only as plugins). A
             # private, empty settings store keeps the operator's saved and drop-in CLAI2 plugins out, and
             # only the partex plugin is declared, so the session loads nothing else (#64).

@@ -36,6 +36,12 @@ from .telemetry import LOG_FILE_ENV, announce, configure_telemetry, resolve_log_
 
 DB_ENV = 'PARTEX_DB'
 LOGFIRE_ENV = 'PARTEX_LOGFIRE'
+SKILL_DIR_ARGS: dict[str, Any] = {
+    'action': 'append',
+    'default': [],
+    'metavar': 'DIR',
+    'help': 'extra skill root offered to the model as on-demand playbooks (data only; repeatable)',
+}
 INSECURE_HELP = (
     'accept invalid TLS certificates (self-signed, expired, hostname mismatch) for this run; also '
     'engagement tls.verify=false. Recorded on the run, never available to the model'
@@ -261,6 +267,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument(
         '--no-briefing', action='store_true', help='open the chat without the opening model summary of the run'
     )
+    chat.add_argument('--skill-dir', **SKILL_DIR_ARGS)
     chat.set_defaults(handler=_cmd_chat)
 
     agent = subparsers.add_parser(
@@ -287,6 +294,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="expose an imported bundle's surface to the session read-only (nothing is sent automatically, #76)",
     )
     agent.add_argument('--no-briefing', action='store_true', help='open the chat without the opening summary')
+    agent.add_argument('--skill-dir', **SKILL_DIR_ARGS)
     agent.set_defaults(handler=_cmd_agent)
 
     sandboxes = subparsers.add_parser(
@@ -647,6 +655,19 @@ def _cmd_checks(args: argparse.Namespace) -> int:
 # ── chat ──────────────────────────────────────────────────────────────────────
 
 
+def _session_skills(args: argparse.Namespace) -> list[Any]:
+    """Skills for a model session as deferred capabilities (#59): installed-check playbooks plus ``--skill-dir``.
+
+    Lint errors are reported on stderr; a skill that fails them is simply not offered.
+    """
+    from .agent_adapter.skills import skill_capabilities, usable_skills
+
+    registry = build_registry(args.skill_dir)
+    for diagnostic in registry.errors:
+        print(f'partex: warning: {diagnostic.render()}', file=sys.stderr)
+    return skill_capabilities(usable_skills(registry.skills, registry.checks))
+
+
 def _cmd_chat(args: argparse.Namespace) -> int:
     from .agent_adapter import run_chat
     from .models_config import resolve_model
@@ -659,7 +680,8 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
     anyio.run(check_run)  # unknown store or run: exit 1 before a model is built or the terminal opens
     model = resolve_model(args.model, gateway_route=args.gateway_route)
-    anyio.run(partial(run_chat, args.run_id, db_path, model, briefing=not args.no_briefing))
+    skills = _session_skills(args)
+    anyio.run(partial(run_chat, args.run_id, db_path, model, briefing=not args.no_briefing, skills=skills))
     return EXIT_OK
 
 
@@ -693,6 +715,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             from_run=args.from_run,
             bundle=bundle,
             briefing=not args.no_briefing,
+            skills=_session_skills(args),
         )
     )
     print(f'session run {run_id} saved; review it with: partex show {run_id} --db {db_path}', file=sys.stderr)

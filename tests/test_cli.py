@@ -544,6 +544,7 @@ def test_review_text_reports_invalid_bundle(
 
 
 briefings: list[bool] = []
+offered: list[list[str]] = []
 
 
 @pytest.fixture
@@ -551,12 +552,16 @@ def chat_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Path, object]
     import partex.agent_adapter
 
     briefings.clear()
+    offered.clear()
 
     calls: list[tuple[str, Path, object]] = []
 
-    async def fake_run_chat(run_id: str, db_path: Path, model: object, *, briefing: bool) -> None:
+    async def fake_run_chat(
+        run_id: str, db_path: Path, model: object, *, briefing: bool, skills: Sequence[Any] = ()
+    ) -> None:
         calls.append((run_id, db_path, model))
         briefings.append(briefing)
+        offered.append(sorted(str(getattr(skill, 'id', '')) for skill in skills))
 
     monkeypatch.setattr(partex.agent_adapter, 'run_chat', fake_run_chat)
     return calls
@@ -753,3 +758,21 @@ def test_show_text_and_test_text_flag_areas_that_were_not_exercised() -> None:
     assert cli._coverage_gaps([gap, fine]) == [  # pyright: ignore[reportPrivateUsage]
         '  not exercised: http://a.test / error-page-disclosure (not_applicable): catch-all route'
     ]
+
+
+def test_chat_offers_installed_check_skills_and_extra_skill_dirs(
+    capsys: pytest.CaptureFixture[str], db: Path, chat_calls: list[Any], tmp_path: Path
+) -> None:
+    run_id = review_run_id(capsys, db, VALID_BUNDLE)
+    extra = tmp_path / 'skills' / 'my-playbook'
+    extra.mkdir(parents=True)
+    (extra / 'SKILL.md').write_text(
+        '---\nname: my-playbook\ndescription: Use for local notes\nmodes: [passive]\n---\n# Notes\nbody\n'
+    )
+    assert (
+        run(capsys, 'chat', run_id, '--model', 'test', '--db', str(db), '--skill-dir', str(tmp_path / 'skills'))[0] == 0
+    )
+    (names,) = offered
+    # Playbooks for installed checks are offered; drafts whose checks are not installed are not.
+    assert {'header-review', 'version-disclosure', 'js-analysis', 'my-playbook'} <= set(names)
+    assert not {'api-inventory', 'authorization-testing', 'auth-session-controls'} & set(names)
