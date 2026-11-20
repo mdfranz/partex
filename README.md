@@ -1,6 +1,6 @@
 # ParTEx (`partex`)
 
-> **Status:** Early implementation. The passive core, registry, live scoped testing, reporting, read-only chat and the interactive agent have landed (see [Implemented CLI](#implemented-cli)); summarization, hardening gates, HAR/bundle round-trip and the browser harness are still open. Dependencies are locked PyPI releases resolved through `uv.lock`.
+> **Status:** Active implementation. The passive core (`header-security`, `js-analysis`), registry, live scoped testing (including passive checks over live captures, `--insecure` TLS, and `version-disclosure` anchoring/dedup), HAR/bundle round-trip (`import-har`, `export-bundle`), host sandbox detection (`sandboxes`), reporting, read-only `chat`, and interactive `agent` (with `/scope add`) have landed (see [Implemented CLI](#implemented-cli)); M4 summarization, `--auto` agent loop, hardening gates, and the M7 browser harness remain open. Dependencies are locked PyPI releases resolved through `uv.lock`.
 
 **ParTEx** (`partex`) is a greenfield Python framework for **authorized web application and API security testing**, built on locked PyPI releases of [Pydantic AI](https://github.com/pydantic/pydantic-ai) (`pydantic-ai-slim`, `pydantic-ai-harness`, `pydantic-clai2`) and [Monty](https://github.com/pydantic/monty) (`pydantic-monty`).
 
@@ -10,15 +10,26 @@ It draws workflow patterns—engagement lifecycle, evidence-linked findings, rep
 
 ## Documentation in This Repository
 
+### Active Specification & Guides
+
 | Document | Purpose |
 |---|---|
 | [`PLAN.md`](PLAN.md) | **Core engine & package specification**: scope, 7-layer architecture (incl. the M7 browser harness), package layout, engagement & bundle schemas, Pydantic data contracts, SQLite `RunStore` (WAL, single-writer), CLI surface, CLAI2 & `--auto` agent wiring, Logfire secret-safe observability, validation experiments (§13), and milestones **M0–M7**. |
-| [`RUNTIME.md`](RUNTIME.md) | **Execution boundaries & state lifetime**: deterministic installed passive checks, CLAI2 Monty-backed Code Mode for the M5 read-only reviewer (`chat <run-id>`), opt-in speculative reads evaluation, the M7 browser capture harness (CDP attach to operator Chrome, route-hook scope gate, shared engagement budgets), deferred microVM isolation for full Python/native tools, and M0 local Monty build requirements. |
+| [`RUNTIME.md`](RUNTIME.md) | **Execution boundaries & state lifetime**: deterministic installed passive checks, CLAI2 Monty-backed Code Mode for the M5 read-only reviewer (`chat <run-id>`), opt-in speculative reads evaluation, the M7 browser capture harness (CDP attach to operator Chrome, route-hook scope gate, shared engagement budgets), deferred microVM isolation for full Python/native tools, and M0 local Monty dependencies. |
+| [`DEPS.md`](DEPS.md) | **Dependency & browser automation decisions**: locked Pydantic AI / Monty stack, per-module library decisions (`httpx2`, `tree-sitter` + `tree-sitter-javascript`, stdlib OpenAPI/JWT/RFC 6265 helpers), and the three capture/probe paths (scoped Python client, HAR import, and M7 browser automation harness). |
 | [`PARTX_SKILL_PLAN.md`](PARTX_SKILL_PLAN.md) | **Skill roadmap & synthesis workflow**: `skills/<name>/SKILL.md` frontmatter contract and lint (D6), 5-family taxonomy, dual-mode priority ranking (**P0** anchors + post-M6 slices **S1–S6**), engine deltas (**D1–D6**), definition of ready, and multi-source condensation targets. |
-| [`SOURCES.md`](SOURCES.md) | **ARTEX ecosystem overview**: survey of the four ARTEX codebases (`ARTEX/` Python scanner, `artex-global/`, `BaaRai/ARTEX/`, `failsafe/artex/`), lineage tree, quick-start commands, and the November 2026 prebuilt-image supply-chain backdoor incident. |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | **ARTEX architectural comparison**: deep comparison of the Python prototype and the three Go multi-agent forks—system diagrams, planner/worker/retester run loop, asset + exploration dual-graph data model, tool gate (`intercept/`), `llmpool/`, MITM traffic capture, and fork philosophies (*breadth* vs. *depth* vs. *integrity*). |
-| [`SKILLS.md`](SKILLS.md) | **ARTEX skill inventory**: breakdown of the 10 agent skills shipped across the three Go forks (`api-recon`, `playwright-cli`, `scopesentry`, plus BaaRai's 7 offensive/RE playbooks) and the server-side skill management API. |
-| [`DEPS.md`](DEPS.md) | **Dependency & browser automation decisions (review draft)**: what the locked Pydantic AI / Monty stack already provides (httpx, anyio, PyYAML, rich, logfire), per-module library decisions for the staged checks (minimal OpenAPI resolver, stdlib-only JWT, RFC 6265 cookie parsing, URL canonicalization contingency), the `httpx`/`httpx2` M0 conflict, and the three **required** capture/probe paths (scoped Python client, browser automation harness, HAR import — mirroring the original frameworks), with the browser engine comparison (Playwright-over-CDP primary, raw CDP fallback) and explicit questions for review. |
+| [`docs/skills/README.md`](docs/skills/README.md) | **Skill research corpus**: security research, standards mappings, and false-positive guardrails behind the shipped and staged checks. |
+| [`AGENTS.md`](AGENTS.md) | **Agent working agreement**: issue claiming, branching, `uv` environment rules, and definition of done. |
+
+### Historical Lineage & Reference Survey
+
+These documents preserve the external ARTEX / strix / communitytools survey that informed `partex`'s initial design; they are **not** specifications of `partex`:
+
+| Document | Purpose |
+|---|---|
+| [`docs/lineage/SOURCES.md`](docs/lineage/SOURCES.md) | **ARTEX ecosystem overview**: survey of the four ARTEX codebases (`ARTEX/` Python scanner, `artex-global/`, `BaaRai/ARTEX/`, `failsafe/artex/`), lineage tree, and the November 2026 prebuilt-image supply-chain backdoor incident. |
+| [`docs/lineage/ARCHITECTURE.md`](docs/lineage/ARCHITECTURE.md) | **ARTEX architectural comparison**: comparison of the Python prototype and the three Go multi-agent forks (dual-graph data model, `intercept/`, `llmpool/`, MITM traffic capture). |
+| [`docs/lineage/SKILLS.md`](docs/lineage/SKILLS.md) | **ARTEX skill inventory**: breakdown of the 10 agent skills shipped across the three Go forks (`api-recon`, `playwright-cli`, `scopesentry`, plus BaaRai's 7 offensive/RE playbooks). |
 
 ---
 
@@ -50,7 +61,7 @@ It draws workflow patterns—engagement lifecycle, evidence-linked findings, rep
    - **`partex agent <engagement>` (Tester Agent)**: Executes the deterministic `test` pipeline first, then launches an interactive CLAI2 `chat()` session or a bounded `--auto` loop (`agent.run()` / `agent.iter()`) confined to the engagement scope by the tool layer (`http_request`, `run_check`, `request_verification`, `list_findings`, `lookup_evidence`, `list_surface`, `record_coverage` — plus the M7 `browser_*` harness tools for browser-driven flows) with full `tool_calls` audit logging.
 
 7. **Supply-Chain Hardening & Hermetic Validation**
-   - Informed by the November 2026 prebuilt-image backdoor in the upstream ARTEX ecosystem (see [`SOURCES.md`](SOURCES.md)), `partex` installs all dependencies, including `pydantic-*` and `pydantic-monty*`, from a hash-pinned `uv.lock` via `uv sync --frozen`, checks that lockfile in CI, and publishes no prebuilt artifacts.
+   - Informed by the November 2026 prebuilt-image backdoor in the upstream ARTEX ecosystem (see [`docs/lineage/SOURCES.md`](docs/lineage/SOURCES.md)), `partex` installs all dependencies, including `pydantic-*` and `pydantic-monty*`, from a hash-pinned `uv.lock` via `uv sync --frozen`, checks that lockfile in CI, and publishes no prebuilt artifacts.
    - All validation experiments ([`PLAN.md` §13](PLAN.md#13-validation-experiments)) run credential-free against a local stdlib fixture target application bound to `127.0.0.1`, with non-loopback sockets and live LLM calls blocked by session fixtures.
 
 ---
@@ -68,7 +79,7 @@ These packages resolve from PyPI through `uv.lock`; the repositories below are t
 
 ### 2. ARTEX Lineage & Reference Platforms
 
-Studied in [`SOURCES.md`](SOURCES.md), [`ARCHITECTURE.md`](ARCHITECTURE.md), and [`SKILLS.md`](SKILLS.md) for workflow patterns, evidence chains, scope enforcement, supply-chain lessons, and skill playbooks:
+Studied in [`docs/lineage/SOURCES.md`](docs/lineage/SOURCES.md), [`docs/lineage/ARCHITECTURE.md`](docs/lineage/ARCHITECTURE.md), and [`docs/lineage/SKILLS.md`](docs/lineage/SKILLS.md) for workflow patterns, evidence chains, scope enforcement, supply-chain lessons, and skill playbooks:
 
 | Repository | Language / Stack | License | Summary & Relevance to ParTEx |
 |---|---|---|---|
@@ -77,11 +88,11 @@ Studied in [`SOURCES.md`](SOURCES.md), [`ARCHITECTURE.md`](ARCHITECTURE.md), and
 | [`jiwoochris/artex-global`](https://github.com/jiwoochris/artex-global) | Go 1.26.3 + Next.js 16 | AGPL-3.0 | **Breadth-first multilingual edition** (EN/KO/ZH/ES/JA UI and output with Chinese internal prompts), staged self-update with crash rollback (`selfupdate/`), and defender-facing detection content (`detections/` Sigma/Suricata/YARA rules). |
 | [`Autumn-27/ARTEX`](https://github.com/Autumn-27/ARTEX) | Go + Next.js | AGPL-3.0 | Original upstream Go multi-agent rewrite (July 2026; repository unreachable as of October 2026) built on [`Autumn-27/norma`](https://github.com/Autumn-27/norma). Defined the shared dual-graph architecture (asset graph + exploration graph). |
 | [`RuoJi6/ARTEX`](https://github.com/RuoJi6/ARTEX) | Go + Next.js | AGPL-3.0 | Intermediate upstream fork whose `v0.3.15` tag preserved the last clean pre-backdoor source tree used by `failsafe-security/artex`. |
-| [`IlyassCODEX/ARTEX`](https://github.com/IlyassCODEX/ARTEX) | Python 3.8+ (Flask) | Unlicensed | Independent monolithic Python Flask reconnaissance scanner (internally branded **"FoxRecon"**, July 2025). Shares only the `ARTEX` name; documented in [`SOURCES.md`](SOURCES.md) and [`ARCHITECTURE.md`](ARCHITECTURE.md) for contrast. |
+| [`IlyassCODEX/ARTEX`](https://github.com/IlyassCODEX/ARTEX) | Python 3.8+ (Flask) | Unlicensed | Independent monolithic Python Flask reconnaissance scanner (internally branded **"FoxRecon"**, July 2025). Shares only the `ARTEX` name; documented in [`docs/lineage/SOURCES.md`](docs/lineage/SOURCES.md) and [`docs/lineage/ARCHITECTURE.md`](docs/lineage/ARCHITECTURE.md) for contrast. |
 
 ### 3. Skill Synthesis & Playbook Sources
 
-Used in [`PARTX_SKILL_PLAN.md`](PARTX_SKILL_PLAN.md) and [`SKILLS.md`](SKILLS.md) to synthesize ParTEx's data-only `SKILL.md` playbooks and `reference/*.md` trees:
+Used in [`PARTX_SKILL_PLAN.md`](PARTX_SKILL_PLAN.md) and [`docs/lineage/SKILLS.md`](docs/lineage/SKILLS.md) to synthesize ParTEx's data-only `SKILL.md` playbooks and `reference/*.md` trees:
 
 | Repository | License | Role in Skill Synthesis |
 |---|---|---|
@@ -98,15 +109,18 @@ Available today (`uv run partex --help`):
 
 | Command | Mode / Role | Coverage |
 |---|---|---|
-| `partex review <bundle>` | Passive | Deterministic passive checks over an offline bundle. |
-| `partex test <engagement>` | Active | Live baseline capture, active checks (default `version-disclosure`); requires `--authorized`. Passive checks over live captures are not run yet ([#51](https://github.com/mdfranz/partex/issues/51)). |
-| `partex verify <run-id> <finding-id>` | Active | Re-runs the verification replay for one finding; requires `--authorized`. |
-| `partex runs` | Query | Lists recorded runs. |
-| `partex show <run-id>` | Export | Canonical export of a run, secrets redacted by default. |
-| `partex report` | Query | Cross-run rollup of findings, model spend and tool calls. |
-| `partex checks` | Registry | Installed checks, linked skills and frontmatter lint. |
+| `partex review <bundle>` | Passive | Deterministic passive checks (`header-security`, `js-analysis`) over an offline bundle. |
+| `partex test <engagement>` | Active + Passive | Live baseline capture, active checks, passive checks over live captures, and PoC verification; requires `--authorized` (supports `--insecure` TLS). |
+| `partex verify <run-id> <finding-id>` | Active | Re-runs the minimal verification recipe for one finding; requires `--authorized`. |
+| `partex import-har <file.har>` | Import | Build a passive-reviewable bundle from an operator-exported HAR file (scope-filtered, MITM-free). |
+| `partex export-bundle <run-id>` | Export | Export a live run's captured exchanges as a passive-reviewable bundle (secrets redacted by default). |
+| `partex runs` | Query | Lists recorded runs from SQLite (`RunStore`). |
+| `partex show <run-id>` | Export | Canonical JSON or text export of a run, secrets redacted by default. |
+| `partex report` | Query | Cross-run rollup of findings, model spend, and tool calls. |
+| `partex checks` | Registry | Installed checks, linked skills, and frontmatter lint. |
+| `partex sandboxes` | Host | Detect which sandboxes (`monty`, `docker`, `podman`, `bubblewrap`) this host can run. |
 | `partex chat <run-id>` | Read-only + Model | Read-only review chat over a saved run (CLAI2 terminal). |
-| `partex agent <engagement>` | Active + Model | Live operator-directed session, including operator-confirmed `/scope add`; requires `--authorized`. |
+| `partex agent <engagement>` | Active + Model | Live operator-directed session (with `download_asset`, `discover_js_assets`, and operator-confirmed `/scope add`); requires `--authorized`. |
 
 ## Planned CLI Surface
 
@@ -115,26 +129,8 @@ Not implemented yet, from [`PLAN.md` §8](PLAN.md#8-cli-surface):
 | Command | Mode / Role | Description |
 |---|---|---|
 | `partex engage init <dir>` / `engage check <dir>` | Setup / Validation | Scaffold and validate `engagement.json` without sending traffic. |
-| `partex export-bundle <run-id>` | Export | Export a live run's exchanges as a passive-reviewable bundle ([#28](https://github.com/mdfranz/partex/issues/28)). |
-| `partex import-har <file.har>` | Import | Build a bundle from an operator-exported HAR file ([#28](https://github.com/mdfranz/partex/issues/28)). |
-| `partex summarize <run-id>` | Model | Reference-validated `ReviewSummary` over committed findings (M4). |
-| `partex browse <engagement>` | Active + Browser (M7) | Browser capture harness (requires `--authorized`). |
-
----|---|---|
-| `partex engage init <dir>` | Setup | Scaffold a new `engagement.json` manifest and target scope template. |
-| `partex engage check <dir>` | Validation | Validate engagement manifest, authorization attestation, scope rules, and credential/role env vars without sending traffic. |
-| `partex review <bundle>` | Passive | Run deterministic passive checks over an offline evidence bundle. |
-| `partex test <engagement>` | Active | Run live baseline capture, passive + active checks, and PoC verification (requires `--authorized`). |
-| `partex verify <run-id> <finding-id>` | Active | (Re-)execute the minimal verification recipe for a finding against the live target (requires `--authorized`). |
-| `partex export-bundle <run-id>` | Export | Export a live run's captured exchanges as a passive-reviewable bundle (secrets redacted by default). |
-| `partex import-har <file.har>` | Import | Build a passive-reviewable bundle from an operator-exported HAR file — the MITM-free browser-capture path. |
-| `partex runs` | Query | List recorded runs from SQLite (`RunStore`). |
-| `partex show <run-id>` | Export | Export a run's evidence, findings, verifications, tool calls, and summary as canonical JSON or text. |
-| `partex summarize <run-id>` | Model | Generate or retry a reference-validated `ReviewSummary` over committed findings. |
-| `partex checks` | Registry | List registered checks (`PassiveCheck` / `ActiveCheck`), linked skills, and frontmatter lint status. |
-| `partex agent <engagement>` | Active + Model | Run the deterministic `test` pipeline, then hand control to the interactive CLAI2 agent or bounded `--auto` loop (requires `--authorized`). |
-| `partex browse <engagement>` | Active + Browser (M7) | Browser capture harness: record and actively probe authenticated SPA flows as evidence via operator Chrome (CDP attach) or managed Chromium (requires `--authorized`). |
-| `partex chat <run-id>` | Read-only + Monty | Interactive read-only review chat over a saved run using CLAI2's Monty-backed Code Mode. |
+| `partex summarize <run-id>` | Model | Generate or retry a reference-validated `ReviewSummary` over committed findings (M4). |
+| `partex browse <engagement>` | Active + Browser (M7) | Browser capture harness via operator Chrome (CDP attach) or managed Chromium (requires `--authorized`). |
 
 ---
 

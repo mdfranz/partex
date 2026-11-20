@@ -1,20 +1,22 @@
 # ParTEx skill plan: structure, synthesis, and priorities
 
-> Status: skill roadmap for the planned `partex` package (no code yet). Consolidates and
-> supersedes `WEB_API_SKILL_PRIORITIES.md` and `SOURCE_SKILL_SYNTHESIS.md` from this branch
-> (preserved in git history at 39c1028). The engine contract targeted here is `PLAN.md` as of
-> 45dfaa4: **full offensive scope**, two execution modes — passive review of offline bundles and
-> active live testing with probe → verify → replay — and three required capture/probe paths
-> (scoped HTTP client and HAR import in M3, browser capture harness in M7; `DEPS.md` §5), with
-> skills as data-only Markdown and checks as entry-point code (`PLAN.md` §10).
+> Status: active skill roadmap for `partex` (P0 built-in skills `header-review`,
+> `version-disclosure`, and `js-analysis` are shipped; S1–S3 skills are drafted and staged
+> in `skills/`). Consolidates and supersedes `WEB_API_SKILL_PRIORITIES.md` and
+> `SOURCE_SKILL_SYNTHESIS.md` (preserved in git history at 39c1028). The engine contract
+> targeted here is `PLAN.md`: **full offensive scope**, two execution modes — passive review
+> of offline bundles and active live testing with probe → verify → replay — and three
+> capture/probe paths (scoped HTTP client and HAR import landed in M3, browser capture
+> harness in M7; `DEPS.md` §5), with skills as data-only Markdown and checks as entry-point
+> code (`PLAN.md` §10).
 
 ## 1. Reading order
 
 | Doc | Role |
 |---|---|
-| `PLAN.md` (main branch) | Engine contract: modes, data contracts, registry, milestones M0–M7 |
-| `SKILLS.md` | Inventory of skill **sources** in the three Go forks |
-| `ARCHITECTURE.md` | Fork internals the skill system inherited |
+| `PLAN.md` | Engine contract: modes, data contracts, registry, milestones M0–M7 |
+| `docs/lineage/SKILLS.md` | Historical inventory of skill **sources** in the three Go forks |
+| `docs/lineage/ARCHITECTURE.md` | Historical fork internals the skill system inherited |
 | this doc | How ParTEx skills are structured, synthesized from sources, and sequenced |
 
 The superseded drafts disagreed with the current plan: `WEB_API_SKILL_PRIORITIES.md` was
@@ -36,7 +38,7 @@ Frontmatter contract:
 
 | Field | Rule |
 |---|---|
-| `name` | **Must equal the directory name**, kebab-case. The forks match skills by directory name; the `scopesentry`/`scopesentry-mcp` divergence (see `SKILLS.md`) is the warning case. |
+| `name` | **Must equal the directory name**, kebab-case. The forks match skills by directory name; the `scopesentry`/`scopesentry-mcp` divergence (see `docs/lineage/SKILLS.md`) is the warning case. |
 | `description` | One *when-to-invoke* sentence. The agent reads only this (plus the capability catalog) until it loads the skill. |
 | `checks` | Every registered check id the skill documents. Unknown ids warn at `partex checks` time; a check with no skill and a skill with no check are both legal (§10). |
 | `modes` | Required. The execution modes the skill's guidance serves — `passive` (bundle review), `active` (live testing), or both. Validated by the D6 lint; surfaced to the agent alongside the description, so mode relevance is visible before the body loads. |
@@ -140,7 +142,7 @@ active checks and redaction:
 
 ## 7. Source pool notes
 
-Condensed from `SOURCE_SKILL_SYNTHESIS.md`; the full fork inventory stays in `SKILLS.md`:
+Condensed from `SOURCE_SKILL_SYNTHESIS.md`; the full fork inventory stays in `docs/lineage/SKILLS.md`:
 
 - **Go forks** — 16 manifest instances across three repos representing 10 names; all share
   `api-recon`, `playwright-cli`, `scopesentry`. Use **BaaRai as the English base** (10 skills),
@@ -170,7 +172,7 @@ per check finding class), `web-app-logic`'s 55 into ≤ 4; keep only scenarios t
 
 ## 8. Synthesis workflow (per skill)
 
-1. Pick the family and slice from §4; re-read the source rows and `SKILLS.md` entries.
+1. Pick the family and slice from §4; re-read the source rows and `docs/lineage/SKILLS.md` entries.
 2. Base the draft on the named primary source in English (BaaRai fork content, communitytools
    depth, strix structure — never strix commands verbatim).
 3. Condense reference trees per §7 targets; drop tool-specific content; replace with `partex`
@@ -200,5 +202,5 @@ synthesis starts from the same place the old backlog did:
 
 Wider reconnaissance (`bbot-recon`), binary/package RE (`rea`), patch diffing (`patch-diff`),
 defense telemetry (`edr-bypass-re`), exploitation chains (`php2shell`), infrastructure/network,
-mobile — see `SKILLS.md` for the inventory and `PLAN.md` §17.8 for the porting question these
+mobile — see `docs/lineage/SKILLS.md` for the inventory and `PLAN.md` §17.8 for the porting question these
 defer to.
