@@ -704,6 +704,37 @@ async def test_report_and_secrets_commands_write_private_files_and_never_echo_va
         assert stat.S_IMODE(report.parent.stat().st_mode) == 0o700
 
 
+def test_markdown_report_lists_coverage_outcomes() -> None:
+    from partex.operator_export import render_markdown_report
+
+    payload: dict[str, Any] = {
+        'run': {
+            'state': 'checks_complete',
+            'engine_version': '0',
+            'input_kind': 'engagement',
+            'input_ref': 'e',
+            'selected_checks': [],
+            'requests_spent': 1,
+            'error': None,
+            'scope_snapshot': None,
+        },
+        'findings': [],
+        'evidence': [],
+        'tool_calls': [],
+        'verifications': [],
+        'summary': None,
+        'coverage': [
+            {
+                'surface': 'http://a.test',
+                'risk_area': 'error-page-disclosure',
+                'outcome': 'not_applicable',
+                'reason': 'catch-all',
+            }
+        ],
+    }
+    assert 'error-page-disclosure: not_applicable (catch-all)' in render_markdown_report(payload, 'run_x')
+
+
 async def test_report_and_secrets_accept_an_explicit_path_and_report_failures(
     tmp_store: RunStore, tmp_path: Path, target_app: Any
 ) -> None:
