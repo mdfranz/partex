@@ -24,14 +24,22 @@ replayable `verify_recipe`.
   1. `GET /` — inspect `Server`, `X-Powered-By`, `X-AspNet-Version`, and `X-Generator`
      headers on the root response.
   2. `GET /robots.txt` — check standard metadata responses for server/framework banners.
-  3. `GET /partex-nonexistent-probe-<token>` — trigger a `404` or error handler to inspect
-     default error pages for version strings, framework names, or stack traces.
+  3. `GET /partex-nonexistent-probe-0` — the check's fixed, deterministic token (stable
+     paths keep evidence and finding IDs comparable across replays) — trigger a `404` or
+     error handler to inspect default error pages for version strings, framework names, or
+     stack traces.
+- **Anchor under the engagement's scope (#80).** When the target sits deeper than the site
+  root (e.g. `https://host/api/v1/`), probes anchor under the baseline capture's directory
+  (`/api/v1/robots.txt`, `/api/v1/partex-nonexistent-probe-0`); a scope refusal falls back
+  to the root path once and is then skipped cleanly — it never fails the run.
+- **One finding per banner.** The same `(header, banner value)` seen on several responses is
+  one finding citing the primary evidence, not a finding per probe.
 
 ## Check Mapping (`version-disclosure`)
 
 | Finding Class | Signal | Expected Severity |
 |---|---|---|
-| Product + version banner | Header (`Server`, `X-Powered-By`, etc.) includes explicit version digits (e.g. `nginx/1.24.0`, `Express`, `PHP/8.2.1`) | `info` / `low` |
+| Product + version banner | Header (`Server`, `X-Powered-By`, etc.) includes explicit version digits (e.g. `nginx/1.24.0`, `Express`, `PHP/8.2.1`) | `low`; `X-Generator`-class CMS hints are `info` |
 | Verbose error / stack trace | Error body exposes file paths, runtime stack frames, framework debug pages, or SQL fragments | `medium` |
 
 - **Non-findings:** Generic product names without version numbers (e.g. `Server: cloudflare`

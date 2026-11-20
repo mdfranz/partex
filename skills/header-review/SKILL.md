@@ -21,13 +21,23 @@ on API payloads or redirects do not generate false positives.
   `RunStore` or loaded from an offline bundle (`LoadedBundle` via `partex review`).
 - **Response-type classification.** Classify each exchange before evaluating controls:
   - **HTML document** (`Content-Type: text/html` with `2xx` status): evaluate HSTS, CSP,
-    `X-Content-Type-Options`, `Set-Cookie`, and CORS.
+    framing controls (`X-Frame-Options` or CSP `frame-ancestors`), `X-Content-Type-Options`,
+    `Set-Cookie`, and CORS.
   - **API / JSON response** (`Content-Type: application/json` or non-HTML data): evaluate
     HSTS (on HTTPS), `X-Content-Type-Options`, `Set-Cookie`, and CORS. Do not require
-    HTML-rendering CSP directives (`script-src`, `style-src`) on pure JSON APIs; check
-    `frame-ancestors 'none'` only if framing applies.
+    HTML-rendering CSP directives (`script-src`, `style-src`) or framing controls on pure
+    JSON APIs.
   - **Redirect** (`3xx` status): evaluate HSTS (on HTTPS) and `Set-Cookie` if present;
-    do not flag missing CSP on bare redirect stubs.
+    do not flag missing CSP or framing controls on bare redirect stubs.
+- **Aggregation (#38).** Findings aggregate per host and issue class: one finding per
+  (host, subject) with every affected evidence ID attached, so a large capture produces one
+  `Missing HSTS header` finding per host, not one per exchange.
+- **Precision rules (#38).** Classify session cookies by whole name tokens (`sid` must not
+  match `inside`); CSRF double-submit cookies do not require `HttpOnly`; accept a quoted
+  HSTS `max-age` and treat an unparseable one as a malformed-directive finding, not
+  `max-age=0`; do not flag `'unsafe-inline'` when a nonce/hash makes it inert; rate passive
+  wildcard-with-credentials CORS `medium` (the exploitable reflected-origin variant needs an
+  active probe).
 - **Insufficient evidence.** When `Content-Type` is missing or the exchange is a
   `body_refused` stub without headers, record insufficient evidence rather than guessing.
 - **Secret redaction.** Never echo raw `Set-Cookie` values, session tokens, or
