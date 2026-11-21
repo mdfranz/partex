@@ -58,10 +58,15 @@ class ScopeControl:
             return 'Already in scope; nothing to add.'
         self.pending = spec
         lines = ['Would add to the engagement scope (ports apply to every host in scope):']
-        lines += [f'  + host {host}' for host in added_hosts] + [f'  + port {port}' for port in added_ports]
+        lines += [f'  + host {host}{self._tls_note(host)}' for host in added_hosts]
+        lines += [f'  + port {port}' for port in added_ports]
         lines += [f'  + url {url}' for url in added_urls]
         lines.append('Not in effect yet. Type /scope confirm to apply it, or /scope cancel.')
         return '\n'.join(lines)
+
+    def _tls_note(self, host: str) -> str:
+        """Flag a host whose certificates will not be verified (``-k`` / ``tls.verify=false`` covers it, #101)."""
+        return ' (TLS certificates NOT verified)' if self.session.host_tls_unverified(host) else ''
 
     async def confirm(self) -> str:
         if self.pending is None:
@@ -69,14 +74,20 @@ class ScopeControl:
         spec = self.pending
         operator = self.session.engagement.authorization.operator
         try:
-            _, after = await self.session.extend_scope(spec, confirmed_by=operator)
+            before, after = await self.session.extend_scope(spec, confirmed_by=operator)
         except PartexError as exc:
             if exc.rule_code == 'scope-persist':  # nothing changed; keep it staged so /scope confirm can retry
                 return f'Not applied: {exc}\nThe change is still staged; /scope confirm to retry or /scope cancel.'
             self.pending = None
             return f'Refused: {exc}'
         self.pending = None
-        return f'Scope extended and recorded on the run.\n{describe(after)}'
+        unverified = [h for h in after.hosts if h not in before.hosts and self.session.host_tls_unverified(h)]
+        warning = (
+            f'\nWarning: TLS certificates will NOT be verified for {", ".join(unverified)} (-k / tls.verify=false).'
+            if unverified
+            else ''
+        )
+        return f'Scope extended and recorded on the run.\n{describe(after)}{warning}'
 
     def _destination(self, args: list[str], suffix: str) -> Path:
         if args:

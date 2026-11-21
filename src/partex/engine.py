@@ -53,7 +53,7 @@ from .models import (
 from .probes import SeedPlan, plan_seed_probes
 from .scope import apply_urls, check_url, extend_scope, parse_urls_file
 from .storage import RunState, RunStore, SurfaceKind, SurfaceRel, run_artifact_dir, surface_node_id
-from .target import DEFAULT_MAX_ASSET_BYTES, ScopedHttpClient
+from .target import DEFAULT_MAX_ASSET_BYTES, ScopedHttpClient, tls_unverified
 
 ENTRY_POINT_GROUP = 'partex.checks'
 MAX_DRAFTS_PER_CHECK = 1000
@@ -857,17 +857,23 @@ class LiveSession:
             url, dest_dir=run_artifact_dir(self._store.path, self.run_id), headers=headers, max_bytes=max_bytes
         )
 
+    def host_tls_unverified(self, host: str) -> bool:
+        """Whether this session accepts invalid TLS certificates for *host* (``-k`` / engagement ``tls``, #101)."""
+        return tls_unverified(self.engagement.tls, host)
+
     async def extend_scope(self, spec: str, *, confirmed_by: str) -> tuple[Scope, Scope]:
         """Add the host/port(s) in *spec* to this session's scope; returns ``(before, after)``.
 
         Only an operator-confirmed call may reach this (never a model tool). The scope only grows: paths,
         exclusions and budgets are unchanged, and the result must pass the E3 checks. The amendment is
-        audited as a ``scope_amend`` tool call on the run and the run's scope snapshot is updated.
+        audited as a ``scope_amend`` tool call on the run and the run's scope snapshot is updated. The audit
+        row records, per added host, whether its TLS certificates will be verified (#101).
         """
         before = self.engagement.scope
         after = extend_scope(before, spec)
         if after == before:
             return before, after
+        added_hosts = [host for host in after.hosts if host not in before.hosts]
         # Persist the snapshot and the audit row together *before* the scope takes effect: if the write fails
         # the effective scope, the stored scope and the audit trail all still show the previous scope.
         try:
@@ -880,6 +886,7 @@ class LiveSession:
                     'hosts_after': after.hosts,
                     'ports_before': before.ports,
                     'ports_after': after.ports,
+                    'tls_verified': {host: not self.host_tls_unverified(host) for host in added_hosts},
                 },
             )
         except Exception as exc:
