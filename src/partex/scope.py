@@ -291,15 +291,19 @@ def check_url(scope: Scope, url: str) -> None:
     view = parse_scoped_url(url)
     allowed_hosts = {normalize_host(h) for h in scope.hosts}
     if view.host not in allowed_hosts:
-        raise ScopeViolation(f'host {view.host!r} not in scope hosts', rule_code='scope-invalid')
+        raise ScopeViolation(f'host {view.host!r} not in scope hosts', rule_code='scope-invalid', kind='host')
     allowed_ports = set(scope.ports) if scope.ports else {80, 443}
     if view.port not in allowed_ports:
-        raise ScopeViolation(f'port {view.port} not in scope ports {sorted(allowed_ports)}', rule_code='scope-invalid')
+        raise ScopeViolation(
+            f'port {view.port} not in scope ports {sorted(allowed_ports)}', rule_code='scope-invalid', kind='port'
+        )
     for path in view.candidate_paths:
         if not _path_allowed(scope, path):
-            raise ScopeViolation(f'path {path!r} matches no allowed prefix or an exclusion', rule_code='scope-invalid')
+            raise ScopeViolation(
+                f'path {path!r} matches no allowed prefix or an exclusion', rule_code='scope-invalid', kind='path'
+            )
     if scope.urls and not any(_url_entry_matches(entry, view) for entry in scope.urls):
-        raise ScopeViolation('URL is not in the authorized URL list', rule_code='scope-invalid')
+        raise ScopeViolation('URL is not in the authorized URL list', rule_code='scope-invalid', kind='url-list')
 
 
 def validate_scope(scope: Scope) -> list[str]:
@@ -349,6 +353,28 @@ def parse_scope_target(spec: str) -> tuple[str, frozenset[int]]:
     return parsed.host, frozenset({parsed.port} if explicit_port else {80, 443})
 
 
+def _extend_url_list(scope: Scope, spec: str) -> Scope:
+    """``extend_scope`` when an authorized URL list is active: only a full URL (``…/*`` for a prefix) widens it.
+
+    A bare host or ``host:port`` would change nothing a request is checked against, so it is refused with a hint.
+    """
+    spec = spec.strip()
+    if '://' not in spec:
+        raise ScopeViolation(
+            f'an authorized URL list is active, so scope grows by URL, not host: use /scope add <url> '
+            f'(end it with /* for a path prefix), e.g. https://{spec}/*',
+            rule_code='scope-invalid',
+        )
+    plain = _entry_url(spec)
+    parse_scoped_url(plain)  # refuse anything ambiguous before it joins the list
+    if spec in scope.urls:
+        return scope
+    extended = apply_urls(scope, [*scope.urls, spec])
+    if problems := validate_scope(extended):
+        raise ScopeViolation(f'extended scope is invalid: {"; ".join(problems)}', rule_code='scope-invalid')
+    return extended
+
+
 def extend_scope(scope: Scope, spec: str) -> Scope:
     """Return *scope* plus the host and port(s) named by *spec*; it only ever grows.
 
@@ -356,6 +382,13 @@ def extend_scope(scope: Scope, spec: str) -> Scope:
     adding a port keeps 80 and 443 explicitly. Raises :class:`ScopeViolation` when *spec* is ambiguous
     or the result fails the E3 checks.
     """
+    if scope.urls:
+        return _extend_url_list(scope, spec)
+    return _extend_hosts_ports(scope, spec)
+
+
+def _extend_hosts_ports(scope: Scope, spec: str) -> Scope:
+    """The host/port half of :func:`extend_scope`, ignoring any URL list."""
     host, ports = parse_scope_target(spec)
     hosts = scope.hosts if host in {normalize_host(h) for h in scope.hosts} else [*scope.hosts, host]
     if scope.ports:
@@ -395,11 +428,12 @@ def parse_urls_file(text: str) -> list[str]:
 def apply_urls(scope: Scope, urls: list[str]) -> Scope:
     """Return *scope* restricted to the exact *urls*; their hosts and ports are added so the other checks agree.
 
-    Hosts and ports are only ever added (80 and 443 always, since entries without a port cover both); path prefixes, exclusions and budgets are unchanged.
+    Hosts and ports are only ever added (80 and 443 always, since entries without a port cover both);
+    path prefixes, exclusions and budgets are unchanged.
     """
     extended = scope
     for url in urls:
-        extended = extend_scope(extended, _entry_url(url))
+        extended = _extend_hosts_ports(extended, _entry_url(url))
     ports = extended.ports
     if ports:  # 80 and 443 are always open for the listed URLs; an empty list already means exactly those
         ports = [*ports, *sorted(_DEFAULT_PORT_SET - set(ports))]

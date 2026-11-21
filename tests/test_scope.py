@@ -503,3 +503,43 @@ def test_apply_urls_always_opens_80_and_443() -> None:
     scope = apply_urls(scope_of(ports=[8080]), ['https://example.test/a'])
     assert {80, 443, 8080} <= set(scope.ports)
     assert apply_urls(scope_of(ports=[]), ['https://example.test/a']).ports == []  # empty already means 80 and 443
+
+
+# ── Denial kinds and growing a URL list (#121) ─────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ('url', 'kind'),
+    [
+        ('https://other.test/a', 'host'),
+        ('https://example.test:9999/a', 'port'),
+        ('https://example.test/b', 'url-list'),
+    ],
+)
+def test_denials_say_which_rule_refused(url: str, kind: str) -> None:
+    scope = scope_of(path_prefixes=['/'], exclusions=[], urls=['https://example.test/a'], ports=[443])
+    with pytest.raises(ScopeViolation) as caught:
+        check_url(scope, url)
+    assert caught.value.kind == kind
+
+
+def test_path_denial_kind() -> None:
+    with pytest.raises(ScopeViolation) as caught:
+        check_url(scope_of(), 'https://example.test/not-api')
+    assert caught.value.kind == 'path'
+
+
+def test_extend_scope_with_a_url_list_adds_the_url_not_just_the_host() -> None:
+    scope = apply_urls(scope_of(path_prefixes=['/'], exclusions=[], ports=[443]), ['https://example.test/a'])
+    extended = extend_scope(scope, 'https://example.test/openapi.json')
+    assert extended.urls == ['https://example.test/a', 'https://example.test/openapi.json']
+    check_url(extended, 'https://example.test/openapi.json')
+    assert extend_scope(extended, 'https://example.test/openapi.json') == extended  # idempotent
+    with_prefix = extend_scope(extended, 'https://example.test/docs/*')
+    check_url(with_prefix, 'https://example.test/docs/x')
+
+
+def test_extend_scope_with_a_url_list_refuses_a_bare_host_with_a_hint() -> None:
+    scope = apply_urls(scope_of(path_prefixes=['/'], exclusions=[], ports=[443]), ['https://example.test/a'])
+    with pytest.raises(ScopeViolation, match=r'scope grows by URL.*https://new\.test/\*'):
+        extend_scope(scope, 'new.test')

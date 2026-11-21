@@ -348,6 +348,9 @@ tool — is validated immediately before send:
    refused as `scope-invalid` before any socket, the listed hosts and ports are added to
    `scope.hosts`/`scope.ports`, and `target.base_url` must be listed. Exclusions still win, and unlisted
    probes (such as a check's `/robots.txt`) are refused by the scope gate rather than failing the run.
+   A refusal carries its rule (`host`, `port`, `path`, `url-list`) so the model's advice to the operator fits it;
+   with a list active, the operator's `/scope add <url>` (`…/*` for a prefix) adds a URL after `/scope confirm`, and a bare
+   host is refused with that hint.
 4. **Redirects**: never followed automatically; a redirect response is captured as evidence,
    and the new location is re-validated from rule 1 if the caller chooses to follow it.
 5. **Budgets**: a token-bucket limiter enforces `max_rps`; a run-level counter enforces
