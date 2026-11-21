@@ -60,6 +60,12 @@ The version-disclosure check looks for evidence like this:
 | `GET /robots.txt` | A response header reveals the software version, such as `Server: FixtureTarget/2.3.1`. |
 | `GET /partex-nonexistent-probe-0` | A `404` response includes internal details, such as a stack trace. |
 
+To review that run with a model, resume the latest saved run in read-only chat. This example uses OpenRouter and requires `OPENROUTER_API_KEY`.
+
+```sh
+./partex.sh -m openrouter:deepseek/deepseek-v4.1-flash-1017 --resume
+```
+
 ## Commands and documentation
 
 - `./partex.sh --help` shows options for the interactive testing launcher.
@@ -70,9 +76,8 @@ To inspect a saved run, copy its ID from `./partex.sh list` and substitute it be
 
 ```sh
 uv run partex show RUN_ID --db ./partex-probe.db --format text
-./partex.sh -m openrouter:deepseek/deepseek-v4.1-flash-1017 --resume RUN_ID
 ```
 
-The first command prints the saved evidence and findings. The second opens read-only chat on that run and requires an OpenRouter API key.
+This prints the saved evidence and findings. To open a particular run in chat, pass its ID after `--resume`.
 
 [Design](PLAN.md)
