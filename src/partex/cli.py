@@ -12,6 +12,7 @@ Output is JSON when stdout is not a TTY (or with ``--json`` / ``--format json``)
 import argparse
 import json
 import os
+import re
 import sys
 import warnings
 from collections.abc import Callable, Sequence
@@ -83,6 +84,18 @@ def resolve_db_path(cli_value: str | None, env: dict[str, str] | None = None) ->
 
 def _wants_json(explicit: bool = False) -> bool:
     return explicit or not sys.stdout.isatty()
+
+
+_TERMINAL_CONTROLS = re.compile(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]')
+
+
+def neutralize_controls(text: str) -> str:
+    """Show C0/C1 control characters (except newline and tab) as visible ``\\xNN`` escapes (#141).
+
+    Reports are model-authored from untrusted target data, so they may carry ANSI/OSC sequences (screen clears,
+    cursor moves, OSC 8 links, title changes) that a terminal would act on instead of display.
+    """
+    return _TERMINAL_CONTROLS.sub(lambda match: f'\\x{ord(match.group()):02x}', text)
 
 
 def _print_json(payload: Any) -> None:
@@ -607,8 +620,10 @@ def _cmd_reports(args: argparse.Namespace) -> int:
         content = read_report(db_path, args.run_id, args.name)
         if args.json:
             _print_json({'run_id': args.run_id, 'name': args.name, 'content': content})
+        elif sys.stdout.isatty():
+            sys.stdout.write(neutralize_controls(content))  # a terminal would act on escapes; show them
         else:
-            sys.stdout.write(content)
+            sys.stdout.write(content)  # piped or redirected: the saved bytes, unchanged
     else:
         reports = list_reports(db_path, args.run_id)
         if _wants_json(args.json):
