@@ -16,7 +16,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
@@ -68,25 +68,36 @@ def span_record(span: ReadableSpan) -> dict[str, Any]:
 
 
 class JsonlSpanExporter(SpanExporter):
-    """Append each finished span to *path* as one JSON line (flushed per export, file mode ``0600``)."""
+    """Append each finished span to *path* as one JSON line (flushed per export, file mode ``0600``).
+
+    The file is created on the first span, so a command that exits before doing any work (a usage
+    error, a gate refusal) leaves no empty log behind (#126).
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        self._file = os.fdopen(fd, 'a', encoding='utf-8')
+        self._file: TextIO | None = None
+
+    def _open(self) -> TextIO:
+        if self._file is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            self._file = os.fdopen(fd, 'a', encoding='utf-8')
+        return self._file
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         try:
+            file = self._open()
             for span in spans:
-                self._file.write(json.dumps(span_record(span), default=str) + '\n')
-            self._file.flush()
+                file.write(json.dumps(span_record(span), default=str) + '\n')
+            file.flush()
         except OSError, ValueError:  # a full disk or closed file must never break a probe session
             return SpanExportResult.FAILURE
         return SpanExportResult.SUCCESS
 
     def shutdown(self) -> None:
-        self._file.close()
+        if self._file is not None:
+            self._file.close()
 
 
 def configure_telemetry(*, log_path: Path | None, remote: bool, service_version: str) -> None:

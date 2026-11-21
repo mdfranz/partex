@@ -1183,3 +1183,12 @@ def test_tester_instructions_describe_batch_workflow() -> None:
     assert 'http_request_batch' in TESTER_INSTRUCTIONS
     assert 'run_code' in TESTER_INSTRUCTIONS
     assert str(BATCH_MAX_ITEMS) in TESTER_INSTRUCTIONS
+
+
+async def test_download_asset_audit_row_records_status(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    """download_asset rows carry the response status and evidence ID, like http_request rows (#126)."""
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        await drive(session, tmp_store, [('download_asset', {'path': '/robots.txt'})])
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert call.tool == 'download_asset'
+        assert call.result['status'] == 200 and call.result['evidence_id'].startswith('ev_')
