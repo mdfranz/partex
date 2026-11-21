@@ -28,6 +28,7 @@ checkout pyprojects, November 2026):
 | `anyio` | 4.7.0 | `pydantic-ai-slim` (direct, pinned for cancellation delivery) | Worker task groups, `CapacityLimiter`, `fail_after`, `to_thread` (`PLAN.md` §7.1) |
 | `pydantic` | 2.12 | `pydantic-ai-slim` | All data contracts (`PLAN.md` §5) |
 | `pyyaml` | 6.0.2 | `pydantic-clai2` (direct) | `SKILL.md` frontmatter lint (D6) and `format: openapi` `ConfigExcerpt`s, which may be YAML |
+| `referencing` | 0.37.0 | `mcp` (via `pydantic-ai-slim`, declared direct in #153) | JSON Schema / OpenAPI `$ref`, `$id`, `$anchor`, and `$dynamicRef` resolution in `openapi_resolver.py` |
 | `rich` | 14 | `pydantic-clai2` (direct) | CLI summary output |
 | `prompt-toolkit` | 3.0.52 | `pydantic-clai2` (direct) | `chat` TUI (via CLAI2) |
 | `logfire[httpx]` | 4.31.0 | `pydantic-clai2` (direct) | Opt-in observability (`PLAN.md` §11.1) |
@@ -50,14 +51,20 @@ Need: load a `format: openapi` `ConfigExcerpt`, resolve local `$ref`/`allOf`, ma
 captured paths against path templates, check `properties`/`additionalProperties`, carry
 `revision` onto findings and coverage rows (`skills/api-inventory`, D1).
 
-**Decision: minimal in-package resolver as check code** (~300–500 lines), covering exactly
-the JSON Schema subset the check emits findings on. Rejected alternatives:
+**Decision (amended #153): in-package OpenAPI subset resolver backed by `referencing` for `$ref`
+resolution.** `referencing` (0.37.0) is already present in `uv.lock` through `mcp`, so declaring it
+directly adds zero new packages while replacing hand-rolled JSON Pointer / `$ref` resolution with
+full JSON Schema 2020-12 / OAS 3.1 referencing (`$id`, `$anchor`, `$dynamicRef`), memoized schema
+resolution, and a bounded resolution budget. The `Registry` is built with **no retriever**, so
+external `$ref`s never open sockets and continue to degrade to `not_applicable` (insufficient
+evidence). Rejected alternatives:
 
-- `openapi-core` — full request/response validation we do not perform in v1; pulls a large
-  dependency tree. **Revisit trigger:** the P2.2 `gateway-policy` slice growing into full
+- `openapi-core` — full request/response validation we do not perform in v1; pulls ~20 packages
+  (including `werkzeug`, `pydantic-settings`, and `python-dotenv`) to replace ~95 lines of path
+  matching. **Revisit trigger:** the P2.2 `gateway-policy` slice growing into full
   contract-conformant request validation.
-- `jsonschema` — reference validator, but still leaves path-template matching to us; adds
-  `referencing`/`jsonschema-specifications` for checks we can do with dict lookups.
+- `jsonschema` — full JSON Schema validation still leaves path-template matching and
+  partex-specific DTO/sensitive-field analysis to us; we only need its `referencing` layer.
 
 The unresolvable-external-`$ref` → insufficient-evidence path is already specified by
 `skills/api-inventory/reference/contract-matching.md` §1; the resolver implements that, not
@@ -285,12 +292,13 @@ above stay terse.
    resolver connect-to-IP with original `Host`/SNI/hostname cert verification,
    `follow_redirects=False`); on failure, fall back to `httpx` 0.28.x. The §13.1 greenfield
    check asserts which library `partex` actually imports.
-2. **§3.1 (minimal OpenAPI resolver) — decided**: own the subset in check code. v1 never
-   performs full request/response validation, and the resolver implements a specified
-   contract (the insufficient-evidence path in
-   `skills/api-inventory/reference/contract-matching.md` §1), not the whole spec.
-   Edge-case risk is bounded by the S1 fixture triad; the P2.2 `gateway-policy` revisit
-   trigger stands.
+2. **§3.1 (minimal OpenAPI resolver) — decided (amended #153)**: own the OpenAPI subset
+   (path-template specificity matching, composition flattening, undeclared/sensitive-field
+   analysis) in `openapi_resolver.py`, and adopt `referencing` (already in `uv.lock` via `mcp`,
+   zero new locked packages) with no retriever for `$ref` / `$id` / `$anchor` / `$dynamicRef`
+   resolution. `openapi-core` stays rejected behind the P2.2 `gateway-policy` revisit trigger.
+   v1 never performs full request/response validation, and the resolver implements the specified
+   insufficient-evidence contract in `skills/api-inventory/reference/contract-matching.md` §1.
 3. **§7.2 (import-har placement) — decided**: M3, beside `export-bundle` (applied to
    `PLAN.md` §8, §13.4, §17.5).
 4. **§7.3 (Playwright Node driver) — decided**: accept the lockfile-pinned wheel. Attach
