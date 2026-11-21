@@ -403,7 +403,10 @@ second transport, so model-provider traffic and other hosts stay strict; the sco
 SNI and Host header are unchanged. The run records a `tls_verify_disabled` audit row and prints a
 warning; each exchange made unverified carries `tls_verified: false` (omitted when true, and not
 part of the evidence ID); a verification replay reuses the original exchange's setting. The model
-has no tool for it. Reporting the certificate itself as a finding is a follow-up.
+has no tool for it. Reporting the certificate itself as a finding is a follow-up. With no
+`insecure_hosts`, `-k` / `verify: false` also covers hosts the operator adds later with `/scope add`;
+with `insecure_hosts` listed, added hosts stay verified. `/scope add` and `/scope confirm` say when an
+added host will not be verified, and the `scope_amend` audit row records `tls_verified` per added host (#101).
 
 **User-Agent (#135).** Every request the target client sends carries one User-Agent per run: the
 engagement's `http: {"user_agent": "..."}`, overridden by `partex test|agent|verify --user-agent`,

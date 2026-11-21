@@ -399,6 +399,59 @@ async def test_commit_findings_per_check_is_atomic(tmp_store: RunStore):
     assert await tmp_store.get_finding(run_id, 'fn_nope') is None
 
 
+# ── #40: integrity errors, rollback masking, evidence + request count in one transaction ──
+
+
+async def test_duplicate_finding_is_a_store_integrity_error(tmp_store: RunStore):
+    run_id = await _run(tmp_store)
+    item = _http()
+    await tmp_store.add_evidence(run_id, item)
+    await tmp_store.commit_findings(run_id, [_finding(item)])
+    with pytest.raises(StoreError) as exc:
+        await tmp_store.commit_findings(run_id, [_finding(item)])  # same ID again
+    assert exc.value.rule_code == 'store-integrity'
+    assert isinstance(exc.value.__cause__, sqlite3.IntegrityError)
+    assert len(await tmp_store.findings(run_id)) == 1  # rolled back, nothing half-written
+
+
+def test_a_failed_rollback_does_not_hide_the_original_error():
+    from partex.storage import _transaction  # pyright: ignore[reportPrivateUsage]
+
+    class _Conn:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+
+        def execute(self, sql: str) -> None:
+            self.statements.append(sql)
+            if sql == 'ROLLBACK':
+                raise sqlite3.OperationalError('cannot rollback - no transaction is active')
+
+    def fail(_: object) -> None:
+        raise ValueError('the real problem')
+
+    conn = _Conn()
+    with pytest.raises(ValueError, match='the real problem') as exc:
+        _transaction(conn, fail)  # pyright: ignore[reportArgumentType]
+    assert conn.statements == ['BEGIN IMMEDIATE', 'ROLLBACK']
+    assert any('ROLLBACK also failed' in note for note in exc.value.__notes__)
+
+
+async def test_add_evidence_can_count_its_request_in_the_same_transaction(tmp_store: RunStore):
+    run_id = await _run(tmp_store)
+    item = _http()
+    assert await tmp_store.add_evidence(run_id, item, count_request=True) is True
+    # Content-addressed: the same exchange is stored once, but the second request was still sent and counts.
+    assert await tmp_store.add_evidence(run_id, item, count_request=True) is False
+    assert await tmp_store.add_evidence(run_id, _http('/other')) is True  # default: not counted
+    assert (await tmp_store.get_run(run_id)).requests_spent == 2
+    assert len(await tmp_store.evidence(run_id)) == 2
+
+    # An unknown run fails before anything is written or counted.
+    with pytest.raises(StoreError) as exc:
+        await tmp_store.add_evidence('run_nope', item, count_request=True)
+    assert exc.value.rule_code == 'run-not-found'
+
+
 # ── verification ──────────────────────────────────────────────────────────────
 
 

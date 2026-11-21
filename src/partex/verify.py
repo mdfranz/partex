@@ -168,8 +168,7 @@ async def run_verification(
 
     async def on_capture(evidence: HttpEvidence) -> None:
         # Capture-time commit (§6.1): the replay is paid for even if the rest fails.
-        await store.add_evidence(run_id, evidence)
-        await store.add_requests_spent(run_id, 1)
+        await store.add_evidence(run_id, evidence, count_request=True)
         replays.append(evidence)
 
     client = ScopedHttpClient(engagement, source=f'capture:{run_id}:verify', on_capture=on_capture)

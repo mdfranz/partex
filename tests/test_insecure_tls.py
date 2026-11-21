@@ -206,3 +206,62 @@ def test_verification_replays_reuse_the_original_exchange_setting() -> None:
 def test_the_model_has_no_tls_tool() -> None:
     names = set(build_tester_agent('test')._function_toolset.tools)  # pyright: ignore[reportPrivateUsage]
     assert not {name for name in names if 'tls' in name or 'insecure' in name or 'verify' in name}
+
+
+# ── hosts added mid-session with /scope add (#101) ──────────────────────────────
+
+
+async def test_insecure_covers_a_host_added_with_scope_add_and_says_so(
+    self_signed_server: _TlsServer, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    """``-k`` with no ``insecure_hosts`` covers every in-scope host, including one the operator adds later."""
+    from partex.agent_adapter.scope_plugin import ScopeControl
+
+    port = self_signed_server.server_port
+    directory = _write(tmp_path, _engagement(port))
+    async with engine.live_session(directory, tmp_store, authorized=True, insecure=True) as session:
+        control = ScopeControl(session)
+        staged = control.stage('localhost')
+        assert '+ host localhost (TLS certificates NOT verified)' in staged
+        confirmed = await control.confirm()
+        assert 'TLS certificates will NOT be verified for localhost' in confirmed
+
+        evidence = await session.client.request('GET', f'https://localhost:{port}/added')
+        assert evidence.http.response.status_code == 200 and evidence.tls_verified is False
+        (amend,) = [call for call in await tmp_store.tool_calls(session.run_id) if call.tool == 'scope_amend']
+    assert amend.result['tls_verified'] == {'localhost': False}
+    assert '/added' in self_signed_server.requests
+
+
+async def test_a_host_added_outside_insecure_hosts_stays_strict(
+    self_signed_server: _TlsServer, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    """With ``tls.insecure_hosts`` listed, only those hosts are relaxed: an added host is verified (and fails here)."""
+    from partex.agent_adapter.scope_plugin import ScopeControl
+
+    port = self_signed_server.server_port
+    directory = _write(tmp_path, _engagement(port, verify=False, insecure_hosts=['127.0.0.1']))
+    async with engine.live_session(directory, tmp_store, authorized=True) as session:
+        control = ScopeControl(session)
+        staged = control.stage('localhost')
+        assert '+ host localhost' in staged and 'NOT verified' not in staged
+        confirmed = await control.confirm()
+        assert 'NOT be verified' not in confirmed
+
+        with pytest.raises(PartexError, match='failed'):
+            await session.client.request('GET', f'https://localhost:{port}/strict')
+        (amend,) = [call for call in await tmp_store.tool_calls(session.run_id) if call.tool == 'scope_amend']
+    assert amend.result['tls_verified'] == {'localhost': True}
+    assert '/strict' not in self_signed_server.requests  # the handshake failed before any HTTP request
+
+
+async def test_adding_only_a_port_records_no_hosts(
+    self_signed_server: _TlsServer, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    port = self_signed_server.server_port
+    directory = _write(tmp_path, _engagement(port))
+    async with engine.live_session(directory, tmp_store, authorized=True, insecure=True) as session:
+        await session.extend_scope('127.0.0.1:8443', confirmed_by='test')
+        (amend,) = [call for call in await tmp_store.tool_calls(session.run_id) if call.tool == 'scope_amend']
+    assert amend.result['tls_verified'] == {}
+    assert amend.result['ports_after'] == [port, 8443]
