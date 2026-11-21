@@ -114,8 +114,10 @@ def test_agent_is_named_and_needs_no_credentials_to_build() -> None:
         'list_coverage',
         'list_evidence',
         'list_findings',
+        'list_research',
         'list_runs',
         'lookup_evidence',
+        'lookup_research',
     ]
 
 
@@ -206,6 +208,9 @@ def test_reviewer_has_no_write_or_network_tools() -> None:
         'list_coverage',
         'list_evidence',
         'lookup_evidence',
+        '_research_summary',
+        'list_research',
+        'lookup_research',
     }
     # Read tools may be handed the session's store as a reader, but never call a write method.
     writes = ('commit_', 'add_', 'set_state', 'set_summary', 'save_', 'record_', 'upsert_', 'create_run')

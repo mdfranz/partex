@@ -10,6 +10,9 @@ Every model is re-validated on read, so schema drift between engine versions sur
 :data:`SCHEMA_VERSION` is refused (``store-version``); it is never migrated in place.
 
 Schema version 2 adds ``findings.subject`` (#39); a version-1 store is refused like any unknown version.
+Schema version 3 adds ``web_research`` (#113). Migrations are additive only (PLAN §17): the writer upgrades a
+version-2 store in place inside one transaction (new tables, nothing rewritten or dropped); readers, which open
+``mode=ro`` and cannot migrate, also accept version 2 and see no web research there.
 
 Deviations from the PLAN §7 DDL, both required by existing contracts:
 
@@ -46,7 +49,9 @@ from .models import (
     Verification,
 )
 
-SCHEMA_VERSION = 2  # 2: findings.subject (#39)
+SCHEMA_VERSION = 3  # 2: findings.subject (#39); 3: web_research (#113)
+READABLE_VERSIONS = frozenset({2, 3})
+"""Versions a ``mode=ro`` reader accepts: the current one, and older ones the writer can migrate additively."""
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 
 type RunState = Literal['created', 'invalid', 'checks_complete', 'checks_failed', 'complete']
@@ -181,7 +186,41 @@ CREATE TABLE llm_usage (
   status TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE web_research (
+  run_id TEXT NOT NULL REFERENCES runs,
+  research_id TEXT NOT NULL,
+  call_id TEXT,
+  query TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  auth_mode TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  sources TEXT NOT NULL,
+  truncated INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (run_id, research_id)
+);
 """
+
+_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    # version -> additive statements that take a store from that version to the next (PLAN §17).
+    2: (
+        """CREATE TABLE web_research (
+  run_id TEXT NOT NULL REFERENCES runs,
+  research_id TEXT NOT NULL,
+  call_id TEXT,
+  query TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  auth_mode TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  sources TEXT NOT NULL,
+  truncated INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (run_id, research_id)
+)""",
+    ),
+}
 
 _string_list = TypeAdapter(list[str])
 
@@ -246,6 +285,23 @@ class LlmUsageRecord:
     cache_write_tokens: int
     latency_ms: int
     status: str
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class WebResearchRecord:
+    """One ``web_research`` row (#113): a persisted ``web_search`` answer. Third-party content, never evidence."""
+
+    id: str
+    call_id: str | None
+    query: str
+    provider: str
+    model: str
+    auth_mode: str
+    answer: str
+    sources: tuple[dict[str, Any], ...]
+    """``{"url": ..., "title": ...}`` per source; ``title`` may be ``None``."""
+    truncated: bool
     created_at: str
 
 
@@ -376,13 +432,19 @@ def _apply_pragmas(conn: sqlite3.Connection, busy_timeout_ms: int) -> None:
     conn.execute('PRAGMA synchronous = NORMAL')
 
 
-def _check_version(conn: sqlite3.Connection, path: Path) -> None:
+def _check_version(
+    conn: sqlite3.Connection, path: Path, accepted: frozenset[int] = frozenset({SCHEMA_VERSION})
+) -> None:
     (version,) = conn.execute('PRAGMA user_version').fetchone()
-    if version != SCHEMA_VERSION:
+    if version not in accepted:
         raise StoreError(
             f'{path}: schema version {version} is not supported (expected {SCHEMA_VERSION}); refusing to open',
             rule_code='store-version',
         )
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
 
 
 # ── Reads (shared by reader and writer) ───────────────────────────────────────
@@ -507,6 +569,31 @@ class _Reads:
 
         return await self._db.run(read)
 
+    async def web_research(self, run_id: str) -> list[WebResearchRecord]:
+        """The run's persisted web research, in the order it was saved (empty on a version-2 store)."""
+
+        def read(conn: sqlite3.Connection) -> list[WebResearchRecord]:
+            _get_run(conn, run_id)
+            if not _has_table(conn, 'web_research'):
+                return []
+            rows = conn.execute(_RESEARCH_SELECT + ' WHERE run_id = ? ORDER BY rowid', (run_id,))
+            return [_research_from_row(row) for row in rows]
+
+        return await self._db.run(read)
+
+    async def get_web_research(self, run_id: str, research_id: str) -> WebResearchRecord | None:
+        """One web research entry of *run_id*, or ``None`` (cross-run IDs never resolve)."""
+
+        def read(conn: sqlite3.Connection) -> WebResearchRecord | None:
+            if not _has_table(conn, 'web_research'):
+                return None
+            row = conn.execute(
+                _RESEARCH_SELECT + ' WHERE run_id = ? AND research_id = ?', (run_id, research_id)
+            ).fetchone()
+            return None if row is None else _research_from_row(row)
+
+        return await self._db.run(read)
+
     async def surface(self, run_id: str) -> tuple[list[SurfaceNode], list[SurfaceEdge]]:
         def read(conn: sqlite3.Connection) -> tuple[list[SurfaceNode], list[SurfaceEdge]]:
             _get_run(conn, run_id)
@@ -540,6 +627,26 @@ _FINDING_SELECT = (
     'SELECT finding_id, check_id, check_version, severity, subject, title, description, evidence_ids, remediation, status, '
     'verification_id FROM findings'
 )
+_RESEARCH_SELECT = (
+    'SELECT research_id, call_id, query, provider, model, auth_mode, answer, sources, truncated, created_at '
+    'FROM web_research'
+)
+
+
+def _research_from_row(row: tuple[Any, ...]) -> WebResearchRecord:
+    rid, call_id, query, provider, model, auth_mode, answer, sources, truncated, created_at = row
+    return WebResearchRecord(
+        id=rid,
+        call_id=call_id,
+        query=query,
+        provider=provider,
+        model=model,
+        auth_mode=auth_mode,
+        answer=answer,
+        sources=tuple(json.loads(sources)),
+        truncated=bool(truncated),
+        created_at=created_at,
+    )
 
 
 def _load[T](validate: Callable[[Any], T], raw: Any) -> T:
@@ -635,7 +742,7 @@ class RunReader(_Reads):
             )
             try:
                 _apply_pragmas(conn, busy_timeout_ms)
-                _check_version(conn, db_path)
+                _check_version(conn, db_path, READABLE_VERSIONS)
             except BaseException:
                 conn.close()
                 raise
@@ -904,6 +1011,61 @@ class RunStore(_Reads):
         await self._db.run(lambda conn: _transaction(conn, write))
         return call_id
 
+    async def add_web_research(
+        self,
+        run_id: str,
+        *,
+        query: str,
+        provider: str,
+        model: str,
+        auth_mode: str,
+        answer: str,
+        sources: Sequence[dict[str, Any]],
+        truncated: bool,
+        audit_args: Any,
+    ) -> str:
+        """Persist one successful ``web_search`` and its ``tool_calls`` audit row in one transaction (#113).
+
+        The research row keeps the capped answer and sources; the audit row keeps metadata only (query,
+        provider, source URLs, truncated) plus the ``research_id``, never the answer. Returns the ``wr_`` ID.
+        """
+        research_id = 'wr_' + uuid.uuid4().hex[:16]
+        call_id = 'tc_' + uuid.uuid4().hex
+        source_list = [dict(source) for source in sources]
+        audit_result = {
+            'research_id': research_id,
+            'sources': [source.get('url') for source in source_list],
+            'truncated': truncated,
+        }
+
+        def write(conn: sqlite3.Connection) -> None:
+            _get_run(conn, run_id)
+            now = _now()
+            conn.execute(
+                'INSERT INTO tool_calls (run_id, call_id, tool, args, result, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+                (run_id, call_id, 'web_search', _json(audit_args), _json(audit_result), now),
+            )
+            conn.execute(
+                'INSERT INTO web_research (run_id, research_id, call_id, query, provider, model, auth_mode, answer, '
+                'sources, truncated, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (
+                    run_id,
+                    research_id,
+                    call_id,
+                    query,
+                    provider,
+                    model,
+                    auth_mode,
+                    answer,
+                    _json(source_list),
+                    int(truncated),
+                    now,
+                ),
+            )
+
+        await self._db.run(lambda conn: _transaction(conn, write))
+        return research_id
+
     async def record_llm_usage(
         self,
         run_id: str,
@@ -1046,7 +1208,29 @@ def _initialize(conn: sqlite3.Connection, path: Path) -> None:
 
         _transaction(conn, create)
         return
+    if version in _MIGRATIONS:
+        _migrate(conn, path)
     _check_version(conn, path)
+
+
+def _migrate(conn: sqlite3.Connection, path: Path) -> None:
+    """Upgrade an older store additively, one version at a time, in a single transaction (PLAN §17).
+
+    The version is re-read under the write lock, so two writers opening the same old store migrate it once.
+    """
+
+    def upgrade(c: sqlite3.Connection) -> None:
+        (version,) = c.execute('PRAGMA user_version').fetchone()
+        while version in _MIGRATIONS:
+            for statement in _MIGRATIONS[version]:
+                c.execute(statement)
+            version += 1
+            c.execute(f'PRAGMA user_version = {version}')
+
+    try:
+        _transaction(conn, upgrade)
+    except sqlite3.DatabaseError as exc:
+        raise StoreError(f'{path}: could not upgrade the store schema: {exc}', rule_code='store-version') from exc
 
 
 def _require_state(conn: sqlite3.Connection, run_id: str, allowed: set[str]) -> RunRecord:

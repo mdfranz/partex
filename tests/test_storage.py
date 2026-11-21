@@ -652,3 +652,94 @@ async def test_amend_scope_writes_snapshot_and_audit_together_or_not_at_all(tmp_
     assert (await tmp_store.get_run(run_id)).scope_snapshot == bigger
     (call,) = [c for c in await tmp_store.tool_calls(run_id) if c.tool == 'scope_amend']
     assert call.args == {'spec': 'b.test'}
+
+
+# ── web_research (#113) and the additive v2 -> v3 migration ────────────────────
+
+
+def _research_kwargs(**overrides: object) -> dict[str, object]:
+    kwargs: dict[str, object] = {
+        'query': 'nginx 1.24.0 cve',
+        'provider': 'google-cloud',
+        'model': 'google-cloud:gemini-test',
+        'auth_mode': 'adc',
+        'answer': 'Nginx 1.24.0 has CVE-2024-7347.',
+        'sources': [{'url': 'https://nvd.nist.gov/vuln/detail/CVE-2024-7347', 'title': 'NVD'}],
+        'truncated': False,
+        'audit_args': {'query': 'nginx 1.24.0 cve', 'provider': 'google-cloud', 'auth_mode': 'adc'},
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+async def test_web_research_round_trip_and_linked_audit_row(tmp_store: RunStore):
+    run_id = await _run(tmp_store)
+    research_id = await tmp_store.add_web_research(run_id, **_research_kwargs())  # pyright: ignore[reportArgumentType]
+    assert research_id.startswith('wr_')
+
+    (entry,) = await tmp_store.web_research(run_id)
+    assert entry.id == research_id
+    assert entry.answer == 'Nginx 1.24.0 has CVE-2024-7347.'
+    assert entry.sources == ({'url': 'https://nvd.nist.gov/vuln/detail/CVE-2024-7347', 'title': 'NVD'},)
+    assert entry.truncated is False
+    assert await tmp_store.get_web_research(run_id, research_id) == entry
+
+    (call,) = await tmp_store.tool_calls(run_id)
+    assert call.tool == 'web_search'
+    assert call.call_id == entry.call_id
+    assert call.result == {
+        'research_id': research_id,
+        'sources': ['https://nvd.nist.gov/vuln/detail/CVE-2024-7347'],
+        'truncated': False,
+    }
+    assert 'CVE-2024-7347.' not in str(call.args) + str(call.result)  # the answer never lands in tool_calls
+
+
+async def test_web_research_ids_never_resolve_across_runs(tmp_store: RunStore):
+    first, second = await _run(tmp_store), await _run(tmp_store)
+    research_id = await tmp_store.add_web_research(first, **_research_kwargs())  # pyright: ignore[reportArgumentType]
+    assert await tmp_store.get_web_research(second, research_id) is None
+    assert await tmp_store.web_research(second) == []
+
+
+def _downgrade_to_v2(path: Path) -> None:
+    """Make a fresh store look like a version-2 one: v3 only added ``web_research``."""
+    _execute(path, 'DROP TABLE web_research')
+    _execute(path, 'PRAGMA user_version = 2')
+
+
+async def test_writer_migrates_a_version_2_store_additively(tmp_store_path: Path):
+    async with await RunStore.open(tmp_store_path) as store:
+        run_id = await _run(store)
+        await store.add_evidence(run_id, _http())
+    _downgrade_to_v2(tmp_store_path)
+
+    async with await RunStore.open(tmp_store_path) as store:
+        assert len(await store.evidence(run_id)) == 1  # existing data kept
+        assert await store.web_research(run_id) == []
+        await store.add_web_research(run_id, **_research_kwargs())  # pyright: ignore[reportArgumentType]
+        assert len(await store.web_research(run_id)) == 1
+    with closing(sqlite3.connect(tmp_store_path)) as conn:
+        assert conn.execute('PRAGMA user_version').fetchone() == (SCHEMA_VERSION,)
+
+
+async def test_reader_opens_a_version_2_store_without_migrating_it(tmp_store_path: Path):
+    async with await RunStore.open(tmp_store_path) as store:
+        run_id = await _run(store)
+    _downgrade_to_v2(tmp_store_path)
+
+    async with await RunReader.open(tmp_store_path) as reader:
+        assert await reader.web_research(run_id) == []
+        assert await reader.get_web_research(run_id, 'wr_0000000000000000') is None
+    with closing(sqlite3.connect(tmp_store_path)) as conn:
+        assert conn.execute('PRAGMA user_version').fetchone() == (2,)
+
+
+@pytest.mark.parametrize('opener', [RunStore.open, RunReader.open])
+async def test_version_1_store_is_still_refused(tmp_store_path: Path, opener: object):
+    async with await RunStore.open(tmp_store_path):
+        pass
+    _execute(tmp_store_path, 'PRAGMA user_version = 1')
+    with pytest.raises(StoreError) as exc:
+        await opener(tmp_store_path)  # pyright: ignore[reportUnknownVariableType, reportCallIssue]
+    assert exc.value.rule_code == 'store-version'

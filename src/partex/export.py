@@ -7,7 +7,7 @@ from typing import Any
 
 from .ids import canonical_json
 from .models import CoverageEntry, Evidence, Finding, ReviewSummary, Severity, Verification, redact
-from .storage import LlmUsageRecord, RunReader, RunRecord, RunStore, ToolCallRecord
+from .storage import LlmUsageRecord, RunReader, RunRecord, RunStore, ToolCallRecord, WebResearchRecord
 
 __all__ = [
     'SEVERITY_RANK',
@@ -77,6 +77,19 @@ def _serialize_llm_usage(usage: LlmUsageRecord) -> dict[str, Any]:
     }
 
 
+def _serialize_web_research(entry: WebResearchRecord) -> dict[str, Any]:
+    """Serialize one saved web search (#113) without its random ``id``/``call_id`` or ``created_at``."""
+    return {
+        'answer': entry.answer,
+        'auth_mode': entry.auth_mode,
+        'model': entry.model,
+        'provider': entry.provider,
+        'query': entry.query,
+        'sources': list(entry.sources),
+        'truncated': entry.truncated,
+    }
+
+
 def _finding_sort_key(finding: Finding) -> tuple[int, str, str]:
     """Sort findings by (severity rank desc, check_id asc, finding_id asc)."""
     return (-SEVERITY_RANK[finding.severity], finding.check_id, finding.id)
@@ -91,6 +104,7 @@ def build_export_payload(
     verifications: Sequence[Verification] = (),
     coverage: Sequence[CoverageEntry] = (),
     tool_calls: Sequence[ToolCallRecord] = (),
+    web_research: Sequence[WebResearchRecord] = (),
     summary: ReviewSummary | None = None,
     include_secrets: bool = False,
 ) -> dict[str, Any]:
@@ -118,6 +132,7 @@ def build_export_payload(
         'summary': None if summary is None else summary.model_dump(mode='json'),
         'tool_calls': [_serialize_tool_call(call) for call in tool_calls],
         'verifications': [verification.model_dump(mode='json') for verification in sorted_verifications],
+        'web_research': [_serialize_web_research(entry) for entry in web_research],
     }
 
 
@@ -135,6 +150,7 @@ async def export_run_data(
     coverage = await store.coverage(run_id)
     tool_calls = await store.tool_calls(run_id)
     llm_usage = await store.llm_usage(run_id)
+    web_research = await store.web_research(run_id)
     summary = await store.summary(run_id)
     return build_export_payload(
         run,
@@ -144,6 +160,7 @@ async def export_run_data(
         verifications=verifications,
         coverage=coverage,
         tool_calls=tool_calls,
+        web_research=web_research,
         summary=summary,
         include_secrets=include_secrets,
     )

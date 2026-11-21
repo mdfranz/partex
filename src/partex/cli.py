@@ -541,6 +541,12 @@ def _render_text(payload: dict[str, Any], run_id: str) -> str:
     lines.extend(_coverage_gaps(payload.get('coverage', [])))
     for verification in payload['verifications']:
         lines.append(f'verification {verification["id"]}: {verification["verdict"]} for {verification["finding_id"]}')
+    research: list[dict[str, Any]] = payload.get('web_research', [])
+    if research:
+        lines.append(f'web research: {len(research)}')
+        for entry in research:
+            truncated = ', truncated' if entry['truncated'] else ''
+            lines.append(f'  {entry["query"]} ({entry["provider"]}, {len(entry["sources"])} sources{truncated})')
     if payload['summary'] is not None:
         lines.append('summary:')
         lines.append(f'  {payload["summary"]["narrative"]}')

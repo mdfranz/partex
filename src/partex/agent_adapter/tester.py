@@ -381,6 +381,7 @@ async def web_search(ctx: RunContext[TesterDeps], query: str) -> str:
         query,
         secrets=_session_secrets(ctx.deps.session),
         audit=partial(_audit, ctx),
+        record=partial(ctx.deps.store.add_web_research, ctx.deps.run_id),
     )
 
 
@@ -467,7 +468,9 @@ large assets such as JS bundles, returning metadata + ev_ ID without the body), 
 (lists <script src> and import URLs from captured evidence without fetching), run_check (registered
 partex checks, e.g. js-analysis; the only way a finding is recorded), save_report (write a Markdown report
 for the operator; it cannot be read back), and the read tools (list_runs,
-list_findings, get_finding, list_evidence, lookup_evidence). list_runs shows earlier sessions against
+list_findings, get_finding, list_evidence, lookup_evidence, list_research, lookup_research). list_research
+and lookup_research return web research a session saved (check them before searching again). list_runs shows
+earlier sessions against
 this same target; pass a run ID, or run='previous' for the run this session continues from, to read
 one. Earlier runs are read-only.
 

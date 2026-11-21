@@ -808,12 +808,39 @@ CREATE TABLE llm_usage (
   status TEXT NOT NULL,           -- ok | error
   created_at TEXT NOT NULL
 );
+CREATE TABLE web_research (       -- schema v3 (#113): persisted web_search answers; never evidence
+  run_id TEXT NOT NULL REFERENCES runs,
+  research_id TEXT NOT NULL,      -- wr_...
+  call_id TEXT,                   -- the web_search tool_calls row written in the same transaction
+  query TEXT NOT NULL,
+  provider TEXT NOT NULL,         -- anthropic | google | google-cloud
+  model TEXT NOT NULL,
+  auth_mode TEXT NOT NULL,        -- api_key | adc
+  answer TEXT NOT NULL,           -- capped like the tool return (4,000 chars)
+  sources TEXT NOT NULL,          -- JSON array of {url, title}
+  truncated INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (run_id, research_id)
+);
 ```
 
 Dual-graph & coverage note: `surface_nodes` / `surface_edges` (populated deterministically at capture and OpenAPI contract ingestion time) form the **Surface Graph** ("what exists"), while `coverage_entries` + `findings` + `verifications` + `tool_calls` form the **Exploration & Coverage Ledger** ("what was tested, by which source, and with what evidence"). Reconciling `agent_reported` closures against `check_observed` runtime facts (checks run, skills loaded, budget/timeout completion) powers the D3 coverage report without conflating self-reports with observed execution.
 
 Schema versioning: `PRAGMA user_version`; a store with an unknown version is refused with a
-clear error, never migrated destructively (§17).
+clear error, never migrated destructively (§17). Migrations are additive only: the writer upgrades
+an older supported store in place, one version at a time inside a single transaction (new tables
+or columns; nothing rewritten or dropped), re-reading the version under the write lock. `mode=ro`
+readers cannot migrate, so they also accept the previous supported version and treat tables it
+lacks as empty. Version 3 (#113) adds `web_research`; a version-2 store is upgraded on its next
+writer open, and version 1 is still refused.
+
+**Web research (#113).** A successful `web_search` writes its capped answer and `{url, title}`
+sources to `web_research` and its `tool_calls` audit row in one transaction, linked by `call_id`
+and `research_id`; the audit row still holds metadata only. Refused and failed searches write no
+research row. Web research is third-party public-web content: it is never `evidence`, never a
+finding's `evidence_ids`, and every read of it is framed `<partex_untrusted_data kind="web_search">`.
+The read tools `list_research(run)` and `lookup_research(research_id, run)` serve `chat`, `agent`,
+`agent --from`, and `run_code`; `partex show` (JSON and text) and `/report` include it.
 
 Export (`partex show <run-id> --format json [--out FILE]`) emits the run, its evidence, its
 findings, its verifications, its coverage ledger, its tool calls, and its summary (or `null`), with sorted keys and
@@ -955,7 +982,7 @@ def build_agent(model: Model | str, skills: Sequence[Capability],
 Design rules:
 
 - **Role-based model routing & provider resilience (`models_config.py`)**: `--model` (and optional role overrides `--search-model`, plus future `--planner-model`, `--verifier-model`, `--summarizer-model`, `--judge-model` and CLAI2-style `PROVIDER[@PROFILE]:MODEL` or comma-separated fallback chains) resolve in `models_config.py`. Every model call logs token/cache/latency metrics to `llm_usage` (§7).
-- **Optional native-only web search (`search` role, `#111`)**: `partex agent --search-model MODEL` enables a `web_search(query)` tool on `partex_tester_agent` backed by an isolated one-shot `partex_search_agent` with `WebSearch(local=None)` and zero function tools, deps, DB, target-client, or file access. Only direct native-search providers (`anthropic:`, `google:`, `google-cloud:` via ADC) are accepted — never `gateway/...`, bare gateway-route names, or local search fallbacks (preserving the `target.py`-only host-socket boundary). Queries are whitespace-collapsed, capped at 200 chars, limited to 20 per session (with Anthropic also passing `max_uses`; Google ignores `max_uses`/domain filters), and rejected if they contain a registered capture secret, an `ev_`/`fn_` ID, or a URL with credentials or query strings. Refusals are audited without echoing secrets; successful calls audit query, provider/auth mode, source URLs, and `truncated` flag (never result bodies), record `llm_usage` with `role='search'`, emit a `partex.web_search` span, and return length-capped results framed in `<partex_untrusted_data kind="web_search">`. Off unless `--search-model` is set.
+- **Optional native-only web search (`search` role, `#111`)**: `partex agent --search-model MODEL` enables a `web_search(query)` tool on `partex_tester_agent` backed by an isolated one-shot `partex_search_agent` with `WebSearch(local=None)` and zero function tools, deps, DB, target-client, or file access. Only direct native-search providers (`anthropic:`, `google:`, `google-cloud:` via ADC) are accepted — never `gateway/...`, bare gateway-route names, or local search fallbacks (preserving the `target.py`-only host-socket boundary). Queries are whitespace-collapsed, capped at 200 chars, limited to 20 per session (with Anthropic also passing `max_uses`; Google ignores `max_uses`/domain filters), and rejected if they contain a registered capture secret, an `ev_`/`fn_` ID, or a URL with credentials or query strings. Refusals are audited without echoing secrets; successful calls audit query, provider/auth mode, source URLs, and `truncated` flag (never result bodies), record `llm_usage` with `role='search'`, emit a `partex.web_search` span, and return length-capped results framed in `<partex_untrusted_data kind="web_search">`. Successful results are also persisted in `web_research` (§7, #113) and readable later through `list_research` / `lookup_research`. Off unless `--search-model` is set.
 - **No plugins**: `load_plugins=False`; no coding tools, no filesystem access, no network
   except the scoped `http_request` tool.
 - **Explicit agent metadata, caching, and lifecycle**: every `Agent` (`partex_tester_agent`,
@@ -1378,8 +1405,9 @@ No §13 experiment is recorded as passed here until its gate has evidence.
 3. **Exit code for findings (decided)**: `3` = completed with findings, `2` = usage error, `0`
    = completed with no findings. This departs from strix's `2` because argparse already owns `2`
    for usage errors; see §6.
-4. **Migration policy**: additive `ALTER TABLE` with `user_version` bumps (Go forks' approach)
-   vs. refuse-and-export/import for v1 only?
+4. **Migration policy (decided, #113)**: additive migrations with `user_version` bumps (new tables or
+   columns, applied by the writer in one transaction; readers accept the previous version); unknown
+   or retired versions are still refused. See §7.
 5. **HAR / proxy ingestion (decided)**: `partex import-har` ships in M3 as the
    passive-bundle producer for operator-exported captures — the replacement for the forks'
    MITM-proxy capture path, since §1 forbids interception. The scoped client stays the only
