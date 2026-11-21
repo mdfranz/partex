@@ -1,0 +1,15 @@
+{
+  "evidence_files": [
+    "evidence/0001-users.json",
+    "evidence/0002-non-openapi-cfg.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "api-contract-conformance"
+  ],
+  "target": {
+    "base_url": "https://api.example.test",
+    "name": "api-inventory-no-contract",
+    "notes": "HTTP exchanges with zero format=openapi ConfigExcerpts (insufficient evidence)"
+  }
+}

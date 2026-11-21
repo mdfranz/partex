@@ -954,8 +954,17 @@ class RunStore(_Reads):
 
     # ── passive: one transaction at the end (§6.1) ──
 
-    async def commit_passive(self, run_id: str, evidence: Sequence[Evidence], findings: Sequence[Finding]) -> None:
-        """Persist a passive run's evidence and findings and mark it ``checks_complete`` atomically.
+    async def commit_passive(
+        self,
+        run_id: str,
+        evidence: Sequence[Evidence],
+        findings: Sequence[Finding],
+        *,
+        coverage: Sequence[CoverageEntry] = (),
+        surface_nodes: Sequence[tuple[SurfaceKind, str, dict[str, Any], Sequence[str]]] = (),
+        surface_edges: Sequence[tuple[str, str, SurfaceRel, str | None]] = (),
+    ) -> None:
+        """Persist a passive run's evidence, findings, coverage, and surface atomically.
 
         Either everything lands or nothing does: a failure leaves the run ``created`` with no rows.
         """
@@ -965,6 +974,12 @@ class RunStore(_Reads):
             for item in evidence:
                 _insert_evidence(conn, run_id, item)
             _insert_findings(conn, run_id, findings)
+            if coverage:
+                _upsert_coverage_rows(conn, run_id, coverage)
+            for kind, key, metadata, ev_ids in surface_nodes:
+                _upsert_surface_node_row(conn, run_id, kind, key, metadata, ev_ids)
+            for src_id, dst_id, rel, ev_id in surface_edges:
+                _add_surface_edge_row(conn, run_id, src_id, dst_id, rel, ev_id)
             _set_state(conn, run_id, 'checks_complete', None)
 
         await self._db.run(lambda conn: _transaction(conn, write))
@@ -1204,24 +1219,7 @@ class RunStore(_Reads):
 
         def write(conn: sqlite3.Connection) -> None:
             _get_run(conn, run_id)
-            for entry in rows:
-                if entry.evidence_ids:
-                    _require_evidence(conn, run_id, entry.evidence_ids, f'coverage {entry.surface} / {entry.risk_area}')
-                conn.execute(
-                    'INSERT OR REPLACE INTO coverage_entries (run_id, surface, risk_area, outcome, source, evidence_ids, '
-                    'reason, goal_attempts, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    (
-                        run_id,
-                        entry.surface,
-                        entry.risk_area,
-                        entry.outcome,
-                        entry.source,
-                        _json(entry.evidence_ids),
-                        entry.reason,
-                        entry.goal_attempts,
-                        _now(),
-                    ),
-                )
+            _upsert_coverage_rows(conn, run_id, rows)
 
         await self._db.run(lambda conn: _transaction(conn, write))
 
@@ -1235,39 +1233,19 @@ class RunStore(_Reads):
         evidence_ids: Sequence[str] = (),
     ) -> str:
         """Insert a surface node or merge *evidence_ids* / *metadata* into the existing one. Returns its ID."""
-        node_id = surface_node_id(kind, key)
 
-        def write(conn: sqlite3.Connection) -> None:
+        def write(conn: sqlite3.Connection) -> str:
             _get_run(conn, run_id)
-            if evidence_ids:
-                _require_evidence(conn, run_id, evidence_ids, f'surface node {kind} {key}')
-            row = conn.execute(
-                'SELECT metadata, evidence_ids FROM surface_nodes WHERE run_id = ? AND node_id = ?', (run_id, node_id)
-            ).fetchone()
-            merged_meta: dict[str, Any] = {} if row is None else json.loads(row[0])
-            merged_meta.update(metadata or {})
-            existing: list[str] = [] if row is None else _string_list.validate_json(row[1])
-            merged_ev = sorted({*existing, *evidence_ids})
-            conn.execute(
-                'INSERT OR REPLACE INTO surface_nodes (run_id, node_id, kind, key, metadata, evidence_ids) '
-                'VALUES (?, ?, ?, ?, ?, ?)',
-                (run_id, node_id, kind, key, _json(merged_meta), _json(merged_ev)),
-            )
+            return _upsert_surface_node_row(conn, run_id, kind, key, metadata, evidence_ids)
 
-        await self._db.run(lambda conn: _transaction(conn, write))
-        return node_id
+        return await self._db.run(lambda conn: _transaction(conn, write))
 
     async def add_surface_edge(
         self, run_id: str, src_id: str, dst_id: str, rel: SurfaceRel, evidence_id: str | None = None
     ) -> None:
         def write(conn: sqlite3.Connection) -> None:
             _get_run(conn, run_id)
-            if evidence_id is not None:
-                _require_evidence(conn, run_id, [evidence_id], f'surface edge {rel}')
-            conn.execute(
-                'INSERT OR IGNORE INTO surface_edges (run_id, src_id, dst_id, rel, evidence_id) VALUES (?, ?, ?, ?, ?)',
-                (run_id, src_id, dst_id, rel, evidence_id),
-            )
+            _add_surface_edge_row(conn, run_id, src_id, dst_id, rel, evidence_id)
 
         await self._db.run(lambda conn: _transaction(conn, write))
 
@@ -1379,3 +1357,61 @@ def _insert_findings(conn: sqlite3.Connection, run_id: str, findings: Sequence[F
                 finding.verification_id,
             ),
         )
+
+
+def _upsert_coverage_rows(conn: sqlite3.Connection, run_id: str, rows: Sequence[CoverageEntry]) -> None:
+    for entry in rows:
+        if entry.evidence_ids:
+            _require_evidence(conn, run_id, entry.evidence_ids, f'coverage {entry.surface} / {entry.risk_area}')
+        conn.execute(
+            'INSERT OR REPLACE INTO coverage_entries (run_id, surface, risk_area, outcome, source, evidence_ids, '
+            'reason, goal_attempts, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                run_id,
+                entry.surface,
+                entry.risk_area,
+                entry.outcome,
+                entry.source,
+                _json(entry.evidence_ids),
+                entry.reason,
+                entry.goal_attempts,
+                _now(),
+            ),
+        )
+
+
+def _upsert_surface_node_row(
+    conn: sqlite3.Connection,
+    run_id: str,
+    kind: SurfaceKind,
+    key: str,
+    metadata: dict[str, Any] | None,
+    evidence_ids: Sequence[str],
+) -> str:
+    node_id = surface_node_id(kind, key)
+    if evidence_ids:
+        _require_evidence(conn, run_id, evidence_ids, f'surface node {kind} {key}')
+    row = conn.execute(
+        'SELECT metadata, evidence_ids FROM surface_nodes WHERE run_id = ? AND node_id = ?', (run_id, node_id)
+    ).fetchone()
+    merged_meta: dict[str, Any] = {} if row is None else json.loads(row[0])
+    merged_meta.update(metadata or {})
+    existing: list[str] = [] if row is None else _string_list.validate_json(row[1])
+    merged_ev = sorted({*existing, *evidence_ids})
+    conn.execute(
+        'INSERT OR REPLACE INTO surface_nodes (run_id, node_id, kind, key, metadata, evidence_ids) '
+        'VALUES (?, ?, ?, ?, ?, ?)',
+        (run_id, node_id, kind, key, _json(merged_meta), _json(merged_ev)),
+    )
+    return node_id
+
+
+def _add_surface_edge_row(
+    conn: sqlite3.Connection, run_id: str, src_id: str, dst_id: str, rel: SurfaceRel, evidence_id: str | None
+) -> None:
+    if evidence_id is not None:
+        _require_evidence(conn, run_id, [evidence_id], f'surface edge {rel}')
+    conn.execute(
+        'INSERT OR IGNORE INTO surface_edges (run_id, src_id, dst_id, rel, evidence_id) VALUES (?, ?, ?, ?, ?)',
+        (run_id, src_id, dst_id, rel, evidence_id),
+    )

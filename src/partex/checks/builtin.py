@@ -4,8 +4,9 @@ Each built-in check is registered under ``partex.checks`` via ``pyproject.toml``
 Third-party checks register via the same entry-point group.
 """
 
+from .api_inventory import api_contract_conformance_check
 from .header_security import header_security_check
 from .js_analysis import js_analysis_check
 from .server_error import server_error_check
 
-__all__ = ['header_security_check', 'js_analysis_check', 'server_error_check']
+__all__ = ['api_contract_conformance_check', 'header_security_check', 'js_analysis_check', 'server_error_check']

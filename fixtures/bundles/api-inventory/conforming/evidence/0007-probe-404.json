@@ -1,0 +1,25 @@
+{
+  "http": {
+    "request": {
+      "headers": [
+        [
+          "Host",
+          "api.example.test"
+        ]
+      ],
+      "method": "GET",
+      "url": "https://api.example.test/partex-nonexistent-probe-0"
+    },
+    "response": {
+      "body": "{\"detail\": \"not found\"}",
+      "headers": [
+        [
+          "Content-Type",
+          "application/json"
+        ]
+      ],
+      "status_code": 404
+    }
+  },
+  "kind": "http_exchange"
+}

@@ -1,0 +1,20 @@
+{
+  "http": {
+    "request": {
+      "headers": [
+        [
+          "Host",
+          "api.example.test"
+        ]
+      ],
+      "method": "OPTIONS",
+      "url": "https://api.example.test/api/v2/users/42"
+    },
+    "response": {
+      "body": null,
+      "headers": [],
+      "status_code": 204
+    }
+  },
+  "kind": "http_exchange"
+}

@@ -1,0 +1,16 @@
+{
+  "evidence_files": [
+    "evidence/0001-openapi.json",
+    "evidence/0002-user-leak.json",
+    "evidence/0003-project-extra.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "api-contract-conformance"
+  ],
+  "target": {
+    "base_url": "https://api.example.test",
+    "name": "api-inventory-disallowed-field",
+    "notes": "Disallowed response fields: sensitive (high) and non-sensitive (medium) BOPLA"
+  }
+}

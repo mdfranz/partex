@@ -1,0 +1,25 @@
+{
+  "http": {
+    "request": {
+      "headers": [
+        [
+          "Host",
+          "api.example.test"
+        ]
+      ],
+      "method": "GET",
+      "url": "https://api.example.test/api/v2/users/42"
+    },
+    "response": {
+      "body": "{\"id\": 42, \"username\": \"bob\"}",
+      "headers": [
+        [
+          "Content-Type",
+          "application/json"
+        ]
+      ],
+      "status_code": 200
+    }
+  },
+  "kind": "http_exchange"
+}

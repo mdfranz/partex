@@ -1,0 +1,16 @@
+{
+  "evidence_files": [
+    "evidence/0001-openapi.json",
+    "evidence/0002-legacy-v1-export.json",
+    "evidence/0003-undeclared-delete.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "api-contract-conformance"
+  ],
+  "target": {
+    "base_url": "https://api.example.test",
+    "name": "api-inventory-shadow-route",
+    "notes": "Shadow legacy v1 endpoint + undeclared DELETE method on declared path template"
+  }
+}

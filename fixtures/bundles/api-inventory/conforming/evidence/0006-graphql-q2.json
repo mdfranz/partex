@@ -1,0 +1,25 @@
+{
+  "http": {
+    "request": {
+      "headers": [
+        [
+          "Host",
+          "api.example.test"
+        ]
+      ],
+      "method": "POST",
+      "url": "https://api.example.test/graphql"
+    },
+    "response": {
+      "body": "{\"data\": {\"projects\": []}}",
+      "headers": [
+        [
+          "Content-Type",
+          "application/json"
+        ]
+      ],
+      "status_code": 200
+    }
+  },
+  "kind": "http_exchange"
+}

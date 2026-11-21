@@ -1,0 +1,25 @@
+{
+  "http": {
+    "request": {
+      "headers": [
+        [
+          "Host",
+          "api.example.test"
+        ]
+      ],
+      "method": "GET",
+      "url": "https://api.example.test/api/v2/orders/11"
+    },
+    "response": {
+      "body": "{\"order_id\": 11}",
+      "headers": [
+        [
+          "Content-Type",
+          "application/json"
+        ]
+      ],
+      "status_code": 200
+    }
+  },
+  "kind": "http_exchange"
+}

@@ -1,0 +1,16 @@
+{
+  "evidence_files": [
+    "evidence/0001-openapi.json",
+    "evidence/0002-orders-10.json",
+    "evidence/0003-orders-11.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "api-contract-conformance"
+  ],
+  "target": {
+    "base_url": "https://api.example.test",
+    "name": "api-inventory-no-matching-contract",
+    "notes": "Captured traffic matches zero declared operations in the loaded OpenAPI contract"
+  }
+}
