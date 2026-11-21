@@ -6,5 +6,6 @@ Third-party checks register via the same entry-point group.
 
 from .header_security import header_security_check
 from .js_analysis import js_analysis_check
+from .server_error import server_error_check
 
-__all__ = ['header_security_check', 'js_analysis_check']
+__all__ = ['header_security_check', 'js_analysis_check', 'server_error_check']
