@@ -24,9 +24,11 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import threading
 import uuid
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Generator, Iterable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -355,6 +357,85 @@ def run_reports_dir(db_path: Path, run_id: str) -> Path:
 REPORT_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}')
 """A report name: a plain file stem, no path separators, no leading dot, at most 64 characters."""
 MAX_REPORT_BYTES = 256 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class ReportRecord:
+    run_id: str
+    name: str
+    size_bytes: int
+    mtime: str
+    sha256: str
+
+
+@contextmanager
+def _open_reports_dir(db_path: Path, run_id: str) -> Generator[int]:
+    if re.fullmatch(r'run_[0-9a-f]{32}', run_id) is None:
+        raise StoreError('invalid report run ID', rule_code='report-invalid')
+    directory = run_reports_dir(db_path, run_id)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    root_fd = os.open(directory.parent, flags)
+    try:
+        run_fd = os.open(directory.name, flags, dir_fd=root_fd)
+        try:
+            yield run_fd
+        finally:
+            os.close(run_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _load_report(directory: int, name: str) -> tuple[bytes, os.stat_result]:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(f'{name}.md', flags, dir_fd=directory)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise StoreError('report must be a regular file', rule_code='report-invalid')
+        with os.fdopen(fd, 'rb', closefd=False) as handle:
+            data = handle.read(MAX_REPORT_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(data) > MAX_REPORT_BYTES:
+        raise StoreError(f'report exceeds the {MAX_REPORT_BYTES}-byte limit', rule_code='report-too-large')
+    return data, info
+
+
+def list_reports(db_path: Path, run_id: str) -> list[ReportRecord]:
+    """List readable Markdown report files for a run, ordered by name."""
+    reports: list[ReportRecord] = []
+    try:
+        with _open_reports_dir(db_path, run_id) as directory:
+            for filename in sorted(os.listdir(directory)):
+                name = filename.removesuffix('.md')
+                if filename == name or REPORT_NAME.fullmatch(name) is None:
+                    continue
+                try:
+                    data, info = _load_report(directory, name)
+                    data.decode('utf-8')
+                except OSError, StoreError, UnicodeError:
+                    continue
+                mtime = datetime.fromtimestamp(info.st_mtime, UTC).isoformat()
+                reports.append(ReportRecord(run_id, name, len(data), mtime, sha256_hex(data)))
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise StoreError('could not open the report directory', rule_code='report-read') from exc
+    return reports
+
+
+def read_report(db_path: Path, run_id: str, name: str) -> str:
+    """Read a saved UTF-8 Markdown report by its stem."""
+    if REPORT_NAME.fullmatch(name) is None:
+        raise StoreError('invalid report name', rule_code='report-invalid')
+    try:
+        with _open_reports_dir(db_path, run_id) as directory:
+            data, _ = _load_report(directory, name)
+            return data.decode('utf-8')
+    except FileNotFoundError as exc:
+        raise StoreError('report does not exist in this run', rule_code='report-not-found') from exc
+    except (OSError, UnicodeError) as exc:
+        raise StoreError('could not read the report', rule_code='report-read') from exc
 
 
 def write_report(directory: Path, name: str, content: str) -> Path:

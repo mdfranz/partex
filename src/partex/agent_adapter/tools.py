@@ -10,15 +10,17 @@ adapts instead of retrying.
 
 import json
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, cast
 
+from anyio.to_thread import run_sync
 from pydantic_ai import RunContext, ToolFailed
 from pydantic_ai.framing import register_tag, wrap
 
+from .. import storage
 from ..ids import canonical_json
 from ..models import ArtifactEvidence, ConfigEvidence, Evidence, Finding, HttpEvidence, redact
-from ..storage import RunReader, RunRecord, RunStore, WebResearchRecord
+from ..storage import RunReader, RunRecord, RunStore, StoreError, WebResearchRecord
 
 UNTRUSTED_TAG = register_tag('partex_untrusted_data')
 # The opening briefing is model output written from untrusted data, so it is framed (and escaped) too.
@@ -277,6 +279,43 @@ async def lookup_research(ctx: RunContext[ReviewDeps], research_id: str, run: Ru
     )
 
 
+def _report_run_id(deps: ReviewDeps, run: str) -> str:
+    if run in ('current', deps.run_id):
+        return deps.run_id
+    if deps.previous_run_id is not None and run in ('previous', deps.previous_run_id):
+        return deps.previous_run_id
+    raise StoreError('use the current run or the run selected with --from', rule_code='report-run-refused')
+
+
+async def list_reports(ctx: RunContext[ReviewDeps], run: str = 'current') -> str:
+    """List saved Markdown reports and their handles. Use current or the --from run (previous or its ID)."""
+    deps = ctx.deps
+    args = {'run': run}
+    try:
+        run_id = _report_run_id(deps, run)
+        reports = await run_sync(storage.list_reports, deps.reader.path, run_id)
+    except StoreError as exc:
+        await _audit_read(deps, 'list_reports', args, {'error': exc.rule_code})
+        raise ToolFailed(str(exc)) from exc
+    await _audit_read(deps, 'list_reports', {'run': run_id}, {'count': len(reports)})
+    return frame_untrusted('reports', [asdict(report) for report in reports])
+
+
+async def read_report(ctx: RunContext[ReviewDeps], name: str, run: str = 'current') -> str:
+    """Read a report by its name from list_reports. Use current or the --from run (previous or its ID)."""
+    deps = ctx.deps
+    args = {'name': name, 'run': run}
+    try:
+        run_id = _report_run_id(deps, run)
+        args['run'] = run_id
+        content = await run_sync(storage.read_report, deps.reader.path, run_id, name)
+    except StoreError as exc:
+        await _audit_read(deps, 'read_report', args, {'error': exc.rule_code})
+        raise ToolFailed(str(exc)) from exc
+    await _audit_read(deps, 'read_report', args, {'found': True})
+    return frame_untrusted('report', {'run_id': run_id, 'name': name, 'content': content})
+
+
 REVIEWER_TOOLS = (
     list_runs,
     list_findings,
@@ -286,4 +325,6 @@ REVIEWER_TOOLS = (
     lookup_evidence,
     list_research,
     lookup_research,
+    list_reports,
+    read_report,
 )

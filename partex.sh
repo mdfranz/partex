@@ -12,7 +12,7 @@
 #                            full model string (anything with a ':', e.g. openai:gpt-5 or
 #                            gateway/anthropic:claude-sonnet-5-5) uses no route unless you pass one.
 #   -S, --search-model NAME  optional separate model for web_search [PARTEX_SEARCH_MODEL]: anthropic:<name>,
-#                            google:<name> (API key), or google-cloud:<name> (ADC); off unless set. Queries
+#                            google:<name> (API key), google-cloud:<name> (ADC), or openai:<name>; off unless set. Queries
 #                            leave this machine and never go through the Gateway.
 #   -d, --db PATH            database [PARTEX_DB, default ./partex-probe.db]
 #   -f, --from RUN_ID        let the new session read an earlier run [RUN_ID]

@@ -15,6 +15,7 @@ import os
 import sys
 import warnings
 from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,7 @@ from .probes import seed_summary
 from .registry import build_registry
 from .report import gather_report_payload, render_report_text
 from .sandboxes import detect_sandboxes, sandboxes_as_dicts
-from .storage import RunReader, RunRecord, RunStore
+from .storage import RunReader, RunRecord, RunStore, list_reports, read_report
 from .telemetry import LOG_FILE_ENV, announce, configure_telemetry, resolve_log_path
 
 DB_ENV = 'PARTEX_DB'
@@ -220,6 +221,12 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument('--out', default=None, help='write to this file instead of stdout')
     show.set_defaults(handler=_cmd_show)
 
+    reports = subparsers.add_parser('reports', parents=[with_db], help='list or read a run’s saved Markdown reports')
+    reports.add_argument('run_id', help='run id (run_…)')
+    reports.add_argument('name', nargs='?', help='report name from the listing')
+    reports.add_argument('--json', action='store_true', help='output structured JSON')
+    reports.set_defaults(handler=_cmd_reports)
+
     import_har_cmd = subparsers.add_parser(
         'import-har', parents=[common], help='build a passive-reviewable bundle from an operator-exported HAR'
     )
@@ -294,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument(
         '--search-model',
         default=None,
-        help='optional separate model for web_search (anthropic:<name>, google:<name>, or google-cloud:<name>)',
+        help='optional separate model for web_search (anthropic:, google:, google-cloud:, or openai:<name>)',
     )
     agent.add_argument(
         '--checks',
@@ -576,6 +583,32 @@ def _cmd_show(args: argparse.Namespace) -> int:
         out.write_text(rendered, encoding='utf-8')
     else:
         sys.stdout.write(rendered)
+    return EXIT_OK
+
+
+def _cmd_reports(args: argparse.Namespace) -> int:
+    db_path = resolve_db_path(args.db)
+
+    async def check_run() -> None:
+        async with await RunReader.open(db_path) as reader:
+            await reader.get_run(args.run_id)
+
+    anyio.run(check_run)
+    if args.name is not None:
+        content = read_report(db_path, args.run_id, args.name)
+        if args.json:
+            _print_json({'run_id': args.run_id, 'name': args.name, 'content': content})
+        else:
+            sys.stdout.write(content)
+    else:
+        reports = list_reports(db_path, args.run_id)
+        if _wants_json(args.json):
+            _print_json([asdict(report) for report in reports])
+        elif reports:
+            for report in reports:
+                print(f'{report.name}\t{report.size_bytes} bytes\t{report.mtime}\t{report.sha256}')
+        else:
+            print('No saved reports.')
     return EXIT_OK
 
 

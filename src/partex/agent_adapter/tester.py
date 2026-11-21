@@ -29,6 +29,7 @@ from pydantic_ai_harness.code_mode import CodeMode, CodeModeResourceLimits
 from pydantic_monty import MountDir
 
 from ..checks.js_analysis import discover_js_urls
+from ..checks.version_disclosure import ERROR_PAGE_RISK
 from ..engine import CheckFailed, CheckSelectionError, LiveSession
 from ..errors import BudgetExhausted, PartexError, ScopeViolation
 from ..models import REDACTED, ArtifactEvidence, Finding, HttpEvidence, redact
@@ -38,6 +39,9 @@ from .tools import BRIEFING_TAG, REVIEWER_TOOLS, ReviewDeps, frame_untrusted
 
 SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS'})
 """Methods the agent may send without operator approval (the only ones in this slice)."""
+
+RULE_OWNERS = {ERROR_PAGE_RISK: 'version-disclosure'}
+"""Rule/risk IDs the model mistakes for check IDs, mapped to the check that reports them (#125)."""
 
 MODEL_BODY_CHARS = 8_000
 """Response body characters returned to the model per request; the stored evidence keeps the capped body."""
@@ -258,6 +262,11 @@ async def run_check(ctx: RunContext[TesterDeps], check_id: str) -> str:
     try:
         findings = await session.run_check(check_id)
     except CheckSelectionError as exc:
+        owner = RULE_OWNERS.get(check_id.strip())
+        if owner and exc.rule_code == 'unknown-check':
+            raise ModelRetry(
+                f'{check_id!r} is a rule reported by the {owner} check, not a check ID; run {owner}.'
+            ) from exc
         raise ModelRetry(str(exc)) from exc
     except BudgetExhausted as exc:
         await _audit(ctx, 'run_check', {'check_id': check_id}, {'refused': 'budget'})
@@ -303,6 +312,7 @@ async def download_asset(ctx: RunContext[TesterDeps], path: str, headers: dict[s
         args,
         {
             'evidence_id': evidence.id,
+            'status': evidence.artifact.status_code,
             'sha256': evidence.artifact.sha256,
             'size_bytes': evidence.artifact.size_bytes,
         },
@@ -386,7 +396,7 @@ async def web_search(ctx: RunContext[TesterDeps], query: str) -> str:
 
 
 async def save_report(ctx: RunContext[TesterDeps], name: str, content: str) -> str:
-    """Save a Markdown report of this session's findings for the operator; it cannot be read back or changed.
+    """Save an immutable Markdown report of this session's findings for the operator.
 
     Written under this run's report directory as ``<name>.md``. Reports are for the operator: cite evidence
     (``ev_``) and finding (``fn_``) IDs instead of pasting bodies, and never include credentials. A name that is
@@ -467,10 +477,10 @@ lookup_evidence for bodies), download_asset (GET-only full-body download for
 large assets such as JS bundles, returning metadata + ev_ ID without the body), discover_js_assets
 (lists <script src> and import URLs from captured evidence without fetching), run_check (registered
 partex checks, e.g. js-analysis; the only way a finding is recorded), save_report (write a Markdown report
-for the operator; it cannot be read back), and the read tools (list_runs,
-list_findings, get_finding, list_evidence, lookup_evidence, list_research, lookup_research). list_research
-and lookup_research return web research a session saved (check them before searching again). list_runs shows
-earlier sessions against
+for the operator), list_reports and read_report (saved reports for the current or --from run), and
+the other read tools (list_runs, list_findings, get_finding, list_evidence, lookup_evidence, list_research,
+lookup_research). list_research and lookup_research return web research a session saved (check them before
+searching again). list_runs shows earlier sessions against
 this same target; pass a run ID, or run='previous' for the run this session continues from, to read
 one. Earlier runs are read-only.
 

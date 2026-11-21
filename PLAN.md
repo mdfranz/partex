@@ -870,6 +870,7 @@ emits a passive-reviewable bundle from a live run's captures (redacted by defaul
 | `partex agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--gateway-route`, `--checks`, `--from`, `--insecure`, `--db` |
 | `partex browse <engagement>` | browser capture harness (M7): record and actively probe authenticated SPA flows as evidence | `--authorized` (required), `--attach <cdp-port>`, `--db` |
 | `partex chat <run-id>` | read-only review chat over a saved run | `--model`, `--gateway-route`, `--db`, `--no-briefing` |
+| `partex reports <run-id> [name]` | list or print Markdown saved with `save_report` | `--db`, `--json` |
 
 Selection semantics unchanged: `--checks` is an explicit, ordered, de-duplicated list; unknown
 ID exits 1 listing available IDs; `--all` runs registration order; empty selection is a usage
@@ -896,6 +897,12 @@ run-scoped read tools (`list_findings`, `get_finding`, `lookup_evidence`), `load
 skill playbooks registered as on-demand deferred capabilities (`defer_loading=True`),
 evidence redacted and framed as attacker-controlled data, no write tools, and cross-run IDs
 rejected via `ToolFailed`.
+
+Both agents expose `list_reports(run='current')` and `read_report(name, run='current')` for
+Markdown saved with `save_report`. A report handle consists of its run ID and name. Report tools
+accept the current run and, when supplied, the explicit `--from` run. Results are framed as
+untrusted data and file reads are capped at 256 KiB. Live-session audit rows contain the report
+name and run for reads, along with the outcome. Standalone chat uses a read-only store.
 
 **Code Mode settings.** For `partex chat <run-id>`, attach `CodeMode(tools=['list_findings', 'get_finding', 'lookup_evidence'], eager=True, speculate=['list_findings', 'get_finding', 'lookup_evidence'] if speculate else None, mount=None, os_access=None)` directly on `partex_reviewer_agent` and keep CLAI2's `run.code_mode` and `run.speculative_code_mode` off (so CLAI2's `WorkspaceCodeMode` does not mount the host working directory and its `SpeculativeExecution` allowlist does not filter out `partex`'s tools). Keep speculation off by default and evaluate it as a reviewer opt-in. Headless `agent.run()` and `agent.iter()` use the capabilities supplied to the agent. See [RUNTIME.md](RUNTIME.md).
 
@@ -982,7 +989,7 @@ def build_agent(model: Model | str, skills: Sequence[Capability],
 Design rules:
 
 - **Role-based model routing & provider resilience (`models_config.py`)**: `--model` (and optional role overrides `--search-model`, plus future `--planner-model`, `--verifier-model`, `--summarizer-model`, `--judge-model` and CLAI2-style `PROVIDER[@PROFILE]:MODEL` or comma-separated fallback chains) resolve in `models_config.py`. Every model call logs token/cache/latency metrics to `llm_usage` (§7).
-- **Optional native-only web search (`search` role, `#111`)**: `partex agent --search-model MODEL` enables a `web_search(query)` tool on `partex_tester_agent` backed by an isolated one-shot `partex_search_agent` with `WebSearch(local=None)` and zero function tools, deps, DB, target-client, or file access. Only direct native-search providers (`anthropic:`, `google:`, `google-cloud:` via ADC) are accepted — never `gateway/...`, bare gateway-route names, or local search fallbacks (preserving the `target.py`-only host-socket boundary). Queries are whitespace-collapsed, capped at 200 chars, limited to 20 per session (with Anthropic also passing `max_uses`; Google ignores `max_uses`/domain filters), and rejected if they contain a registered capture secret, an `ev_`/`fn_` ID, or a URL with credentials or query strings. Refusals are audited without echoing secrets; successful calls audit query, provider/auth mode, source URLs, and `truncated` flag (never result bodies), record `llm_usage` with `role='search'`, emit a `partex.web_search` span, and return length-capped results framed in `<partex_untrusted_data kind="web_search">`. Successful results are also persisted in `web_research` (§7, #113) and readable later through `list_research` / `lookup_research`. Off unless `--search-model` is set.
+- **Optional native-only web search (`search` role, `#111`)**: `partex agent --search-model MODEL` enables a `web_search(query)` tool on `partex_tester_agent` backed by an isolated one-shot `partex_search_agent` with `WebSearch(local=None)` and zero function tools, deps, DB, target-client, or file access. Only direct native-search providers (`anthropic:`, `google:`, `google-cloud:` via ADC, and `openai:` / `openai-responses:` on the Responses API, `#144`) are accepted — never `gateway/...`, bare gateway-route names, or local search fallbacks (preserving the `target.py`-only host-socket boundary). Queries are whitespace-collapsed, capped at 200 chars, limited to 20 per session (with Anthropic also passing `max_uses`; Google and OpenAI take no `max_uses`, so the session cap is their only bound), and rejected if they contain a registered capture secret, an `ev_`/`fn_` ID, or a URL with credentials or query strings. Refusals are audited without echoing secrets; successful calls audit query, provider/auth mode, source URLs, and `truncated` flag (never result bodies), record `llm_usage` with `role='search'`, emit a `partex.web_search` span, and return length-capped results framed in `<partex_untrusted_data kind="web_search">`. Successful results are also persisted in `web_research` (§7, #113) and readable later through `list_research` / `lookup_research`. Off unless `--search-model` is set.
 - **No plugins**: `load_plugins=False`; no coding tools, no filesystem access, no network
   except the scoped `http_request` tool.
 - **Explicit agent metadata, caching, and lifecycle**: every `Agent` (`partex_tester_agent`,

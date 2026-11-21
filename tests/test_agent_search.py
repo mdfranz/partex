@@ -118,6 +118,7 @@ class FakeNativeSearchModel(FunctionModel):
         )
         self._name = name
         self.calls: list[tuple[list[ModelMessage], ModelRequestParameters]] = []
+        self.seen_settings: list[ModelSettings | None] = []
 
     @property
     def model_name(self) -> str:
@@ -134,6 +135,7 @@ class FakeNativeSearchModel(FunctionModel):
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
         self.calls.append((list(messages), model_request_parameters))
+        self.seen_settings.append(model_settings)
         return ModelResponse(
             parts=[
                 NativeToolCallPart(
@@ -182,7 +184,9 @@ def _streaming(respond: Callable[[list[ModelMessage], AgentInfo], ModelResponse]
         'zai-org/GLM-5.3',
         'gateway/anthropic:claude-sonnet-4-6',
         'gateway/google:gemini-2.5-flash',
-        'openai:gpt-5',
+        'openai-chat:gpt-5-search-api',
+        'openai:',
+        'azure:gpt-5',
         'openrouter:z-ai/glm-5.3',
         'google-gla:gemini-2.5-flash',
         'google-vertex:gemini-2.5-flash',
@@ -194,7 +198,7 @@ def _streaming(respond: Callable[[list[ModelMessage], AgentInfo], ModelResponse]
 )
 def test_resolve_search_model_rejects_disallowed_specs(bad_spec: str) -> None:
     with pytest.raises(ModelConfigError) as exc_info:
-        resolve_search_model(bad_spec, env={'ANTHROPIC_API_KEY': 'k', 'GOOGLE_API_KEY': 'k'})
+        resolve_search_model(bad_spec, env={'ANTHROPIC_API_KEY': 'k', 'GOOGLE_API_KEY': 'k', 'OPENAI_API_KEY': 'k'})
     assert exc_info.value.rule_code == 'model-config'
     message = str(exc_info.value)
     assert 'anthropic:' in message or 'missing a model name' in message
@@ -223,6 +227,22 @@ def test_resolve_search_model_anthropic_and_google_api_key() -> None:
         resolve_search_model('google:gemini-2.5-flash', env={})
 
 
+def test_resolve_search_model_openai_pins_the_responses_api() -> None:
+    for spec in ('openai:gpt-5.5', 'openai-responses:gpt-5.5', '  openai: gpt-5.5 '):
+        cfg = resolve_search_model(spec, env={'OPENAI_API_KEY': 'sk-openai-test'})
+        assert cfg.provider == 'openai'
+        assert cfg.auth_mode == 'api_key'
+        assert cfg.spec == 'openai:gpt-5.5'
+        assert cfg.model == 'openai-responses:gpt-5.5'  # only Responses has the full web_search tool (#144)
+        assert 'sk-openai-test' not in cfg.startup_summary()
+
+    with pytest.raises(ModelConfigError, match='OPENAI_API_KEY') as missing:
+        resolve_search_model('openai:gpt-5.5', env={'OPENAI_API_KEY': '   '})
+    assert 'sk-' not in str(missing.value)
+    with pytest.raises(ModelConfigError, match='Responses API'):
+        resolve_search_model('openai-chat:gpt-5-search-api', env={'OPENAI_API_KEY': 'sk-openai-test'})
+
+
 def test_resolve_search_model_google_cloud_adc_without_api_key() -> None:
     called = 0
 
@@ -240,7 +260,7 @@ def test_resolve_search_model_google_cloud_adc_without_api_key() -> None:
     assert cfg.provider == 'google-cloud'
     assert cfg.auth_mode == 'adc'
     assert cfg.project == 'sec-eng-prod'
-    assert cfg.location == 'us-central1'
+    assert cfg.location == 'global'  # newer Gemini models are served from global only (#111)
     assert isinstance(cfg.model, GoogleModel)
     summary = cfg.startup_summary()
     assert 'google-cloud:gemini-2.5-flash' in summary
@@ -250,10 +270,10 @@ def test_resolve_search_model_google_cloud_adc_without_api_key() -> None:
 
     cfg_loc = resolve_search_model(
         'google-cloud:gemini-2.5-flash',
-        env={'GOOGLE_CLOUD_PROJECT': 'sec-eng-prod', 'GOOGLE_CLOUD_LOCATION': 'global'},
+        env={'GOOGLE_CLOUD_PROJECT': 'sec-eng-prod', 'GOOGLE_CLOUD_LOCATION': 'us-central1'},
         adc_loader=fake_adc,
     )
-    assert cfg_loc.location == 'global'
+    assert cfg_loc.location == 'us-central1'
 
 
 def test_resolve_search_model_google_cloud_fails_fast_and_never_leaks_credentials() -> None:
@@ -314,6 +334,60 @@ def test_validate_search_query_rules() -> None:
         assert url_exc.value.reason == 'url'
 
 
+def test_extract_source_urls_reads_openai_sources_and_opened_pages() -> None:
+    """Responses-shaped parts: sources on the result (with include), opened pages only on the call args (#144)."""
+    messages: list[ModelMessage] = [
+        ModelResponse(
+            parts=[
+                NativeToolCallPart(
+                    provider_name='openai',
+                    tool_name=WebSearchTool.kind,
+                    tool_call_id='ws_1',
+                    args={'type': 'search', 'query': 'nginx 1.18.0 cves', 'queries': ['nginx 1.18.0 cves']},
+                ),
+                NativeToolReturnPart(
+                    provider_name='openai',
+                    tool_name=WebSearchTool.kind,
+                    tool_call_id='ws_1',
+                    content={
+                        'status': 'completed',
+                        'sources': [
+                            {'type': 'url', 'url': 'https://nvd.nist.gov/vuln/detail/CVE-2021-23017'},
+                            {'type': 'url', 'url': 'https://nginx.org/en/security_advisories.html'},
+                        ],
+                    },
+                ),
+                NativeToolCallPart(
+                    provider_name='openai',
+                    tool_name=WebSearchTool.kind,
+                    tool_call_id='ws_2',
+                    args={'type': 'open_page', 'url': 'https://nginx.org/en/security_advisories.html'},
+                ),
+                NativeToolReturnPart(
+                    provider_name='openai',
+                    tool_name=WebSearchTool.kind,
+                    tool_call_id='ws_2',
+                    content={'status': 'completed'},
+                ),
+                NativeToolCallPart(
+                    provider_name='openai',
+                    tool_name=WebSearchTool.kind,
+                    tool_call_id='ws_3',
+                    args='{"type": "open_page", "url": "https://ubuntu.com/security/notices/USN-9182-1"}',
+                ),
+                NativeToolCallPart(  # another native tool's URL is not a search source
+                    provider_name='openai', tool_name='web_fetch', tool_call_id='wf_1', args={'url': 'https://x.test/'}
+                ),
+            ]
+        )
+    ]
+    assert extract_source_urls(messages) == [
+        'https://nvd.nist.gov/vuln/detail/CVE-2021-23017',
+        'https://nginx.org/en/security_advisories.html',
+        'https://ubuntu.com/security/notices/USN-9182-1',
+    ]
+
+
 def test_extract_source_urls_handles_anthropic_and_google_shapes() -> None:
     messages: list[ModelMessage] = [
         ModelResponse(
@@ -362,6 +436,8 @@ async def test_search_agent_has_only_native_web_search_tool() -> None:
     assert len(params.native_tools) == 1
     assert isinstance(params.native_tools[0], WebSearchTool)
     assert params.native_tools[0].max_uses == SEARCH_ANTHROPIC_MAX_USES
+    # Anthropic search never runs through a code-execution sandbox (no dynamic filtering): live-verified, #111.
+    assert (fake_anth.seen_settings[0] or {}).get('anthropic_web_tools_allowed_callers') == ['direct']
 
     fake_google = FakeNativeSearchModel(name='fake-google')
     google_agent = build_search_agent(fake_google, provider='google-cloud')
@@ -371,6 +447,18 @@ async def test_search_agent_has_only_native_web_search_tool() -> None:
     assert len(g_params.native_tools) == 1
     assert isinstance(g_params.native_tools[0], WebSearchTool)
     assert g_params.native_tools[0].max_uses is None
+    assert 'anthropic_web_tools_allowed_callers' not in (fake_google.seen_settings[0] or {})
+    assert 'openai_include_web_search_sources' not in (fake_google.seen_settings[0] or {})
+
+    fake_openai = FakeNativeSearchModel(name='fake-openai')
+    await build_search_agent(fake_openai, provider='openai').run('nginx 1.24.0 cve')
+    _, o_params = fake_openai.calls[0]
+    assert o_params.function_tools == []
+    assert [type(tool) for tool in o_params.native_tools] == [WebSearchTool]
+    assert o_params.native_tools[0].max_uses is None  # the Responses web_search tool takes no max_uses
+    o_settings = fake_openai.seen_settings[0] or {}
+    assert o_settings.get('openai_include_web_search_sources') is True
+    assert 'anthropic_web_tools_allowed_callers' not in o_settings
 
 
 # ── Tester integration: disabled vs enabled, audit, usage, span, framing ──────

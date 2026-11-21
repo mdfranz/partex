@@ -15,7 +15,7 @@ import pytest
 
 from partex import cli, engine
 from partex.models import Evidence, FindingDraft
-from partex.storage import RunStore
+from partex.storage import MAX_REPORT_BYTES, RunStore, run_reports_dir, write_report
 
 FIXTURES = Path(__file__).parent.parent / 'fixtures'
 VALID_BUNDLE = FIXTURES / 'bundles' / 'valid'
@@ -95,6 +95,40 @@ def review_run_id(capsys: pytest.CaptureFixture[str], db: Path, bundle: Path) ->
     code, out, _ = run(capsys, 'review', str(bundle), '--checks', 'header-security', '--db', str(db))
     assert code in (cli.EXIT_OK, cli.EXIT_FINDINGS)
     return json.loads(out)['run_id']
+
+
+def test_reports_cli(capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path) -> None:
+    run_id = review_run_id(capsys, db, config_only_bundle(tmp_path / 'bundle'))
+    args = ('reports', run_id, '--db', str(db))
+    assert run(capsys, *args) == (0, '[]\n', '')
+
+    directory = run_reports_dir(db, run_id)
+    content = '# Saved report\n'
+    report = write_report(directory, 'summary', content)
+    (directory / 'link.md').symlink_to(report)
+    (directory / 'oversize.md').write_bytes(b'a' * (MAX_REPORT_BYTES + 1))
+    (directory / 'ignore.txt').write_text('not a report')
+
+    code, out, err = run(capsys, *args)
+    assert (code, err) == (0, '')
+    [row] = json.loads(out)
+    assert (row['run_id'], row['name'], row['size_bytes']) == (run_id, 'summary', len(content))
+    assert run(capsys, 'reports', run_id, 'summary', '--db', str(db)) == (0, content, '')
+    code, out, err = run(capsys, 'reports', run_id, 'summary', '--db', str(db), '--json')
+    assert (code, err) == (0, '')
+    assert json.loads(out) == {'run_id': run_id, 'name': 'summary', 'content': content}
+
+    for name in ('absent', '../summary', 'link', 'oversize'):
+        code, out, err = run(capsys, 'reports', run_id, name, '--db', str(db))
+        assert (code, out) == (1, '')
+        assert 'report-' in err
+
+    moved = directory.with_name('moved')
+    directory.rename(moved)
+    directory.symlink_to(moved, target_is_directory=True)
+    code, out, err = run(capsys, *args)
+    assert (code, out) == (1, '')
+    assert 'report-read' in err
 
 
 # ── DB path resolution ────────────────────────────────────────────────────────
@@ -503,7 +537,7 @@ def test_log_file_is_local_only_and_on_for_live_commands(
     assert [name for name, _ in logfire_calls] == ['configure', 'instrument_pydantic_ai']
     config = logfire_calls[0][1]
     assert config['send_to_logfire'] is False and len(config['additional_span_processors']) == 1
-    assert log.exists()
+    assert not log.exists()  # created lazily on the first span; this run exits before emitting one (#126)
 
 
 def test_log_file_off_and_read_only_commands_do_not_configure(

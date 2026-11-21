@@ -790,9 +790,9 @@ async def test_report_and_secrets_accept_an_explicit_path_and_report_failures(
 
 def test_the_model_has_no_export_tool_and_the_commands_exist_for_the_operator() -> None:
     names = set(build_tester_agent('test')._function_toolset.tools)  # pyright: ignore[reportPrivateUsage]
-    # The operator's /report and /secrets exports stay unreachable by the model (#88). The one allowed exception is
-    # save_report (#104): model-authored text, credential-scrubbed, written to its own directory, never an export.
-    assert not {name for name in names if 'report' in name or 'secret' in name or 'export' in name} - {'save_report'}
+    # The model can access its Markdown reports. The /report and /secrets exports remain operator-only.
+    report_tools = {'save_report', 'list_reports', 'read_report'}
+    assert {name for name in names if 'report' in name or 'secret' in name or 'export' in name} == report_tools
 
 
 async def test_plugin_registers_the_export_commands(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
@@ -872,6 +872,22 @@ async def test_save_report_writes_a_private_audited_file(tmp_store: RunStore, tm
         assert call.tool == 'save_report' and call.args['name'] == 'summary-1'
         assert 'Findings' not in json.dumps(call.args) + json.dumps(call.result)  # the audit never holds the text
         assert not any(artifact_dir(tmp_store.path).glob('**/summary-1*'))  # never beside captured evidence
+
+        async def audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+            await tmp_store.record_tool_call(session.run_id, tool, args, result)
+
+        (read,) = await drive_code(
+            session,
+            tmp_store,
+            ["print(await list_reports())\nprint(await read_report(name='summary-1'))"],
+            audit=audit,
+        )
+        assert 'summary-1' in read
+        assert 'See ev_abc.' in read
+        _, listing, reading = await tmp_store.tool_calls(session.run_id)
+        assert listing.tool == 'list_reports' and listing.result == {'count': 1}
+        assert reading.tool == 'read_report' and reading.result == {'found': True}
+        assert reading.args == {'name': 'summary-1', 'run': session.run_id}
 
 
 @pytest.mark.parametrize(
@@ -1194,3 +1210,20 @@ def test_scope_refusal_advice_depends_on_the_rule() -> None:
     assert '/scope add <host[:port]>' in scope_refusal_advice(ScopeViolation('x', kind='host'))
     assert '/scope add <host[:port]>' in scope_refusal_advice(ScopeViolation('x', kind='port'))
     assert 'outside the engagement rules' in scope_refusal_advice(ScopeViolation('x', kind='path'))
+
+
+async def test_run_check_rule_id_names_the_owning_check(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        result = await drive(session, tmp_store, [('run_check', {'check_id': 'error-page-disclosure'})])
+        [retried] = tool_returns(result.all_messages())
+        assert retried.outcome == 'retried'
+        assert 'reported by the version-disclosure check' in str(retried.content)
+
+
+async def test_download_asset_audit_row_records_status(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    """download_asset rows carry the response status and evidence ID, like http_request rows (#126)."""
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        await drive(session, tmp_store, [('download_asset', {'path': '/robots.txt'})])
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert call.tool == 'download_asset'
+        assert call.result['status'] == 200 and call.result['evidence_id'].startswith('ev_')
