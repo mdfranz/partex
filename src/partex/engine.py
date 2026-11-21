@@ -683,8 +683,7 @@ async def run_test(
     async def on_capture(evidence: HttpEvidence) -> None:
         # Capture-time commit: one small transaction per exchange (§6.1), so a
         # mid-run crash discards nothing already sent or received.
-        await store.add_evidence(run_id, evidence)
-        await store.add_requests_spent(run_id, 1)
+        await store.add_evidence(run_id, evidence, count_request=True)
         captured.append(evidence)
 
     client = ScopedHttpClient(engagement, source=f'capture:{run_id}', on_capture=on_capture)
@@ -822,13 +821,11 @@ class LiveSession:
         )
 
     async def _on_capture(self, evidence: HttpEvidence) -> None:
-        await self._store.add_evidence(self.run_id, evidence)
-        await self._store.add_requests_spent(self.run_id, 1)
+        await self._store.add_evidence(self.run_id, evidence, count_request=True)
         self.captured.append(evidence)
 
     async def _on_artifact(self, evidence: ArtifactEvidence) -> None:
-        await self._store.add_evidence(self.run_id, evidence)
-        await self._store.add_requests_spent(self.run_id, 1)
+        await self._store.add_evidence(self.run_id, evidence, count_request=True)
         self.captured.append(evidence)
 
     async def _on_failed_send(self) -> None:
