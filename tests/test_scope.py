@@ -483,3 +483,23 @@ def test_apply_urls_adds_hosts_and_ports_and_sets_allowlist() -> None:
 
 def test_validate_scope_flags_a_bad_urls_entry() -> None:
     assert any('urls entry' in problem for problem in validate_scope(scope_of(urls=['ftp://example.test/'])))
+
+
+def test_urls_entry_without_a_port_covers_both_default_ports() -> None:
+    scope = scope_of(
+        path_prefixes=['/'],
+        exclusions=[],
+        urls=['https://example.test/a', 'http://other.test/b/*'],
+        hosts=['example.test', 'other.test'],
+        ports=[80, 443],
+    )
+    for allowed in ('http://example.test/a', 'https://example.test/a', 'http://other.test/b/c', 'https://other.test/b'):
+        check_url(scope, allowed)
+    with pytest.raises(ScopeViolation):
+        check_url(scope, 'http://example.test/other')
+
+
+def test_apply_urls_always_opens_80_and_443() -> None:
+    scope = apply_urls(scope_of(ports=[8080]), ['https://example.test/a'])
+    assert {80, 443, 8080} <= set(scope.ports)
+    assert apply_urls(scope_of(ports=[]), ['https://example.test/a']).ports == []  # empty already means 80 and 443

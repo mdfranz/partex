@@ -255,6 +255,7 @@ def _path_allowed(scope: Scope, path: str) -> bool:
 
 
 _PREFIX_SUFFIX = '/*'
+_DEFAULT_PORT_SET = frozenset({80, 443})
 
 
 def _entry_url(entry: str) -> str:
@@ -266,10 +267,13 @@ def _url_entry_matches(entry: str, view: ScopedUrl) -> bool:
     """Whether the allowlist *entry* covers *view*: same host and port, and every path interpretation matches.
 
     ``<url>`` matches that exact path only; ``<url>/*`` matches the path and everything under it (on a
-    segment boundary). Scheme and query string are not compared (the port already pins http vs https).
+    segment boundary). The query string is not compared. An entry without an explicit port covers both
+    scheme defaults (80 and 443, whichever scheme it names); an explicit port pins that port.
     """
-    parsed = parse_scoped_url(_entry_url(entry))
-    if parsed.host != view.host or parsed.port != view.port:
+    plain = _entry_url(entry)
+    parsed = parse_scoped_url(plain)
+    ports = {parsed.port} if urlsplit(plain).port is not None else _DEFAULT_PORT_SET
+    if parsed.host != view.host or view.port not in ports:
         return False
     if entry.endswith(_PREFIX_SUFFIX):
         return all(path_under(path, parsed.path) for path in view.candidate_paths)
@@ -391,9 +395,12 @@ def parse_urls_file(text: str) -> list[str]:
 def apply_urls(scope: Scope, urls: list[str]) -> Scope:
     """Return *scope* restricted to the exact *urls*; their hosts and ports are added so the other checks agree.
 
-    Hosts and ports are only ever added; path prefixes, exclusions and budgets are unchanged.
+    Hosts and ports are only ever added (80 and 443 always, since entries without a port cover both); path prefixes, exclusions and budgets are unchanged.
     """
     extended = scope
     for url in urls:
         extended = extend_scope(extended, _entry_url(url))
-    return extended.model_copy(update={'urls': urls})
+    ports = extended.ports
+    if ports:  # 80 and 443 are always open for the listed URLs; an empty list already means exactly those
+        ports = [*ports, *sorted(_DEFAULT_PORT_SET - set(ports))]
+    return extended.model_copy(update={'urls': urls, 'ports': ports})

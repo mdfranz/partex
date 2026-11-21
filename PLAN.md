@@ -341,7 +341,8 @@ tool — is validated immediately before send:
    (exclusions win).
    **Authorized URL list (#121).** An optional `scope.urls` narrows rule 3 to an exact allowlist: a
    request must also match an entry on host, effective port, and every path interpretation (exact
-   path, or a path prefix for an entry ending `/*`); the query string and scheme are not compared.
+   path, or a path prefix for an entry ending `/*`); the query string is not compared. An entry without an
+   explicit port covers both 80 and 443 (either scheme); an explicit `:port` pins that port.
    Empty (the default) means no URL-level restriction. It is set by `--urls-file` (`partex test`,
    `partex agent`, `partex.sh -u`): one URL per line, `#` comments, an empty file or a bad line is
    refused as `scope-invalid` before any socket, the listed hosts and ports are added to
