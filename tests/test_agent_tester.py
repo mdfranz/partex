@@ -29,7 +29,7 @@ from partex.agent_adapter.tester import (
 )
 from partex.agent_adapter.tools import REVIEWER_TOOLS
 from partex.engine import LiveSession, LiveSessionRefused, live_session
-from partex.errors import ScopeViolation
+from partex.errors import PartexError, ScopeViolation
 from partex.models import REDACTED
 from partex.storage import MAX_REPORT_BYTES, RunStore, artifact_dir, run_reports_dir
 
@@ -1028,6 +1028,10 @@ def _unwrap_untrusted(payload: str) -> Any:
     return json.loads(payload.split('>', 1)[1].rsplit('<', 1)[0])
 
 
+def _summary(result: Any) -> dict[str, Any]:
+    return {k: v for k, v in result.items() if k != 'items'}
+
+
 async def test_http_request_batch_sends_and_captures_evidence(
     tmp_store: RunStore, tmp_path: Path, target_app: Any
 ) -> None:
@@ -1052,7 +1056,10 @@ async def test_http_request_batch_sends_and_captures_evidence(
 
         (call,) = await tmp_store.tool_calls(session.run_id)
         assert call.tool == 'http_request_batch'
-        assert call.result == {'total': 3, 'sent': 3, 'refused': 0, 'errored': 0}
+        assert _summary(call.result) == {'total': 3, 'sent': 3, 'refused': 0, 'errored': 0}
+        assert [r['method'] for r in call.args['requests']] == ['GET', 'GET', 'GET']
+        assert call.args['requests'][1]['header_names'] == ['Authorization']
+        assert call.result['items'] == rows
         assert 't0k' not in json.dumps(call.args) + json.dumps(call.result)
 
 
@@ -1080,7 +1087,9 @@ async def test_http_request_batch_partial_failure_keeps_successful_results(
         assert len(target_app.requests) == before + 2
 
         (call,) = await tmp_store.tool_calls(session.run_id)
-        assert call.result == {'total': 5, 'sent': 2, 'refused': 3, 'errored': 0}
+        assert _summary(call.result) == {'total': 5, 'sent': 2, 'refused': 3, 'errored': 0}
+        assert [r.get('refused') for r in call.result['items']] == [None, 'method', 'scope', 'scope', None]
+        assert '/scope add' in rows[2]['reason']
 
 
 async def test_http_request_batch_enforces_item_cap(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
@@ -1094,6 +1103,45 @@ async def test_http_request_batch_enforces_item_cap(tmp_store: RunStore, tmp_pat
         assert target_app.requests == before
         (call,) = await tmp_store.tool_calls(session.run_id)
         assert call.result == {'refused': 'cap'}
+
+
+async def test_http_request_batch_accepts_exactly_the_cap_and_empty(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        full = [{'method': 'GET', 'path': f'/p{i}'} for i in range(BATCH_MAX_ITEMS)]
+        result = await drive(
+            session,
+            tmp_store,
+            [('http_request_batch', {'requests': full}), ('http_request_batch', {'requests': []})],
+        )
+        first, second = (_unwrap_untrusted(str(p.content)) for p in tool_returns(result.all_messages()))
+        assert len(first) == BATCH_MAX_ITEMS and all('evidence_id' in r for r in first)
+        assert second == []
+
+
+async def test_http_request_batch_reports_failed_and_unexpected_items(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        real = session.request
+
+        async def flaky(method: str, url: str, **kwargs: Any) -> Any:
+            if url.endswith('/boom'):
+                raise PartexError('connection reset')
+            if url.endswith('/bug'):
+                raise RuntimeError('unexpected')
+            return await real(method, url, **kwargs)
+
+        monkeypatch.setattr(session, 'request', flaky)
+        batch = [{'method': 'GET', 'path': p} for p in ('/', '/boom', '/bug', '/robots.txt')]
+        result = await drive(session, tmp_store, [('http_request_batch', {'requests': batch})])
+        (returned,) = (str(p.content) for p in tool_returns(result.all_messages()))
+        rows = _unwrap_untrusted(returned)
+        assert [r.get('error') for r in rows] == [None, 'request_failed', 'internal', None]
+        assert 'evidence_id' in rows[0] and 'evidence_id' in rows[3]
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert _summary(call.result) == {'total': 4, 'sent': 2, 'refused': 0, 'errored': 2}
 
 
 async def test_http_request_batch_respects_budget_under_concurrency(
@@ -1113,7 +1161,7 @@ async def test_http_request_batch_respects_budget_under_concurrency(
         assert session.requests_spent == 4
 
         (call,) = await tmp_store.tool_calls(session.run_id)
-        assert call.result == {'total': 6, 'sent': 3, 'refused': 3, 'errored': 0}
+        assert _summary(call.result) == {'total': 6, 'sent': 3, 'refused': 3, 'errored': 0}
 
 
 async def test_http_request_batch_is_direct_tool_not_code_mode_tool(

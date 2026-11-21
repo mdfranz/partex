@@ -45,7 +45,8 @@ BATCH_MAX_ITEMS = 50
 """Hard cap on requests per ``http_request_batch`` call, matching ``CODE_MODE_MAX_TOOL_CALLS``."""
 
 BATCH_CONCURRENCY = 10
-"""Maximum number of in-flight requests per ``http_request_batch`` call."""
+"""Maximum number of in-flight requests per ``http_request_batch`` call (an upper bound: the engagement rate
+limiter still paces the sends, so this does not multiply throughput)."""
 
 
 class BatchRequestItem(BaseModel):
@@ -141,6 +142,10 @@ async def http_request(
     return frame_untrusted('http_exchange', _exchange_for_model(evidence))
 
 
+def _batch_url(session: LiveSession, item: BatchRequestItem) -> str:
+    return item.path if '://' in item.path else urljoin(session.engagement.target.base_url, item.path)
+
+
 async def _run_batch_item(session: LiveSession, item: BatchRequestItem) -> dict[str, Any]:
     verb = item.method.strip().upper()
     if verb not in SAFE_METHODS:
@@ -149,15 +154,21 @@ async def _run_batch_item(session: LiveSession, item: BatchRequestItem) -> dict[
             'refused': 'method',
             'reason': f'{verb} is not available: only GET, HEAD, and OPTIONS are allowed',
         }
-    url = item.path if '://' in item.path else urljoin(session.engagement.target.base_url, item.path)
     try:
-        evidence = await session.request(verb, url, headers=item.headers)
+        evidence = await session.request(verb, _batch_url(session, item), headers=item.headers)
     except ScopeViolation as exc:
-        return {'path': item.path, 'refused': 'scope', 'reason': str(exc)}
+        return {
+            'path': item.path,
+            'refused': 'scope',
+            'reason': f'refused by the engagement scope (nothing was sent): {exc}. You cannot change scope: if the '
+            'operator wants this host or port, they run /scope add <host[:port]> then /scope confirm.',
+        }
     except BudgetExhausted as exc:
-        return {'path': item.path, 'refused': 'budget', 'reason': str(exc)}
+        return {'path': item.path, 'refused': 'budget', 'reason': f'the engagement request budget is spent: {exc}'}
     except PartexError as exc:
         return {'path': item.path, 'error': 'request_failed', 'reason': str(exc)}
+    except Exception as exc:  # noqa: BLE001 - one item's unexpected failure must not discard the rest of the batch
+        return {'path': item.path, 'error': 'internal', 'reason': f'{type(exc).__name__}: {exc}'}
     return {'path': item.path, 'status': evidence.http.response.status_code, 'evidence_id': evidence.id}
 
 
@@ -172,6 +183,7 @@ async def http_request_batch(ctx: RunContext[TesterDeps], requests: list[BatchRe
     Args:
         requests: Up to 50 ``{method, path, headers?}`` items (GET, HEAD, or OPTIONS only).
     """
+    session = ctx.deps.session
     if len(requests) > BATCH_MAX_ITEMS:
         await _audit(ctx, 'http_request_batch', {'count': len(requests)}, {'refused': 'cap'})
         raise ToolFailed(
@@ -184,7 +196,7 @@ async def http_request_batch(ctx: RunContext[TesterDeps], requests: list[BatchRe
 
     async def _send_one(index: int, item: BatchRequestItem) -> None:
         async with limiter:
-            items[index] = await _run_batch_item(ctx.deps.session, item)
+            items[index] = await _run_batch_item(session, item)
 
     async with anyio.create_task_group() as tg:
         for index, item in enumerate(requests):
@@ -194,11 +206,23 @@ async def http_request_batch(ctx: RunContext[TesterDeps], requests: list[BatchRe
     sent = sum(1 for row in resolved if 'evidence_id' in row)
     refused = sum(1 for row in resolved if 'refused' in row)
     errored = sum(1 for row in resolved if 'error' in row)
+    # Audit parity with http_request: every item's method/url/header names, and its outcome (header values never).
+    args = {
+        'count': len(requests),
+        'requests': [
+            {
+                'method': item.method.strip().upper(),
+                'url': _batch_url(session, item),
+                'header_names': sorted(item.headers or {}),
+            }
+            for item in requests
+        ],
+    }
     await _audit(
         ctx,
         'http_request_batch',
-        {'count': len(requests)},
-        {'total': len(requests), 'sent': sent, 'refused': refused, 'errored': errored},
+        args,
+        {'total': len(requests), 'sent': sent, 'refused': refused, 'errored': errored, 'items': resolved},
     )
     return frame_untrusted('http_exchange_batch', resolved)
 
