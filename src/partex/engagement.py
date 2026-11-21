@@ -157,6 +157,8 @@ def _rule_code_for(exc: ValidationError) -> str:
         return 'credential-invalid'
     if 'tls' in locations:
         return 'tls-invalid'
+    if "'http'" in locations:
+        return 'http-invalid'
     return 'scope-invalid'
 
 

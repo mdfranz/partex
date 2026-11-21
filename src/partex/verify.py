@@ -34,6 +34,8 @@ from .models import (
     HttpEvidence,
     Scope,
     Verification,
+    check_user_agent,
+    get_header,
 )
 from .storage import RunStore
 from .target import ScopedHttpClient
@@ -55,7 +57,9 @@ class VerifyResult:
     counterevidence: str = ''
 
 
-def _engagement_from_snapshot(scope: Scope, origin: str, *, tls_unverified: bool = False) -> Engagement:
+def _engagement_from_snapshot(
+    scope: Scope, origin: str, *, tls_unverified: bool = False, user_agent: str | None = None
+) -> Engagement:
     """Rebuild a minimal engagement from the run's stored scope snapshot.
 
     Verification replays inside the scope the run was *authorized for*, even if
@@ -72,12 +76,25 @@ def _engagement_from_snapshot(scope: Scope, origin: str, *, tls_unverified: bool
                 'verify': not tls_unverified,
                 'insecure_hosts': [urlsplit(origin).hostname] if tls_unverified else [],
             },
+            # ...and presents as the original request did, so the replay differs only in time (#135).
+            'http': {'user_agent': user_agent},
             'authorization': {
                 'attestation': 'scope snapshot recorded by the run under verification',
                 'operator': 'partex verify',
             },
         }
     )
+
+
+def _replayable_user_agent(evidence: HttpEvidence) -> str | None:
+    """The User-Agent the original request carried, if it is one partex can send again (else the default)."""
+    value = get_header(evidence.http.request.headers, 'user-agent')
+    if value is None:
+        return None
+    try:
+        return check_user_agent(value)
+    except ValueError:
+        return None
 
 
 def _origin_of(evidence: HttpEvidence) -> str:
@@ -101,6 +118,7 @@ async def run_verification(
     *,
     authorized: bool,
     registry: Mapping[str, Any] | None = None,
+    user_agent: str | None = None,
 ) -> VerifyResult:
     """Replay the finding's recipe and record the verdict.
 
@@ -109,6 +127,11 @@ async def run_verification(
     """
     if not authorized:
         raise ValidationFailed('--authorized is required for every live command', rule_code='unauthorized')
+    if user_agent is not None:
+        try:
+            check_user_agent(user_agent)
+        except ValueError as exc:
+            raise ValidationFailed(f'--user-agent: {exc}', rule_code='http-invalid') from exc
 
     run = await store.get_run(run_id)
     if run.input_kind != 'engagement' or run.scope_snapshot is None:
@@ -136,7 +159,10 @@ async def run_verification(
         )
 
     engagement = _engagement_from_snapshot(
-        run.scope_snapshot, _origin_of(original), tls_unverified=not original.tls_verified
+        run.scope_snapshot,
+        _origin_of(original),
+        tls_unverified=not original.tls_verified,
+        user_agent=user_agent or _replayable_user_agent(original),
     )
     replays: list[Evidence] = []
 

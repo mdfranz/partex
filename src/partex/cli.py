@@ -52,6 +52,7 @@ INSECURE_HELP = (
     'accept invalid TLS certificates (self-signed, expired, hostname mismatch) for this run; also '
     'engagement tls.verify=false. Recorded on the run, never available to the model'
 )
+USER_AGENT_HELP = 'User-Agent for this run, overriding the engagement http.user_agent (default partex/<version>)'
 
 EXIT_OK = 0
 EXIT_FATAL = 1
@@ -179,6 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument('engagement', help='engagement directory or engagement.json path')
     test.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
     test.add_argument('--insecure', action='store_true', help=INSECURE_HELP)
+    test.add_argument('--user-agent', default=None, help=USER_AGENT_HELP)
     test.add_argument('--urls-file', default=None, help=URLS_FILE_HELP)
     test.add_argument('--recursive', action='store_true', help=RECURSIVE_HELP)
     test_selection = test.add_mutually_exclusive_group()
@@ -260,6 +262,11 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument('run_id', help='the run holding the finding')
     verify.add_argument('finding_id', help='the finding to re-verify')
     verify.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
+    verify.add_argument(
+        '--user-agent',
+        default=None,
+        help='User-Agent for the replay (default: the one the original request used)',
+    )
     verify.add_argument('--json', action='store_true', help='JSON output even on a TTY')
     verify.set_defaults(handler=_cmd_verify)
 
@@ -292,6 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument('engagement', help='engagement directory or engagement.json path')
     agent.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
     agent.add_argument('--insecure', action='store_true', help=INSECURE_HELP)
+    agent.add_argument('--user-agent', default=None, help=USER_AGENT_HELP)
     agent.add_argument('--urls-file', default=None, help=URLS_FILE_HELP)
     agent.add_argument('--recursive', action='store_true', help=RECURSIVE_HELP)
     agent.add_argument(
@@ -415,6 +423,7 @@ def _cmd_test(args: argparse.Namespace) -> int:
                 insecure=bool(args.insecure),
                 urls_file=args.urls_file,
                 recursive=bool(args.recursive),
+                user_agent=args.user_agent,
                 seed_bundle=args.bundle,
                 max_seed=args.max_seed,
             )
@@ -775,6 +784,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             insecure=bool(args.insecure),
             urls_file=Path(args.urls_file) if args.urls_file is not None else None,
             recursive=bool(args.recursive),
+            user_agent=args.user_agent,
             checks=checks,
             from_run=args.from_run,
             bundle=bundle,
@@ -797,7 +807,9 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
     async def go() -> VerifyResult:
         async with await RunStore.open(db_path) as store:
-            return await run_verification(args.run_id, args.finding_id, store, authorized=bool(args.authorized))
+            return await run_verification(
+                args.run_id, args.finding_id, store, authorized=bool(args.authorized), user_agent=args.user_agent
+            )
 
     result = anyio.run(go)  # PartexError → main() prints `partex: <rule>: <msg>` and exits 1
     if _wants_json(args.json):

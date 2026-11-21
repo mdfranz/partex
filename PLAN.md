@@ -405,6 +405,16 @@ warning; each exchange made unverified carries `tls_verified: false` (omitted wh
 part of the evidence ID); a verification replay reuses the original exchange's setting. The model
 has no tool for it. Reporting the certificate itself as a finding is a follow-up.
 
+**User-Agent (#135).** Every request the target client sends carries one User-Agent per run: the
+engagement's `http: {"user_agent": "..."}`, overridden by `partex test|agent|verify --user-agent`,
+or `partex/<engine version>` when neither is set, never the HTTP library's own default (that would
+disclose the tool stack). It is a client-level default header, so every send path inherits it, and
+a request's own `User-Agent` header still wins. A set value must be one line of printable ASCII, not
+blank, at most 512 characters; anything else fails engagement load (or the `--user-agent` gate)
+with `http-invalid` before any socket. It is never a secret: it is captured in evidence and exported
+like any other request header. A verification replay presents the original request's User-Agent
+unless `verify --user-agent` is given. No rotation: one consistent value keeps evidence stable.
+
 **Live scope extension (operator only).** In a live `agent` session the operator can add a host
 and port with the CLAI2 slash command `/scope add <host[:port]|url>`, which only *stages* the
 change and shows the exact additions (ports apply to every host in scope); `/scope confirm`
@@ -857,8 +867,8 @@ emits a passive-reviewable bundle from a live run's captures (redacted by defaul
 | `partex engage init <dir>` | scaffold an engagement file | `--target`, `--scope-host` |
 | `partex engage check <dir>` | validate engagement + scope + credentials, no traffic | `--json` |
 | `partex review <bundle>` | passive review of an offline bundle (model-free) | `--checks a,b` / `--all`, `--workers N`, `--db`, `--out` |
-| `partex test <engagement>` | live run: capture, passive + active checks, verify (model-free) | `--authorized` (required), `--checks`, `--workers`, `--no-verify`, `--insecure`, `--db` |
-| `partex verify <run-id> <finding-id>` | (re)run verification for one finding in one run | `--authorized`, `--insecure`, `--db` |
+| `partex test <engagement>` | live run: capture, passive + active checks, verify (model-free) | `--authorized` (required), `--checks`, `--workers`, `--no-verify`, `--insecure`, `--user-agent`, `--db` |
+| `partex verify <run-id> <finding-id>` | (re)run verification for one finding in one run | `--authorized`, `--insecure`, `--user-agent`, `--db` |
 | `partex export-bundle <run-id>` | write a passive bundle from a live run's captures | `--out DIR`, `--include-secrets`, `--db` |
 | `partex import-har <file.har>` | build a passive-reviewable bundle from an operator-exported HAR (M3; the MITM-free capture path) | `--out DIR`, `--target` |
 | `partex runs` | list runs (id, state, input, findings count) | `--db`, `--json` |
@@ -867,7 +877,7 @@ emits a passive-reviewable bundle from a live run's captures (redacted by defaul
 | `partex summarize <run-id>` | (re)generate the summary (M4) | `--model`, `--summary-timeout`, `--db` |
 | `partex checks` | list registered checks (kind, scope needs) and their skills | `--json`, `--skill-dir` |
 | `partex sandboxes` | detect which sandboxes (`monty`, `docker`, `podman`, `bubblewrap`) this host can run | `--json` |
-| `partex agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--gateway-route`, `--checks`, `--from`, `--insecure`, `--db` |
+| `partex agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--gateway-route`, `--checks`, `--from`, `--insecure`, `--user-agent`, `--db` |
 | `partex browse <engagement>` | browser capture harness (M7): record and actively probe authenticated SPA flows as evidence | `--authorized` (required), `--attach <cdp-port>`, `--db` |
 | `partex chat <run-id>` | read-only review chat over a saved run | `--model`, `--gateway-route`, `--db`, `--no-briefing` |
 | `partex reports <run-id> [name]` | list or print Markdown saved with `save_report` | `--db`, `--json` |
