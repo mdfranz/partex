@@ -3,9 +3,8 @@
 PLAN §10 fixture 1; issues #38 and #52.  Pure function over validated evidence: no I/O, network,
 model or storage access.  Registered via ``partex.checks`` entry point.
 
-Findings aggregate **per host and issue class** (#38): one draft per ``(host, subject, title,
-variant)`` with every affected evidence ID attached, so a 500-exchange bundle produces one
-finding per host × class (well under the engine's draft cap) instead of one per exchange.
+Findings aggregate per host and rule (#38, #127), with distinct non-default ports
+and every affected URL and evidence ID attached.
 
 Precision rules (false positives fixed by #38):
 
@@ -34,14 +33,14 @@ finding says so.
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
-from ..models import Evidence, FindingDraft, HttpEvidence, Severity, get_all, get_header
+from ..models import Evidence, FindingDraft, HttpEvidence, Severity, get_all, get_header, redact
 
 # ── Check metadata ────────────────────────────────────────────────────────────
 
 CHECK_ID = 'header-security'
-CHECK_VERSION = '1.1'
+CHECK_VERSION = '1.2'
 CHECK_TITLE = 'HTTP Response Header Security'
 CHECK_DESCRIPTION = (
     'Evaluate HTTP responses for missing or misconfigured security headers: HSTS, CSP '
@@ -96,9 +95,12 @@ def _host_of(url: str) -> str:
     parts = urlsplit(url)
     host = (parts.hostname or '').lower()
     if not host:
-        return url
-    if parts.port is not None:
-        return f'{host}:{parts.port}'
+        return '(unknown host)'
+    port = parts.port
+    default_port = {'http': 80, 'https': 443}.get(parts.scheme)
+    if port is not None and port != default_port:
+        authority = f'[{host}]' if ':' in host else host
+        return f'{authority}:{port}'
     return host
 
 
@@ -293,12 +295,10 @@ class _Instance:
     summary: str
     """Host-level fragment; may contain a ``{details}`` placeholder filled at aggregation."""
     remediation: str
-    variant: str = ''
-    """Groups flavors sharing a title (CORS value, weak-source list) into separate findings."""
     details: tuple[str, ...] = ()
     """Per-instance pieces unioned at aggregation (missing cookie attributes, HSTS values)."""
     note: str = ''
-    """Extra context (report-only policy, obsolete X-Frame-Options); first non-empty wins."""
+    """Extra context (report-only policy, obsolete X-Frame-Options); retained across the group."""
     severity_by_details: bool = False
     """Cookie class: final severity depends on the unioned details (medium when 2+)."""
 
@@ -355,10 +355,8 @@ def _hsts_instances(exchange: HttpEvidence) -> list[_Instance]:
     if max_age is None:
         if raw is None:
             summary = 'The HSTS header carries no max-age directive, so no validity period is communicated.'
-            variant = 'missing'
         else:
             summary = 'The HSTS max-age directive is unparseable: {details}.'
-            variant = raw
         return [
             _Instance(
                 subject='header:strict-transport-security',
@@ -366,7 +364,6 @@ def _hsts_instances(exchange: HttpEvidence) -> list[_Instance]:
                 severity='low',
                 summary=summary,
                 remediation='Set `Strict-Transport-Security: max-age=31536000; includeSubDomains`; max-age must be a decimal seconds value.',
-                variant=variant,
                 details=() if raw is None else (f'observed max-age={raw}',),
             )
         ]
@@ -389,7 +386,6 @@ def _hsts_instances(exchange: HttpEvidence) -> list[_Instance]:
                 severity='low',
                 summary='HSTS max-age is below the 1-year minimum: {details}.',
                 remediation='Set `Strict-Transport-Security: max-age=31536000; includeSubDomains` on all HTTPS responses.',
-                variant='short-max-age',
                 details=(f'max-age={max_age}',),
             )
         ]
@@ -435,7 +431,6 @@ def _csp_instances(exchange: HttpEvidence) -> list[_Instance]:
             summary='The enforced CSP permits {details}, which allows script injection.',
             remediation='Remove unsafe CSP sources: replace `*` with explicit origins, avoid '
             "'unsafe-inline' and 'unsafe-eval'; use nonces or hashes for inline scripts.",
-            variant=', '.join(weaknesses),
             details=tuple(weaknesses),
             note=note,
         )
@@ -479,7 +474,6 @@ def _framing_instances(exchange: HttpEvidence) -> list[_Instance]:
                     summary='The enforced CSP frame-ancestors permits {details}, allowing '
                     'framing by untrusted origins (clickjacking).',
                     remediation="Restrict `frame-ancestors` to `'self'` or `'none'`, or to explicit trusted origins.",
-                    variant=', '.join(sources),
                     details=tuple(sources),
                     note=note,
                 )
@@ -603,7 +597,6 @@ def _cors_instance(exchange: HttpEvidence) -> _Instance | None:
             remediation='Never combine `Access-Control-Allow-Origin: *` or `null` with '
             '`Access-Control-Allow-Credentials: true`. Restrict ACAO to explicit, '
             'trusted origins when credentials are enabled.',
-            variant=acao,
         )
     return None
 
@@ -613,49 +606,41 @@ def _cors_instance(exchange: HttpEvidence) -> _Instance | None:
 
 def _review_header_security(evidence: Sequence[Evidence]) -> list[FindingDraft]:
     """Run all header-security checks and aggregate the drafts per host and issue class."""
-    order: list[tuple[str, str, str, str]] = []
-    instances: dict[tuple[str, str, str, str], list[_Instance]] = {}
-    evidence_ids: dict[tuple[str, str, str, str], list[str]] = {}
+    groups: dict[tuple[str, str, str], list[tuple[_Instance, str, str]]] = {}
 
     for ev in evidence:
         if not isinstance(ev, HttpEvidence):
             continue
         host = _host_of(ev.http.request.url)
+        redacted = redact(ev)
+        assert isinstance(redacted, HttpEvidence)
+        parts = urlsplit(redacted.http.request.url)
+        url = urlunsplit((parts.scheme, parts.netloc.rsplit('@', 1)[-1], parts.path, '', ''))
         for inst in _exchange_instances(ev):
-            key = (host, inst.subject, inst.title, inst.variant)
-            if key not in instances:
-                instances[key] = []
-                evidence_ids[key] = []
-                order.append(key)
-            instances[key].append(inst)
-            if ev.id not in evidence_ids[key]:
-                evidence_ids[key].append(ev.id)
+            key = (host, inst.subject, inst.title)
+            groups.setdefault(key, []).append((inst, ev.id, url))
 
     drafts: list[FindingDraft] = []
-    for key in order:
-        host, subject, title, _variant = key
-        group = instances[key]
-        ids = evidence_ids[key]
-        first = group[0]
-        details: list[str] = []
-        for inst in group:
-            for detail in inst.details:
-                if detail and detail not in details:
-                    details.append(detail)
-        severity = first.severity
+    for (host, subject, title), group in groups.items():
+        first = group[0][0]
+        ids = sorted({evidence_id for _, evidence_id, _ in group})
+        urls = sorted({url for _, _, url in group if url})
+        details_by_summary: dict[str, set[str]] = {}
+        notes: set[str] = set()
+        for inst, _, _ in group:
+            details_by_summary.setdefault(inst.summary, set()).update(inst.details)
+            if inst.note:
+                notes.add(inst.note)
+        summaries = [
+            summary.replace('{details}', ', '.join(sorted(details)))
+            for summary, details in sorted(details_by_summary.items())
+        ]
+        severity = max((inst for inst, _, _ in group), key=lambda inst: _SEVERITY_RANK[inst.severity]).severity
         if first.severity_by_details:
-            severity = 'medium' if len(details) > 1 else 'low'
-        else:
-            for inst in group:
-                if _SEVERITY_RANK[inst.severity] > _SEVERITY_RANK[severity]:
-                    severity = inst.severity
-        note = next((inst.note for inst in group if inst.note), '')
-        summary = first.summary
-        if '{details}' in summary:
-            summary = summary.format(details=', '.join(details))
-        description = f'{summary} Affected host: {host}; {len(ids)} captured response(s).'
-        if note:
-            description = f'{description} {note}'
+            severity = 'medium' if len(details_by_summary[first.summary]) > 1 else 'low'
+        description = ' '.join([*summaries, f'Affected host: {host}. {len(ids)} captured response(s).', *sorted(notes)])
+        if urls:
+            description += '\n\nAffected URLs:\n' + '\n'.join(f'- {url}' for url in urls)
         drafts.append(
             FindingDraft(
                 check_id=CHECK_ID,

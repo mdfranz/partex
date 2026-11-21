@@ -1099,6 +1099,8 @@ def test_aggregation_one_finding_per_host_and_class():
     assert len(hsts[0].evidence_ids) == 50
     assert 'example.test' in hsts[0].description
     assert '50 captured response' in hsts[0].description
+    assert '/path0' in hsts[0].description
+    assert '/path49' in hsts[0].description
 
 
 def test_aggregation_separates_hosts():
@@ -1138,8 +1140,7 @@ def test_aggregation_unions_cookie_attribute_gaps():
         assert attr in f.description
 
 
-def test_aggregation_keeps_cors_variants_apart():
-    """Wildcard and null ACAO are distinct weaknesses of the same title → separate findings."""
+def test_aggregation_combines_cors_variants():
     check = HeaderSecurityCheck()
     evs = [
         _http_evidence(
@@ -1162,8 +1163,26 @@ def test_aggregation_keeps_cors_variants_apart():
         ),
     ]
     findings = [f for f in check.review(evs) if f.title == 'Permissive CORS with credentials']
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.evidence_ids == sorted(ev.id for ev in evs)
+    assert 'Allow-Origin: *' in finding.description
+    assert 'Allow-Origin: null' in finding.description
+    assert check.review(evs) == check.review(evs[::-1])
+
+
+def test_aggregation_separates_non_default_ports_and_omits_url_credentials():
+    check = HeaderSecurityCheck()
+    evs = [
+        _http_evidence(url='https://example.test/public'),
+        _http_evidence(url='https://example.test:443/another'),
+        _http_evidence(url='https://user:password@example.test:8443/service?token=secret#fragment'),
+    ]
+    findings = [f for f in check.review(evs) if f.title == 'Missing HSTS header']
     assert len(findings) == 2
-    ids = {finding_id(f.check_id, f.subject, f.title, f.evidence_ids) for f in findings}
-    assert len(ids) == 2  # distinct weaknesses, not one merged finding
-    descriptions = ' | '.join(f.description for f in findings)
-    assert '* ' in descriptions and 'null' in descriptions
+    default, custom = findings
+    assert default.evidence_ids == sorted(ev.id for ev in evs[:2])
+    assert custom.evidence_ids == [evs[2].id]
+    assert 'https://example.test:8443/service' in custom.description
+    for secret in ('password', 'secret', 'fragment'):
+        assert secret not in custom.description
