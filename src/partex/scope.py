@@ -402,10 +402,18 @@ def _extend_hosts_ports(scope: Scope, spec: str) -> Scope:
     return extended
 
 
-def parse_urls_file(text: str) -> list[str]:
+def _as_prefix(url: str) -> str:
+    """*url* as a ``/*`` path-prefix entry: query and fragment dropped, so ``http://foo/`` becomes ``http://foo/*``."""
+    if url.endswith(_PREFIX_SUFFIX):
+        return url
+    parts = urlsplit(url)
+    return f'{parts.scheme}://{parts.netloc}{parts.path.rstrip("/")}{_PREFIX_SUFFIX}'
+
+
+def parse_urls_file(text: str, *, recursive: bool = False) -> list[str]:
     """Parse an authorized-URLs file: one URL per line; blank lines and whole-line ``#`` comments are ignored (#121).
 
-    A trailing ``/*`` makes an entry a path prefix. Duplicates collapse, keeping first-seen order. Raises
+    A trailing ``/*`` makes an entry a path prefix; with *recursive* every entry is one. Duplicates collapse, keeping first-seen order. Raises
     :class:`ScopeViolation` naming the line for anything :func:`parse_scoped_url` refuses, and when the
     file lists no URL at all (an empty allowlist would silently mean "everything in scope").
     """
@@ -418,6 +426,8 @@ def parse_urls_file(text: str) -> list[str]:
             parse_scoped_url(_entry_url(line))
         except ScopeViolation as exc:
             raise ScopeViolation(f'line {number}: {exc}', rule_code='scope-invalid') from exc
+        if recursive:
+            line = _as_prefix(line)
         if line not in urls:
             urls.append(line)
     if not urls:

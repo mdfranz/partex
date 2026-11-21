@@ -543,3 +543,18 @@ def test_extend_scope_with_a_url_list_refuses_a_bare_host_with_a_hint() -> None:
     scope = apply_urls(scope_of(path_prefixes=['/'], exclusions=[], ports=[443]), ['https://example.test/a'])
     with pytest.raises(ScopeViolation, match=r'scope grows by URL.*https://new\.test/\*'):
         extend_scope(scope, 'new.test')
+
+
+def test_parse_urls_file_recursive_makes_every_entry_a_prefix() -> None:
+    text = 'http://foo/\nhttps://bar.test/app/?q=1#frag\nhttps://baz.test:8443/x/*\n'
+    assert parse_urls_file(text, recursive=True) == [
+        'http://foo/*',
+        'https://bar.test/app/*',
+        'https://baz.test:8443/x/*',
+    ]
+    scope = apply_urls(
+        scope_of(path_prefixes=['/'], exclusions=[], ports=[80, 443]),
+        parse_urls_file('http://example.test/', recursive=True),
+    )
+    check_url(scope, 'http://example.test/any/deep/path')
+    check_url(scope, 'https://example.test/')

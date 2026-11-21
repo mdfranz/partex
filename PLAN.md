@@ -347,7 +347,8 @@ tool — is validated immediately before send:
    `partex agent`, `partex.sh -u`): one URL per line, `#` comments, an empty file or a bad line is
    refused as `scope-invalid` before any socket, the listed hosts and ports are added to
    `scope.hosts`/`scope.ports`, and `target.base_url` must be listed. Exclusions still win, and unlisted
-   probes (such as a check's `/robots.txt`) are refused by the scope gate rather than failing the run.
+   probes (such as a check's `/robots.txt`) are refused by the scope gate rather than failing the run. `--recursive` (requires `--urls-file`; `partex.sh --recursive`) turns every entry into a `/*` prefix,
+   dropping any query or fragment, so `http://foo/` allows every path on that host and port.
    A refusal carries its rule (`host`, `port`, `path`, `url-list`) so the model's advice to the operator fits it;
    with a list active, the operator's `/scope add <url>` (`…/*` for a prefix) adds a URL after `/scope confirm`, and a bare
    host is refused with that hint.

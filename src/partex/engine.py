@@ -24,6 +24,7 @@ import sys
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -430,10 +431,10 @@ async def _record_tls_policy(store: RunStore, run_id: str, engagement: Engagemen
     print(f'partex: warning: TLS certificate verification is DISABLED for {", ".join(hosts)}', file=sys.stderr)
 
 
-def _apply_urls_file(engagement: Engagement, urls_file: str | Path) -> Engagement:
+def _apply_urls_file(engagement: Engagement, urls_file: str | Path, *, recursive: bool = False) -> Engagement:
     """``--urls-file`` restricts scope to the exact URLs listed; the target's ``base_url`` must be one of them (#121)."""
     try:
-        urls = parse_urls_file(Path(urls_file).read_text(encoding='utf-8'))
+        urls = parse_urls_file(Path(urls_file).read_text(encoding='utf-8'), recursive=recursive)
         scope = apply_urls(engagement.scope, urls)
         check_url(scope, engagement.target.base_url)
     except OSError as exc:
@@ -449,6 +450,7 @@ async def _check_live_gates(
     authorized: bool,
     insecure: bool = False,
     urls_file: str | Path | None = None,
+    recursive: bool = False,
 ) -> Engagement:
     """The live gates, all before any socket: ``--authorized`` (E2 CLI half), E1–E7, credentials present."""
     if not authorized:
@@ -461,7 +463,9 @@ async def _check_live_gates(
     if missing:
         raise _GateRefused(f'credential env vars not set: {", ".join(missing)}', rule_code='credential-missing')
     if urls_file is not None:
-        engagement = await anyio.to_thread.run_sync(_apply_urls_file, engagement, urls_file)
+        engagement = await anyio.to_thread.run_sync(
+            partial(_apply_urls_file, engagement, urls_file, recursive=recursive)
+        )
     return _apply_insecure(engagement, insecure)
 
 
@@ -473,6 +477,7 @@ async def run_test(
     authorized: bool,
     insecure: bool = False,
     urls_file: str | Path | None = None,
+    recursive: bool = False,
     registry: Mapping[str, Any] | None = None,
     seed_bundle: str | Path | None = None,
     max_seed: int | None = None,
@@ -507,7 +512,7 @@ async def run_test(
 
     try:
         engagement = await _check_live_gates(
-            engagement_path, authorized=authorized, insecure=insecure, urls_file=urls_file
+            engagement_path, authorized=authorized, insecure=insecure, urls_file=urls_file, recursive=recursive
         )
     except _GateRefused as exc:
         return await invalid(exc.rule_code or 'engagement-invalid', str(exc))
@@ -786,6 +791,7 @@ async def live_session(
     authorized: bool,
     insecure: bool = False,
     urls_file: str | Path | None = None,
+    recursive: bool = False,
     checks: Sequence[str] = (),
     registry: Mapping[str, Any] | None = None,
 ) -> AsyncGenerator[LiveSession]:
@@ -801,7 +807,7 @@ async def live_session(
     selected_ids = tuple(check.check_id for check in selected)
     try:
         engagement = await _check_live_gates(
-            engagement_path, authorized=authorized, insecure=insecure, urls_file=urls_file
+            engagement_path, authorized=authorized, insecure=insecure, urls_file=urls_file, recursive=recursive
         )
     except _GateRefused as exc:
         run_id = await store.create_run(

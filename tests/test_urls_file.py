@@ -90,3 +90,20 @@ async def test_unlisted_paths_are_refused_on_the_wire(target_server: Any, tmp_pa
     )
     paths = [request['path'] for request in target_server.requests]
     assert set(paths) <= {'/'}, (result.state, paths)
+
+
+async def test_recursive_allows_everything_under_each_listed_url(
+    target_server: Any, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    base = target_server.base_url
+    directory = engagement_dir(tmp_path, target_server)
+    result = await run_test(
+        directory,
+        tmp_store,
+        ['version-disclosure'],
+        authorized=True,
+        urls_file=_write(tmp_path, f'{base}/\n'),
+        recursive=True,
+    )
+    assert result.state == 'checks_complete'
+    assert {request['path'] for request in target_server.requests} > {'/'}  # /robots.txt etc. now go out
