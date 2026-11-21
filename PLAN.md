@@ -79,6 +79,12 @@ Several initial assumptions in earlier drafts have been explicitly amended as im
 5. **Async `ActiveCheck.probe` & `HttpEvidence`-returning `TargetClient` (#39, #44):** Updated the §10
    check contract so probes await `TargetClient.request(...) -> HttpEvidence` and `verify_recipe`
    receives `(finding, evidence)`.
+6. **State-changing and multi-protocol probing policy (#119):** Added engagement
+   `scope.allowed_methods` and `scope.max_write_requests`, mapped `ws`/`wss` onto the §4.2 scope
+   rules, and defined one operator-approval primitive shared by non-safe HTTP methods, websocket
+   frame sends, gRPC invocation, and write-bearing verify recipes — settling the safety model
+   #65, #116, and #117 were each blocked on. Passive checks and their determinism guarantees are
+   unchanged; this declares how writes and new protocols enter under the same controls.
 
 ### Constraints
 
@@ -295,7 +301,9 @@ engagement/
     "exclusions": ["/admin/shutdown", "/logout"],
     "ports": [443],
     "max_rps": 5,
-    "max_requests": 2000
+    "max_requests": 2000,
+    "allowed_methods": ["GET", "HEAD", "OPTIONS", "POST"],
+    "max_write_requests": 50
   },
   "authorization": {
     "attestation": "Written authorization from Example Corp, ref SOW-2026-114, expires 2026-12-31.",
@@ -314,7 +322,7 @@ row is finalized):
 |---|---|---|
 | E1 | manifest parses, `schema_version` is exactly `1` | `engagement-version` |
 | E2 | `authorization.attestation` is present and non-empty; the CLI additionally requires `--authorized` on every live command, and the stored run records both | `unauthorized` |
-| E3 | scope is non-empty: at least one host; every host parses; `exclusions` are within `path_prefixes`; `max_rps` and `max_requests` are positive with hard ceilings (64 rps, 100k requests) | `scope-invalid` |
+| E3 | scope is non-empty: at least one host; every host parses; `exclusions` are within `path_prefixes`; `max_rps` and `max_requests` are positive with hard ceilings (64 rps, 100k requests); `allowed_methods` defaults to `GET, HEAD, OPTIONS`, must include `GET`, and entries come from `{GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE}` (`CONNECT` and `TRACE` are forbidden); `max_write_requests` defaults to 0 (no state-changing traffic) with a hard ceiling of 1,000; listing a non-safe method with `max_write_requests == 0` (or `max_write_requests > 0` with safe-only methods) is rejected | `scope-invalid` |
 | E4 | `credentials` values are environment variable **names** matching `PARTEX_[A-Z0-9_]+` (the namespace keeps an engagement file from naming an unrelated secret such as `GITHUB_TOKEN`); inline values are rejected. Referenced variables must be set at run start | `credential-invalid` / `credential-missing` |
 | E5 | `base_url` host must be inside `scope.hosts` | `scope-invalid` |
 | E6 | `suggested_checks` entries that are not registered are dropped with a warning | - |
@@ -331,7 +339,10 @@ client handle through the same scope gate (§4.2), and its credential fields are
 Every outbound request — from an active check, the verification runner, or the agent's HTTP
 tool — is validated immediately before send:
 
-1. **Scheme and port**: `http`/`https` only; the effective port must be in `scope.ports`.
+1. **Scheme and port**: `http`/`https`, plus `ws`/`wss` (#119) mapped onto the matching cleartext/TLS
+   rules (`ws` follows the `http` rules, `wss` the `https` rules: same host, port, path-prefix,
+   exclusion, DNS-pin and TLS checks, default ports 80/443); the effective port must be in
+   `scope.ports`.
 2. **Host**: exact match against `scope.hosts` (no suffix matching; `evil-example.test` does
    not match `example.test`). DNS rebinding guard: resolution happens once per run through a
    pinned resolver result, and the client connects to the resolved address while keeping the
@@ -386,10 +397,45 @@ and port with the CLAI2 slash command `/scope add <host[:port]|url>`, which only
 change and shows the exact additions (ports apply to every host in scope); `/scope confirm`
 applies it, `/scope cancel` drops it. Slash commands are handled by the terminal shell and never
 reach the model, and the model has no scope tool, so a chat message cannot widen scope. The scope
-only grows (`ScopedHttpClient.set_scope` rejects any removal or budget change and re-runs E3),
-each amendment is recorded on the run as a `scope_amend` tool call, and `runs.scope_snapshot`
-holds the current scope. The command is a small partex-owned CLAI2 plugin; the session uses a
-private settings store so the operator's saved and drop-in CLAI2 plugins stay out (#64).
+only grows (`ScopedHttpClient.set_scope` rejects any removal, budget, or method-policy change and
+re-runs E3), each amendment is recorded on the run as a `scope_amend` tool call, and
+`runs.scope_snapshot` holds the current scope. The command is a small partex-owned CLAI2 plugin;
+the session uses a private settings store so the operator's saved and drop-in CLAI2 plugins stay
+out (#64).
+
+**State-changing actions (operator approval, #119).** Safe HTTP methods (`GET`, `HEAD`, `OPTIONS`),
+listen-only websocket capture (#116), and read-only gRPC `ServerReflection` discovery (`grpc_list`,
+#117 — its HTTP/2 `POST` framing neither requires `POST` in `allowed_methods` nor consumes
+`max_write_requests`, while still passing `check_url` on `/grpc.reflection...` and `max_requests` /
+`max_rps`) send without approval ceremony. Every other engine action that can change target state —
+an HTTP request with a non-safe method, a websocket frame send, a gRPC method invocation
+(`grpc_call`), or a verification recipe containing one — passes one shared approval gate before send:
+
+1. **Pre-prompt authorization, scope, and budget checks.** Before any prompt is shown, the action
+   must: (a) be authorized by `scope.allowed_methods` (`grpc_call` requires `POST`; a websocket
+   frame send requires at least one non-safe method listed), (b) pass the full URL scope gate
+   (`check_url` rules 1–3: scheme, port, host, `path_prefixes`, and `exclusions` — excluded or
+   out-of-scope targets are never approvable and fail before a prompt exists), and (c) have
+   remaining room in both `max_requests` and `max_write_requests`. Approval can never unlock a
+   method or target the engagement does not authorize: the engagement is the authorization, the
+   prompt is per-action consent.
+2. **Operator consent and keying.** The operator is shown the exact action (method, full URL or
+   `service/method`, header names, a redacted body summary) and chooses **approve** (that exact
+   `method + full URL (scheme, host, port, path, query) + body`), **approve for this session**
+   (`method + scheme + host + port + exact path`, any body — never a wildcard), or **deny**
+   (optionally with a typed reason sent back to the model). The model can never answer its own
+   prompt, and chat text never counts as approval; with no interactive operator (`--auto`,
+   `partex test`, or non-TTY `partex verify`) the action is denied and nothing is sent. In
+   `partex verify`, an interactive TTY prompts under the run's stored `scope_snapshot`; a denied
+   or non-interactive write replay records verdict `inconclusive` (leaving finding status
+   unchanged, never `verification_failed`).
+3. **Send-time enforcement and budgets.** An approved action still passes `ScopedHttpClient`'s
+   send-time scope gate, rate limiter, and both budgets (`max_requests` plus the separate
+   `max_write_requests` counter, persisted on the run as `write_requests_spent`), so approval
+   never bypasses `target.py` and concurrent calls cannot overrun either budget. Write-budget
+   exhaustion ends write work cleanly, like `max_requests`.
+4. **Audit.** Every held, approved, and denied decision is recorded on the run in `tool_calls`
+   (action, method, URL, decision, reason) with secret values redacted.
 
 A scope violation raises `ScopeViolation` before any bytes hit the wire, is recorded on the
 run, and — when triggered by the agent — is raised as a `ToolFailed` tool error so the model
@@ -657,6 +703,7 @@ CREATE TABLE runs (
   authorized_flag INTEGER NOT NULL DEFAULT 0,  -- --authorized was passed (live runs)
   model TEXT,
   requests_spent INTEGER NOT NULL DEFAULT 0,   -- live runs: outbound requests consumed
+  write_requests_spent INTEGER NOT NULL DEFAULT 0, -- live runs: state-changing sends consumed (lands with #65)
   scope_snapshot TEXT,            -- serialized Scope (live runs), for cross-run coverage comparison
   error TEXT,                     -- check/validation failure diagnostic
   summary_error TEXT              -- summary generation/validation failure diagnostic
@@ -860,7 +907,10 @@ def build_agent(model: Model | str, skills: Sequence[Capability],
         # sends via ctx.deps.client; `host` defaults to base_url's host and is validated
         # against scope.hosts (so the agent can address any in-scope host, incl. cross-host
         # redirects); ScopeViolation or budget exhaustion → raises ToolFailed; exchange
-        # auto-captured in RunStore and returned to the model with secret_fields redacted
+        # auto-captured in RunStore and returned to the model with secret_fields redacted.
+        # Method policy (#119): GET/HEAD/OPTIONS send directly; any other method must be in
+        # scope.allowed_methods and is held at the §4.2 operator-approval gate (denied when
+        # headless). The websocket (#116) and gRPC (#117) tools reuse the same gate.
 
     @agent.tool(args_validator=validate_check_id)
     def run_check(ctx: RunContext[AgentDeps], check_id: str) -> list[Finding]: ...
@@ -989,6 +1039,13 @@ class TargetClient(Protocol):   # implemented by target.ScopedHttpClient
 
 - `probe` is async because every request is; `TargetClient.request` returns the captured,
   already-committed `HttpEvidence`, so drafts cite `evidence.id` directly.
+- **Protocol seam (#119).** `TargetClient` is not HTTP-only by design: websocket capture/send
+  (#116) and gRPC discovery/invocation (#117) land as additional `TargetClient` methods in
+  `target.py`, behind the same scope gate, DNS pin, TLS settings, rate limiter, and both
+  budgets — never as sockets opened by check code. Frame and message evidence kinds land with
+  those issues. Active checks stay read-only unless a check explicitly declares write methods;
+  an opted-in check's write probes pass the §4.2 approval gate, so in a headless `test` run
+  they are denied and the check reports its read-only findings with the skipped writes noted.
 
 - `verify_recipe` returns the minimal request set that confirms the finding (the replay the
   verification runner executes); checks without a recipe produce `reported`-only findings. The
@@ -1138,7 +1195,8 @@ API), run the same passive review, confirm findings persist and export with **no
 
 (a) Passive: two fresh stores, byte-identical exports. (b) Every malformed bundle and every
 invalid engagement (missing attestation, inline credential, empty scope, base URL outside
-scope) exits 1 with a diagnostic naming the rule, with a model factory and a socket factory
+scope, disallowed/mismatched `allowed_methods` or `max_write_requests` ceiling) exits 1 with a
+diagnostic naming the rule, with a model factory and a socket factory
 that raise if ever called. (c) `--workers 1` vs `--workers 8` with reverse-order completion:
 passive exports byte-identical. (d) Concurrent readers during a live run; second writer
 serializes or exits 1 with the lock message; `PRAGMA integrity_check` passes. (e) Live
@@ -1150,9 +1208,12 @@ findings readable in `checks_failed`.
 All against the fixture app on localhost; a `conftest.py` fixture blocks every non-localhost
 socket.
 
-- *Scope gate*: requests to an out-of-scope host, an excluded path, a disallowed port, and a
-  redirect to an out-of-scope location are each refused before sending (assert no bytes hit
-  the wire via a socket-level spy); the refusals are recorded on the run.
+- *Scope gate*: HTTP and `ws`/`wss` requests to an out-of-scope host, an excluded path, a
+  disallowed port, and a redirect to an out-of-scope location are each refused before sending
+  (assert no bytes hit the wire via a socket-level spy); the refusals are recorded on the run.
+- *State-changing approval gate*: non-safe methods not in `allowed_methods`, unapproved or
+  denied writes, and writes in headless sessions (`--auto`, `test`, non-TTY `verify`) never
+  reach the wire; approved writes enforce `max_write_requests` and audit every decision.
 - *Authorization*: `test` without `--authorized` exits 1 before any network or model call.
 - *Capture*: a live `test` against the fixture app records every exchange as evidence;
   `export-bundle` round-trips into a passive `review` that reproduces the passive findings.
@@ -1244,7 +1305,7 @@ client-issued ones.
 Each milestone ends with its experiments run and documented here. A landed component does not
 by itself satisfy its milestone gate; record the command, result, and revision when a gate is
 verified. The snapshot below reflects the checked-out branch and GitHub issue state on
-2026-11-19; it is not a claim that the full validation suite has passed.
+2026-11-21; it is not a claim that the full validation suite has passed.
 
 | Milestone | Progress and remaining work |
 |---|---|
@@ -1253,7 +1314,7 @@ verified. The snapshot below reflects the checked-out branch and GitHub issue st
 | M2 | Skill documents, registry, entry-point discovery, skills-as-data and frontmatter lint landed (#25). |
 | M3 | Engagement/scope, scoped client (`--insecure` TLS #71), role handles, live engine (with passive checks on live runs #51), fixture target, `version-disclosure` (with prefix anchoring & dedup #80), verification runner, and HAR/bundle round-trip (`import-har`/`export-bundle` #28) landed. Open: catch-all route detection (#53), HAR→active probe seeding (#76). |
 | M4 | Not delivered: `summarize.py` and `partex summarize`; retry, validation and timeout gates (§13.5) remain open. |
-| M5 | Read-only `partex chat` (#49), interactive `partex agent` with operator-confirmed live scope extension (#54, #64, #72), full JS download + `js-analysis` (#69), `partex report` (#61), and `partex sandboxes` (#84) landed. Open: `--auto` mode, Monty Code Mode in live session (#83), speculation gates, headless/cancellation tests, tmux checklist, state-changing request approvals (#65), skills as deferred capabilities (#59), operator `/report` & `/secrets` (#88). |
+| M5 | Read-only `partex chat` (#49), interactive `partex agent` with operator-confirmed live scope extension (#54, #64, #72), full JS download + `js-analysis` (#69), `partex report` (#61), and `partex sandboxes` (#84) landed. Open: `--auto` mode, Monty Code Mode in live session (#83), speculation gates, headless/cancellation tests, tmux checklist, skills as deferred capabilities (#59), operator `/report` & `/secrets` (#88). The state-changing/multi-protocol policy (#119) is settled in §4.1/§4.2; its implementation (#65), websocket probing (#116), and gRPC probing (#117) are the unblocked follow-ons. |
 | M6 | Not delivered: coverage target, authoring docs, target-request Logfire spans (#58), and recorded experiment results. Draft skill content does not enable its checks (#24, #26, #27). |
 | M7 | Not delivered: browser capture harness (`browser.py`, `partex browse`). |
 
@@ -1284,6 +1345,7 @@ No §13 experiment is recorded as passed here until its gate has evidence.
 | Entry-point checks add supply-chain surface | Code loads only from installed distributions, never paths; skills are data-only; no prebuilt artifacts published |
 | Prompt injection through captured responses steers the agent | Evidence framed as untrusted data; model has no write path to findings; scope gate is code, not prompt; the worst a hostile response can do is waste budget |
 | Active checks harm a fragile target | Conservative defaults: rps ceiling, exclusion list, minimal-request verification recipes; no fuzzing payloads in v1 checks beyond error-triggering inputs (§17) |
+| Operator rubber-stamps write approvals | Writes are off by default (`allowed_methods` safe-only, `max_write_requests: 0`); scope and remaining budget are checked before prompting; approval keys on `method + scheme + host + port + exact path` (plus query + body for single approve) with no wildcards; headless sessions always deny; every decision audited on the run (§4.2) |
 | SQLite becomes a multi-operator tool by accretion | v1 documents one operator, one machine; store refuses unknown `user_version` |
 | Workers write to the store directly as features accrete | Single-writer rule; test asserts `RunReader` connections open `mode=ro` and check code cannot import `storage` |
 | `database is locked` under concurrent processes | WAL + `busy_timeout`; one writer connection per process; `BEGIN IMMEDIATE`; lock timeout exits 1 clearly |
@@ -1322,6 +1384,12 @@ No §13 experiment is recorded as passed here until its gate has evidence.
 8. **Post-M6 skill port**: which BaaRai offensive playbooks (`api-security`, `patch-diff`,
    `codeaudit`) port first as data-only skills, and which need new check protocols (e.g. a
    `SourceCheck` for white-box audit) the engine does not yet have?
+9. **Multi-protocol and state-changing probing (decided, #119)**: the engagement declares
+   write authority (`allowed_methods`, `max_write_requests`); `ws`/`wss` join the §4.2 scheme
+   rules; one operator-approval primitive gates every state-changing action and is shared by
+   #65 (HTTP writes), #116 (websocket capture, then send), and #117 (gRPC discovery and
+   invocation). Transport details (HTTP/2 for gRPC, frame/message evidence kinds) land with
+   those issues.
 
 ## 18. Defaults
 
