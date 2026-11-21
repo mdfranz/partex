@@ -65,3 +65,27 @@ def test_urls_file_must_exist_before_any_traffic(tmp_path: Path) -> None:
     )
     assert result.returncode == 1
     assert 'URLs file not found' in result.stderr
+
+
+def _run_urls(tmp_path: Path, content: str) -> subprocess.CompletedProcess[str]:
+    (tmp_path / 'urls.txt').write_text(content)
+    return subprocess.run(  # relative -u path from outside the repo; port 9 on loopback refuses, so no real traffic
+        ['bash', str(SCRIPT), '-a', 'test attestation', '-u', 'urls.txt', '--no-tui', '-d', str(tmp_path / 't.db')],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def test_urls_file_alone_supplies_the_target_from_its_first_url(tmp_path: Path) -> None:
+    result = _run_urls(tmp_path, '# header\n\n  http://127.0.0.1:9/app/*  \nhttp://127.0.0.1:9/other\n')
+    assert 'target: http://127.0.0.1:9/app/ (first URL in' in result.stdout
+    assert 'URLs file not found' not in result.stderr  # the relative path resolved against the caller's cwd
+
+
+def test_urls_file_without_any_url_is_refused(tmp_path: Path) -> None:
+    result = _run_urls(tmp_path, '# nothing here\n\n')
+    assert result.returncode == 1
+    assert 'no URLs in' in result.stderr

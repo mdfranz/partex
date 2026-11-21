@@ -76,7 +76,7 @@ To use Z.ai's GLM-5.3 through Pydantic AI Gateway, set `PYDANTIC_AI_GATEWAY_API_
 ## Commands and documentation
 
 - `./partex.sh --help` shows options for the interactive testing launcher.
-- `./partex.sh -u urls.txt <target-url>` restricts the session to the URLs in `urls.txt` (one per line, `#` comments, a trailing `/*` allows a path prefix). `<target-url>` must be listed, and anything else is refused by the scope gate.
+- `./partex.sh -u urls.txt <target-url>` restricts the session to the URLs in `urls.txt` (one per line, `#` comments, a trailing `/*` allows a path prefix). The target URL is optional with `-u`: the first listed URL is used (an explicit one must be listed). Anything unlisted is refused by the scope gate.
 - `./partex.sh list` lists saved runs from the launcher's database.
 - `uv run partex --help` lists the available CLI commands.
 
