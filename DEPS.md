@@ -335,3 +335,9 @@ above stay terse.
    override, 2-day cool-off respected). Chosen over `esprima`/`pyjsparser` (unmaintained) and
    `js2py`/`quickjs` (execute target JS, violating the non-execution boundary). Tree-sitter parses
    minified and truncated bundles deterministically with error tolerance.
+10. **Google Gemini / Vertex AI native web search (`#111`) — decided**: add the `google` extra on
+    `pydantic-ai-slim[google]` (`google-genai 2.34.0`, `google-auth 2.62.2`, plus transitive
+    `distro 1.9.0`, `pyasn1 0.6.5`, `pyasn1-modules 0.4.2`, `tenacity 9.1.4`) via `uv.lock`
+    (2-day cool-off respected, no `[tool.uv.sources]` override). Enables `--search-model google:`
+    (API key) and `--search-model google-cloud:` (ADC) using provider-native server-side search
+    only (`WebSearch(local=None)`), keeping partex's `target.py`-only socket boundary intact.

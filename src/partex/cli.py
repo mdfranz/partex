@@ -283,6 +283,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent.add_argument('--gateway-route', default=None, help='Pydantic AI Gateway route serving a bare --model')
     agent.add_argument(
+        '--search-model',
+        default=None,
+        help='optional separate model for web_search (anthropic:<name>, google:<name>, or google-cloud:<name>)',
+    )
+    agent.add_argument(
         '--checks',
         default='version-disclosure',
         help='active checks run before the chat opens (comma-separated; default: %(default)s)',
@@ -690,7 +695,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
 def _cmd_agent(args: argparse.Namespace) -> int:
     from .agent_adapter import run_agent
-    from .models_config import resolve_model
+    from .models_config import resolve_model, resolve_search_model
 
     db_path = resolve_db_path(args.db)
     checks = tuple(_split_checks(args.checks))
@@ -702,6 +707,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
 
         anyio.run(check_from)  # unknown store or run: exit 1 before a model, a run row, or a socket
     model = resolve_model(args.model, gateway_route=args.gateway_route)
+    search_model = resolve_search_model(args.search_model) if args.search_model is not None else None
     bundle = Path(args.bundle) if args.bundle is not None else None
     run_id = anyio.run(
         partial(
@@ -716,6 +722,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             bundle=bundle,
             briefing=not args.no_briefing,
             skills=_session_skills(args),
+            search_model=search_model,
         )
     )
     print(f'session run {run_id} saved; review it with: partex show {run_id} --db {db_path}', file=sys.stderr)

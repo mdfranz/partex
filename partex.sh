@@ -11,6 +11,9 @@
 #   -r, --route NAME         gateway route for a bare model name [PARTEX_GATEWAY_ROUTE, default doubleword]. A
 #                            full model string (anything with a ':', e.g. openai:gpt-5 or
 #                            gateway/anthropic:claude-sonnet-5-5) uses no route unless you pass one.
+#   -S, --search-model NAME  optional separate model for web_search [PARTEX_SEARCH_MODEL]: anthropic:<name>,
+#                            google:<name> (API key), or google-cloud:<name> (ADC); off unless set. Queries
+#                            leave this machine and never go through the Gateway.
 #   -d, --db PATH            database [PARTEX_DB, default ./partex-probe.db]
 #   -f, --from RUN_ID        let the new session read an earlier run [RUN_ID]
 #       --resume [RUN_ID]    read-only chat on an earlier run, no traffic and no target URL needed; the
@@ -34,6 +37,7 @@ TARGET_URL=
 MODEL=${PARTEX_MODEL:-zai-org/GLM-5.3}
 ROUTE=${PARTEX_GATEWAY_ROUTE-doubleword}
 ROUTE_SET=${PARTEX_GATEWAY_ROUTE+1}
+SEARCH_MODEL=${PARTEX_SEARCH_MODEL:-}
 DB=${PARTEX_DB:-partex-probe.db}
 ATTESTATION=${PARTEX_ATTESTATION:-}
 LIST=
@@ -46,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     -a|--attestation) ATTESTATION=${2?$1 needs a value}; shift 2 ;;
     -m|--model) MODEL=${2?$1 needs a value}; shift 2 ;;
     -r|--route) ROUTE=${2?$1 needs a value}; ROUTE_SET=1; shift 2 ;;
+    -S|--search-model) SEARCH_MODEL=${2?$1 needs a value}; shift 2 ;;
     -d|--db) DB=${2?$1 needs a value}; shift 2 ;;
     -f|--from) RUN_ID=${2?$1 needs a value}; shift 2 ;;
     --resume) RESUME=1; shift; if [[ ${1:-} == run_* ]]; then RUN_ID=$1; shift; fi ;;
@@ -142,4 +147,4 @@ if [[ -n $ROUTE || $MODEL == gateway/* || $MODEL != *:* ]] && [[ -z ${PYDANTIC_A
 fi
 echo "opening a partex agent session on $TARGET_URL (db: $DB)"
 uv run --quiet partex agent "$eng" --authorized --db "$DB" --model "$MODEL" ${ROUTE:+--gateway-route "$ROUTE"} \
-  --checks version-disclosure ${RUN_ID:+--from "$RUN_ID"}
+  ${SEARCH_MODEL:+--search-model "$SEARCH_MODEL"} --checks version-disclosure ${RUN_ID:+--from "$RUN_ID"}

@@ -26,10 +26,12 @@ from rich.rule import Rule
 
 from .. import engine
 from ..bundle import LoadedBundle, load_bundle
+from ..models_config import SearchModelConfig
 from ..probes import plan_seed_probes, plan_summary, seed_lines
 from ..storage import RunReader, RunStore, run_artifact_dir
 from .reviewer import BRIEFING_PROMPT, build_reviewer_agent
 from .scope_plugin import SCOPE_PLUGIN_FACTORY, SCOPE_PLUGIN_ID, ScopeControl, current_control
+from .search import WebSearcher, build_search_agent
 from .tester import TesterDeps, build_tester_agent
 from .tools import ReviewDeps
 from .usage import UsageRecordingModel
@@ -46,8 +48,10 @@ __all__ = [
     'BRIEFING_PROMPT',
     'ReviewDeps',
     'TesterDeps',
+    'WebSearcher',
     'brief',
     'build_reviewer_agent',
+    'build_search_agent',
     'build_tester_agent',
     'run_agent',
     'run_chat',
@@ -115,6 +119,7 @@ async def run_agent(
     bundle: Path | None = None,
     briefing: bool = True,
     skills: Sequence[AgentCapability[TesterDeps]] = (),
+    search_model: SearchModelConfig | None = None,
     console: Console | None = None,
 ) -> str:
     """Open a new live session on *engagement_path*, brief, then let the operator direct probes in CLAI2.
@@ -150,6 +155,16 @@ async def run_agent(
             # Record every model turn (briefing, chat) and every read-tool call to this run (§7, #54),
             # so the run is auditable offline, not only through the gateway/Logfire.
             recorded = UsageRecordingModel(model, store=store, run_id=session.run_id, role='tester')
+            searcher: WebSearcher | None = None
+            if search_model is not None:
+                console.print(f'[dim]web search: {search_model.startup_summary()}[/]')
+                recorded_search = UsageRecordingModel(
+                    search_model.model, store=store, run_id=session.run_id, role='search'
+                )
+                searcher = WebSearcher(
+                    config=search_model,
+                    agent=build_search_agent(recorded_search, provider=search_model.provider),
+                )
 
             async def audit(tool: str, args: dict[str, object], result: dict[str, object]) -> None:
                 await store.record_tool_call(session.run_id, tool, args, result)
@@ -162,12 +177,19 @@ async def run_agent(
                 session=session,
                 store=store,
                 seed_surface=seed_lines(seed_plan) if seed_plan is not None else (),
+                searcher=searcher,
             )
             summary = await brief(recorded, deps, console) if briefing else None
             await _pause_on(summary, console)
             artifacts = run_artifact_dir(store.path, session.run_id)
             artifacts.mkdir(mode=0o700, parents=True, exist_ok=True)
-            agent = build_tester_agent(recorded, briefing=summary, skills=skills, artifacts_dir=artifacts)
+            agent = build_tester_agent(
+                recorded,
+                briefing=summary,
+                skills=skills,
+                artifacts_dir=artifacts,
+                web_search_enabled=searcher is not None,
+            )
             # The operator-only /scope command is a CLAI2 plugin (slash commands exist only as plugins). A
             # private, empty settings store keeps the operator's saved and drop-in CLAI2 plugins out, and
             # only the partex plugin is declared, so the session loads nothing else (#64).
