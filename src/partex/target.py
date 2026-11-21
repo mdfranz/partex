@@ -59,6 +59,7 @@ from partex.models import (
     HttpRequest,
     HttpResponse,
     Scope,
+    TlsPolicy,
     get_header,
 )
 from partex.scope import check_url, normalize_host, parse_scoped_url, validate_scope
@@ -249,6 +250,23 @@ class _PinnedTransport(httpx2.AsyncHTTPTransport):
         await super().aclose()
 
 
+def tls_unverified(tls: TlsPolicy, host: str) -> bool:
+    """Whether *tls* accepts invalid certificates for *host* (#71, #101).
+
+    ``verify: false`` with no ``insecure_hosts`` covers every host in scope, including hosts the operator adds
+    later with ``/scope add``. With ``insecure_hosts`` listed, only those hosts are relaxed; added hosts stay strict.
+    """
+    if tls.verify:
+        return False
+    try:
+        normalized = normalize_host(host)
+    except ScopeViolation:
+        return False
+    if not tls.insecure_hosts:
+        return True
+    return normalized in {normalize_host(h) for h in tls.insecure_hosts}
+
+
 def default_user_agent() -> str:
     """``partex/<engine version>``: what a run presents as when the engagement sets no ``http.user_agent`` (#135).
 
@@ -316,16 +334,7 @@ class ScopedHttpClient:
 
     def _tls_unverified(self, host: str) -> bool:
         """Whether the operator accepted invalid TLS for *host* (engagement ``tls``; never a model choice)."""
-        tls = self._engagement.tls
-        if tls.verify:
-            return False
-        try:
-            normalized = normalize_host(host)
-        except ScopeViolation:
-            return False
-        if not tls.insecure_hosts:
-            return True  # verify:false with no list means every in-scope host
-        return normalized in {normalize_host(h) for h in tls.insecure_hosts}
+        return tls_unverified(self._engagement.tls, host)
 
     def set_scope(self, scope: Scope) -> None:
         """Swap in an operator-extended scope; every later request is gated by it (budgets are unchanged).
