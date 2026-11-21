@@ -107,7 +107,7 @@ def test_skills_for_uninstalled_checks_stay_out_of_the_catalog(tmp_path: Path) -
 def test_shipped_skills_for_installed_checks_load() -> None:
     registry = build_registry()
     names = {skill.name for skill in usable_skills(registry.skills, registry.checks)}
-    assert {'version-disclosure', 'header-review', 'js-analysis', 'server-error'} <= names
+    assert {'api-inventory', 'version-disclosure', 'header-review', 'js-analysis', 'server-error'} <= names
     capabilities = {c.id: c for c in skill_capabilities(usable_skills(registry.skills, registry.checks))}
     assert 'version-disclosure' in capabilities and capabilities['version-disclosure'].defer_loading is True
 

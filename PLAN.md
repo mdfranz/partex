@@ -1121,8 +1121,10 @@ class TargetClient(Protocol):   # implemented by target.ScopedHttpClient
 - `request` takes the full URL because the scope gate needs scheme, host and port; `probe` is
   async because a sync probe cannot await the anyio-based scoped client; `HttpEvidence` is
   returned because §5 drafts must cite `ev_*` ids. Landed by #21/#22; amended per #44.
-- Built-in checks: `header-security` (passive), `js-analysis` (passive, tree-sitter AST
-  over downloaded JS artifacts and JS responses, #69), and `version-disclosure` (active).
+- Built-in checks: `api-contract-conformance` (passive, OpenAPI 3.0/3.1 subset resolver +
+  operation inventory, #24), `header-security` (passive), `js-analysis` (passive, tree-sitter AST
+  over downloaded JS artifacts and JS responses, #69), `server-error` (passive, #128), and
+  `version-disclosure` (active).
 - Third-party checks register via the entry-point group `partex.checks`. Check code loads
   **only** from installed distributions; extra skill roots load via `--skill-dir` (data). That
   is the trust boundary: arbitrary paths can add Markdown, never code.
@@ -1144,9 +1146,11 @@ class TargetClient(Protocol):   # implemented by target.ScopedHttpClient
    pages; `verify_recipe` replays the single banner-bearing request.
 3. `banner-leak` skill + check (fixture only, §13 experiment 2): passive equivalent for the
    registry-separation test.
-4. Staged (drafted in `skills/`, not yet enabled): `api-inventory` +
-   `api-contract-conformance`, `authorization-testing` + `authz-boundary`,
-   `auth-session-controls` + `session-cookie-config` / `token-weakness` — the P1.1–P1.3
+4. `api-inventory` skill + `api-contract-conformance` passive check (built-in, #24): normalized
+   OpenAPI operation inventory, shadow-route detection, disallowed/sensitive response-field checks,
+   and coverage ledger rows (`fixtures/bundles/api-inventory/`).
+5. Staged (drafted in `skills/`, not yet enabled): `authorization-testing` + `authz-boundary`,
+   `auth-session-controls` + `session-cookie-config` / `token-weakness` — the remaining P1.2–P1.3
    slices from `PARTX_SKILL_PLAN.md` §4. Each activates only when its check registers
    (warning, not error, at `partex checks` time until then) and its fixture triad lands
    (clean case, one per finding class, insufficient-evidence case), one slice at a time
@@ -1379,7 +1383,7 @@ verified. The snapshot below reflects the checked-out branch and GitHub issue st
 | M3 | Engagement/scope, scoped client (`--insecure` TLS #71), role handles, live engine (with passive checks on live runs #51), fixture target, `version-disclosure` (with prefix anchoring & dedup #80), verification runner, and HAR/bundle round-trip (`import-har`/`export-bundle` #28) landed. Open: catch-all route detection (#53), HAR→active probe seeding (#76). |
 | M4 | Not delivered: `summarize.py` and `partex summarize`; retry, validation and timeout gates (§13.5) remain open. |
 | M5 | Read-only `partex chat` (#49), interactive `partex agent` with operator-confirmed live scope extension (#54, #64, #72), full JS download + `js-analysis` (#69), `partex report` (#61), and `partex sandboxes` (#84) landed. Open: `--auto` mode, Monty Code Mode in live session (#83), speculation gates, headless/cancellation tests, tmux checklist, skills as deferred capabilities (#59), operator `/report` & `/secrets` (#88). The state-changing/multi-protocol policy (#119) is settled in §4.1/§4.2; its implementation (#65), websocket probing (#116), and gRPC probing (#117) are the unblocked follow-ons. |
-| M6 | Not delivered: coverage target, authoring docs, target-request Logfire spans (#58), and recorded experiment results. Draft skill content does not enable its checks (#24, #26, #27). |
+| M6 | Not delivered: coverage target, authoring docs, target-request Logfire spans (#58), and recorded experiment results. S1 `api-inventory` / `api-contract-conformance` landed (#24); remaining staged draft skills do not enable their checks (#26, #27). |
 | M7 | Not delivered: browser capture harness (`browser.py`, `partex browse`). |
 
 No §13 experiment is recorded as passed here until its gate has evidence.
@@ -1465,8 +1469,8 @@ network door with scope enforced inside it. `review` and `test` are model-free b
 (the default for CI); `summarize`, `agent`, and `chat` require an explicit `--model`. Passive review of
 offline bundles is a first-class mode with full determinism; live runs trade byte-determinism
 for evidence-backed auditability and replayable verification. The shipped skill set is
-`header-review`, `version-disclosure`, and `js-analysis`. The
-P1.1–P1.3 skills (`api-inventory`, `authorization-testing`, `auth-session-controls`) are
+`header-review`, `version-disclosure`, `js-analysis`, `server-error`, and `api-inventory` (#24). The
+remaining P1.2–P1.3 skills (`authorization-testing`, `auth-session-controls`) are
 **drafted and staged** in `skills/` per `PARTX_SKILL_PLAN.md` §4; they stay unenabled until
 their checks register and their fixture triads land, integrated one slice at a time
 post-M6, each with its own fixture. Further skill content — including offensive playbooks

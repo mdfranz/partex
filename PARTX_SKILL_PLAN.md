@@ -1,7 +1,8 @@
 # ParTEx skill plan: structure, synthesis, and priorities
 
 > Status: active skill roadmap for `partex` (P0 built-in skills `header-review`,
-> `version-disclosure`, and `js-analysis` are shipped; S1–S3 skills are drafted and staged
+> `version-disclosure`, and `js-analysis`, plus P1.1 `api-inventory` (#24), are shipped; S2–S3
+> skills are drafted and staged
 > in `skills/`). Consolidates and supersedes `WEB_API_SKILL_PRIORITIES.md` and
 > `SOURCE_SKILL_SYNTHESIS.md` (preserved in git history at 39c1028). The engine contract
 > targeted here is `PLAN.md`: **full offensive scope**, two execution modes — passive review

@@ -1,0 +1,15 @@
+{
+  "evidence_files": [
+    "evidence/0001-openapi.json",
+    "evidence/0002-user.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "api-contract-conformance"
+  ],
+  "target": {
+    "base_url": "https://api.example.test",
+    "name": "api-inventory-external-ref",
+    "notes": "OpenAPI contract with unresolvable external $ref (insufficient evidence, not failure)"
+  }
+}

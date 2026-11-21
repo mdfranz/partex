@@ -1,0 +1,9 @@
+{
+  "config": {
+    "content": "{\"openapi\": \"3.0.3\", \"info\": {\"title\": \"Users API\", \"version\": \"1.0.0\"}, \"paths\": {\"/api/v2/users/{id}\": {\"get\": {\"responses\": {\"200\": {\"description\": \"User DTO\", \"content\": {\"application/json\": {\"schema\": {\"$ref\": \"#/components/schemas/UserDto\"}}}}}}}, \"/api/v2/projects/{id}\": {\"get\": {\"responses\": {\"200\": {\"description\": \"Project DTO\", \"content\": {\"application/json\": {\"schema\": {\"type\": \"object\", \"properties\": {\"id\": {\"type\": \"integer\"}, \"title\": {\"type\": \"string\"}}, \"additionalProperties\": false}}}}}}}}, \"components\": {\"schemas\": {\"UserDto\": {\"type\": \"object\", \"properties\": {\"id\": {\"type\": \"integer\"}, \"username\": {\"type\": \"string\"}}}}}}",
+    "format": "openapi",
+    "path": "openapi.json",
+    "revision": "sha-9a1b2c3"
+  },
+  "kind": "config_excerpt"
+}

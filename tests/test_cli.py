@@ -205,6 +205,7 @@ def test_review_with_findings_exits_3(capsys: pytest.CaptureFixture[str], db: Pa
     payload = json.loads(out)
     assert payload['state'] == 'checks_complete'
     assert payload['checks'] == [
+        'api-contract-conformance',
         'header-security',
         'js-analysis',
         'server-error',
@@ -463,6 +464,7 @@ def test_checks_json(capsys: pytest.CaptureFixture[str]) -> None:
     assert code == cli.EXIT_OK
     kinds = {row['check_id']: row['kind'] for row in json.loads(out)}
     assert kinds == {
+        'api-contract-conformance': 'passive',
         'header-security': 'passive',
         'js-analysis': 'passive',
         'server-error': 'passive',
@@ -474,7 +476,8 @@ def test_checks_text(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.Mon
     as_tty(monkeypatch)
     code, out, _ = run(capsys, 'checks')
     assert code == cli.EXIT_OK
-    assert out.splitlines()[0].startswith('header-security')
+    assert out.splitlines()[0].startswith('api-contract-conformance')
+    assert 'header-security' in out
 
 
 def test_checks_none_installed(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -850,8 +853,8 @@ def test_chat_offers_installed_check_skills_and_extra_skill_dirs(
     )
     (names,) = offered
     # Playbooks for installed checks are offered; drafts whose checks are not installed are not.
-    assert {'header-review', 'version-disclosure', 'js-analysis', 'my-playbook'} <= set(names)
-    assert not {'api-inventory', 'authorization-testing', 'auth-session-controls'} & set(names)
+    assert {'api-inventory', 'header-review', 'version-disclosure', 'js-analysis', 'my-playbook'} <= set(names)
+    assert not {'authorization-testing', 'auth-session-controls'} & set(names)
 
 
 HOSTILE_REPORT = '# Report\n\x1b[2Jcleared \x1b]8;;https://evil.test\x07link\x1b]8;;\x07 \x1b]0;title\x07\x9b31m\tok\n'

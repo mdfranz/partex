@@ -1,0 +1,9 @@
+{
+  "config": {
+    "content": "openapi: 3.1.0\ninfo:\n  title: Catalog V3 API\n  version: 3.0.0\npaths:\n  /api/v3/catalog/{sku}:\n    get:\n      responses:\n        \"200\":\n          description: SKU item\n",
+    "format": "openapi",
+    "path": "openapi.yaml",
+    "revision": "v3.0.0"
+  },
+  "kind": "config_excerpt"
+}

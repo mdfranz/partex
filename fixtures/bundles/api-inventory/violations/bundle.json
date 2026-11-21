@@ -1,0 +1,22 @@
+{
+  "evidence_files": [
+    "evidence/0001-openapi.json",
+    "evidence/0002-users-me-clean.json",
+    "evidence/0003-user-42-bopla.json",
+    "evidence/0004-user-99-bopla.json",
+    "evidence/0005-project-7-extra.json",
+    "evidence/0006-shadow-v1.json",
+    "evidence/0007-undeclared-delete.json",
+    "evidence/0008-graphql-1.json",
+    "evidence/0009-graphql-2.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "api-contract-conformance"
+  ],
+  "target": {
+    "base_url": "https://api.example.test",
+    "name": "api-inventory-violations",
+    "notes": "Full S1 acceptance bundle: conforming, BOPLA high/medium, shadow route, undeclared method, unobserved op, GraphQL collapse, secret redaction"
+  }
+}

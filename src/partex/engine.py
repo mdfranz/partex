@@ -52,7 +52,7 @@ from .models import (
 )
 from .probes import SeedPlan, plan_seed_probes
 from .scope import apply_urls, check_url, extend_scope, parse_urls_file
-from .storage import RunState, RunStore, run_artifact_dir
+from .storage import RunState, RunStore, SurfaceKind, SurfaceRel, run_artifact_dir, surface_node_id
 from .target import DEFAULT_MAX_ASSET_BYTES, ScopedHttpClient
 
 ENTRY_POINT_GROUP = 'partex.checks'
@@ -93,6 +93,8 @@ class ReviewResult:
     failed_check: str | None = None
     skipped_checks: tuple[str, ...] = field(default=())
     """Selected checks whose ``applies_to`` returned ``False`` for this evidence."""
+    coverage: tuple[CoverageEntry, ...] = field(default=())
+    """``check_observed`` ledger entries emitted by passive checks."""
 
 
 def engine_version() -> str:
@@ -188,6 +190,17 @@ async def run_review(
     try:
         drafts, skipped = await _run_checks(selected, evidence, limit)
         findings = _finalize(selected, drafts, evidence)
+        skipped_set = set(skipped)
+        coverage: list[CoverageEntry] = []
+        surface_nodes: list[tuple[SurfaceKind, str, dict[str, Any], Sequence[str]]] = []
+        surface_edges: list[tuple[str, str, SurfaceRel, str | None]] = []
+        for check in selected:
+            if check.check_id in skipped_set:
+                continue
+            coverage.extend(_collect_coverage(check, evidence))
+            nodes, edges = _collect_surface(check, evidence)
+            surface_nodes.extend(nodes)
+            surface_edges.extend(edges)
     except CheckFailed as exc:
         await store.set_state(run_id, 'checks_failed', error=str(exc))
         return ReviewResult(
@@ -201,7 +214,14 @@ async def run_review(
             failed_check=exc.check_id,
         )
 
-    await store.commit_passive(run_id, evidence, findings)
+    await store.commit_passive(
+        run_id,
+        evidence,
+        findings,
+        coverage=coverage,
+        surface_nodes=surface_nodes,
+        surface_edges=surface_edges,
+    )
     return ReviewResult(
         run_id,
         'checks_complete',
@@ -210,6 +230,7 @@ async def run_review(
         evidence_count=len(evidence),
         warnings=loaded.warnings,
         skipped_checks=skipped,
+        coverage=tuple(coverage),
     )
 
 
@@ -273,10 +294,12 @@ def _finalize(
     return list(findings.values())
 
 
-async def _record_coverage(
-    store: RunStore, run_id: str, check: Any, evidence: Sequence[Evidence]
-) -> list[CoverageEntry]:
-    """Run a check's optional ``coverage(evidence)`` hook and commit its ledger entries (``check_observed`` only)."""
+_SURFACE_KINDS: frozenset[str] = frozenset({'host', 'endpoint', 'parameter', 'role', 'tech_banner'})
+_SURFACE_RELS: frozenset[str] = frozenset({'exposes_endpoint', 'accepts_param', 'authenticated_as', 'redirects_to'})
+
+
+def _collect_coverage(check: Any, evidence: Sequence[Evidence]) -> list[CoverageEntry]:
+    """Run a check's optional ``coverage(evidence)`` hook and validate its ``check_observed`` ledger entries."""
     hook = getattr(check, 'coverage', None)
     if not callable(hook):
         return []
@@ -298,8 +321,102 @@ async def _record_coverage(
         if missing := sorted(set(entry.evidence_ids) - registered):
             raise CheckFailed(check.check_id, f'coverage entry {position} cites unregistered evidence {missing}')
         entries.append(entry)
-    await store.upsert_coverage(run_id, entries)
     return entries
+
+
+async def _record_coverage(
+    store: RunStore, run_id: str, check: Any, evidence: Sequence[Evidence]
+) -> list[CoverageEntry]:
+    """Run a check's optional ``coverage(evidence)`` hook and commit its ledger entries (``check_observed`` only)."""
+    entries = _collect_coverage(check, evidence)
+    if entries:
+        await store.upsert_coverage(run_id, entries)
+    return entries
+
+
+def _collect_surface(
+    check: Any, evidence: Sequence[Evidence]
+) -> tuple[
+    list[tuple[SurfaceKind, str, dict[str, Any], Sequence[str]]],
+    list[tuple[str, str, SurfaceRel, str | None]],
+]:
+    """Run a check's optional ``surface(evidence)`` hook and validate its nodes and edges."""
+    hook = getattr(check, 'surface', None)
+    if not callable(hook):
+        return [], []
+    try:
+        raw = hook(list(evidence))
+    except Exception as exc:
+        raise CheckFailed(check.check_id, f'surface raised {type(exc).__name__}: {exc}') from exc
+    if not isinstance(raw, Mapping):
+        raise CheckFailed(check.check_id, f'surface returned {type(raw).__name__}, expected a mapping')
+    data = cast(Mapping[str, Any], raw)
+    raw_nodes = data.get('nodes', ())
+    raw_edges = data.get('edges', ())
+    if not isinstance(raw_nodes, Sequence) or isinstance(raw_nodes, (str, bytes)):
+        raise CheckFailed(check.check_id, 'surface nodes must be a sequence')
+    if not isinstance(raw_edges, Sequence) or isinstance(raw_edges, (str, bytes)):
+        raise CheckFailed(check.check_id, 'surface edges must be a sequence')
+
+    registered = {item.id for item in evidence}
+    nodes: list[tuple[SurfaceKind, str, dict[str, Any], Sequence[str]]] = []
+    for position, node in enumerate(cast(Sequence[Any], raw_nodes)):
+        if not isinstance(node, Mapping):
+            raise CheckFailed(check.check_id, f'surface node {position} must be a mapping')
+        nd = cast(Mapping[str, Any], node)
+        kind = nd.get('kind')
+        key = nd.get('key')
+        meta = nd.get('metadata', {})
+        ev_ids = nd.get('evidence_ids', ())
+        if not isinstance(kind, str) or kind not in _SURFACE_KINDS or not isinstance(key, str) or not key:
+            raise CheckFailed(check.check_id, f'surface node {position} has invalid kind/key')
+        if not isinstance(meta, dict):
+            raise CheckFailed(check.check_id, f'surface node {position} metadata must be a dict')
+        if not isinstance(ev_ids, Sequence) or isinstance(ev_ids, (str, bytes)):
+            raise CheckFailed(check.check_id, f'surface node {position} evidence_ids must be a sequence')
+        ev_list = [str(eid) for eid in cast(Sequence[Any], ev_ids)]
+        if missing := sorted(set(ev_list) - registered):
+            raise CheckFailed(check.check_id, f'surface node {position} cites unregistered evidence {missing}')
+        nodes.append((cast(SurfaceKind, kind), key, cast(dict[str, Any], meta), ev_list))
+
+    edges: list[tuple[str, str, SurfaceRel, str | None]] = []
+    for position, edge in enumerate(cast(Sequence[Any], raw_edges)):
+        if not isinstance(edge, Mapping):
+            raise CheckFailed(check.check_id, f'surface edge {position} must be a mapping')
+        ed = cast(Mapping[str, Any], edge)
+        src_kind = ed.get('src_kind')
+        src_key = ed.get('src_key')
+        dst_kind = ed.get('dst_kind')
+        dst_key = ed.get('dst_key')
+        rel = ed.get('rel')
+        ev_id = ed.get('evidence_id')
+        if (
+            not isinstance(src_kind, str)
+            or src_kind not in _SURFACE_KINDS
+            or not isinstance(src_key, str)
+            or not src_key
+            or not isinstance(dst_kind, str)
+            or dst_kind not in _SURFACE_KINDS
+            or not isinstance(dst_key, str)
+            or not dst_key
+            or not isinstance(rel, str)
+            or rel not in _SURFACE_RELS
+        ):
+            raise CheckFailed(check.check_id, f'surface edge {position} has invalid endpoints or rel')
+        if ev_id is not None and (not isinstance(ev_id, str) or ev_id not in registered):
+            raise CheckFailed(check.check_id, f'surface edge {position} cites unregistered evidence {ev_id!r}')
+        src_id = surface_node_id(cast(SurfaceKind, src_kind), src_key)
+        dst_id = surface_node_id(cast(SurfaceKind, dst_kind), dst_key)
+        edges.append((src_id, dst_id, cast(SurfaceRel, rel), ev_id))
+    return nodes, edges
+
+
+async def _record_surface(store: RunStore, run_id: str, check: Any, evidence: Sequence[Evidence]) -> None:
+    nodes, edges = _collect_surface(check, evidence)
+    for kind, key, metadata, ev_ids in nodes:
+        await store.upsert_surface_node(run_id, kind, key, metadata=metadata, evidence_ids=ev_ids)
+    for src_id, dst_id, rel, ev_id in edges:
+        await store.add_surface_edge(run_id, src_id, dst_id, rel, ev_id)
 
 
 def _validate_draft(check: PassiveCheck, position: int, raw: Any) -> FindingDraft:
@@ -611,6 +728,7 @@ async def run_test(
                 await store.commit_findings(run_id, committed)
                 findings.extend(committed)
                 coverage.extend(await _record_coverage(store, run_id, check, captured))
+                await _record_surface(store, run_id, check, captured)
                 done.add(check.check_id)
             # Passive checks run last, over every exchange captured so far (baseline and probe traffic), and need
             # no budget, so they still run after active work was cut short.
@@ -627,6 +745,7 @@ async def run_test(
                 await store.commit_findings(run_id, committed)
                 findings.extend(committed)
                 coverage.extend(await _record_coverage(store, run_id, check, captured))
+                await _record_surface(store, run_id, check, captured)
                 done.add(check.check_id)
         except CheckFailed as exc:
             await store.set_state(run_id, 'checks_failed', error=str(exc))
@@ -800,6 +919,7 @@ class LiveSession:
         await self._store.commit_findings(self.run_id, new)
         self.findings.extend(new)
         await _record_coverage(self._store, self.run_id, check, self.captured)
+        await _record_surface(self._store, self.run_id, check, self.captured)
         return findings
 
 

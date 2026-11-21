@@ -1,0 +1,21 @@
+{
+  "evidence_files": [
+    "evidence/0001-openapi.json",
+    "evidence/0002-users-me.json",
+    "evidence/0003-users-id.json",
+    "evidence/0004-projects-id.json",
+    "evidence/0005-graphql-q1.json",
+    "evidence/0006-graphql-q2.json",
+    "evidence/0007-probe-404.json",
+    "evidence/0008-cors-options.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "api-contract-conformance"
+  ],
+  "target": {
+    "base_url": "https://api.example.test",
+    "name": "api-inventory-conforming",
+    "notes": "Conforming responses + unobserved POST /api/v2/orders + single-endpoint GraphQL + 404/OPTIONS noise"
+  }
+}

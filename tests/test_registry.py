@@ -160,8 +160,11 @@ def test_check_with_no_skill_is_fine() -> None:
 def test_checks_reports_skills_and_warnings(capsys: pytest.CaptureFixture[str]) -> None:
     code, out, err = run(capsys, 'checks')
     assert code == cli.EXIT_OK
-    assert {r['check_id']: r['skills'] for r in json.loads(out)}['header-security'] == ['header-review']
-    assert 'warning: api-inventory: unknown-check' in err
+    by_check = {r['check_id']: r['skills'] for r in json.loads(out)}
+    assert by_check['header-security'] == ['header-review']
+    assert by_check['api-contract-conformance'] == ['api-inventory']
+    assert 'warning: api-inventory:' not in err
+    assert 'warning: authorization-testing: unknown-check' in err
 
 
 def test_checks_lint_errors_exit_1(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:

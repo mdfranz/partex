@@ -1,0 +1,8 @@
+{
+  "config": {
+    "content": "env=staging\n",
+    "format": "config",
+    "path": "app.env"
+  },
+  "kind": "config_excerpt"
+}
