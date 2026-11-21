@@ -23,6 +23,7 @@ partex = "partex.__main__:main"
 [project.entry-points."partex.checks"]
 header-security = "partex.checks.header_security:header_security_check"
 js-analysis = "partex.checks.js_analysis:js_analysis_check"
+server-error = "partex.checks.server_error:server_error_check"
 version-disclosure = "partex.checks.version_disclosure:version_disclosure_check"
 
 # Supply-chain cool-off: only resolve registry artifacts uploaded at least 2 days ago, so a
