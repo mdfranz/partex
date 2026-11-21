@@ -234,6 +234,13 @@ def build_operation_inventory(evidence: Sequence[Evidence]) -> InventoryAnalysis
             observed_without_contract=observed_only,
         )
 
+    contract_bodies = {
+        item.config.content
+        for item in evidence
+        if isinstance(item, ConfigEvidence) and item.config.format.lower() == 'openapi'
+    }
+    valid_contract_paths = {c.path for c in valid_contracts if c.path.startswith('/')}
+
     matched_acc: dict[
         str, tuple[DeclaredOperation, list[str], bool, dict[str, FieldViolation], str | None, set[str], set[str]]
     ] = {}
@@ -287,6 +294,16 @@ def build_operation_inventory(evidence: Sequence[Evidence]) -> InventoryAnalysis
             # Declared path template properly rejected the undeclared HTTP method with 405.
             continue
         if match is None and _is_html_document_navigation(ex, server_prefixes):
+            continue
+        if (
+            match is None
+            and 200 <= status < 300
+            and (
+                (method == 'GET' and ex.http.response.body is not None and ex.http.response.body in contract_bodies)
+                or (method == 'HEAD' and normalize_request_path(url) in valid_contract_paths)
+            )
+        ):
+            # Live spec fetch that delivered the registered OpenAPI contract itself (#155).
             continue
 
         tpl = match.path_template if match is not None else collapse_path_ids(url)
