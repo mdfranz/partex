@@ -26,7 +26,9 @@ from pydantic_ai.models import Model
 from .errors import PartexError
 
 GATEWAY_BASE_URL_ENV = 'PYDANTIC_AI_GATEWAY_BASE_URL'
-DEFAULT_GOOGLE_CLOUD_LOCATION = 'us-central1'
+DEFAULT_GOOGLE_CLOUD_LOCATION = 'global'
+"""Vertex location for ``google-cloud:`` search. Newer Gemini models (3.x and later) are served from
+``global`` only; ``us-central1`` returns 404 for them (live-verified, #111). Override with ``GOOGLE_CLOUD_LOCATION``."""
 
 type SearchProvider = Literal['anthropic', 'google', 'google-cloud']
 type SearchAuthMode = Literal['api_key', 'adc']

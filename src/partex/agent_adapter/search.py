@@ -18,6 +18,7 @@ from pydantic_ai.capabilities import WebSearch
 from pydantic_ai.exceptions import AgentRunError
 from pydantic_ai.messages import ModelMessage, ModelResponse, NativeToolReturnPart
 from pydantic_ai.models import Model
+from pydantic_ai.models.anthropic import AnthropicModelSettings
 
 from ..errors import PartexError
 from ..models import REDACTED
@@ -38,6 +39,16 @@ SEARCH_ANTHROPIC_MAX_USES = 3
 
 Google's native ``google_search`` grounding ignores ``max_uses`` and pydantic-ai raises on
 unsupported restricting settings, so this is passed for Anthropic only.
+"""
+
+SEARCH_ANTHROPIC_SETTINGS: AnthropicModelSettings = {'anthropic_web_tools_allowed_callers': ['direct']}
+"""Model settings for Anthropic search: the model calls ``web_search`` itself, never from code execution.
+
+Current Claude models get ``web_search_20260209``, which by default lets the model call search from a
+server-side code-execution sandbox ("dynamic filtering"). Verified live (#111): results read that way come
+back encrypted and without citations, so ``sources`` is empty, and the model also burns ``max_uses`` on
+failed sandbox calls. ``['direct']`` turns the sandbox off, keeps the search agent free of any code
+execution, and makes the tool eligible for Zero Data Retention.
 """
 
 type RefusalReason = Literal['empty', 'length', 'secret', 'id', 'url', 'cap']
@@ -125,7 +136,7 @@ def extract_source_urls(messages: Sequence[ModelMessage]) -> list[str]:
 
 def build_search_agent(model: Model | str, *, provider: SearchProvider) -> Agent[None, str]:
     """Build the isolated one-shot search agent: native ``WebSearchTool`` only, no function tools or deps."""
-    max_uses = SEARCH_ANTHROPIC_MAX_USES if provider == 'anthropic' else None
+    anthropic = provider == 'anthropic'
     return Agent(
         model,
         name='partex_search_agent',
@@ -133,7 +144,8 @@ def build_search_agent(model: Model | str, *, provider: SearchProvider) -> Agent
         output_type=str,
         instructions=SEARCH_AGENT_INSTRUCTIONS,
         tools=(),
-        capabilities=[WebSearch(local=None, max_uses=max_uses)],
+        capabilities=[WebSearch(local=None, max_uses=SEARCH_ANTHROPIC_MAX_USES if anthropic else None)],
+        model_settings=SEARCH_ANTHROPIC_SETTINGS if anthropic else None,
         defer_model_check=True,
     )
 

@@ -114,6 +114,7 @@ class FakeNativeSearchModel(FunctionModel):
         )
         self._name = name
         self.calls: list[tuple[list[ModelMessage], ModelRequestParameters]] = []
+        self.seen_settings: list[ModelSettings | None] = []
 
     @property
     def model_name(self) -> str:
@@ -130,6 +131,7 @@ class FakeNativeSearchModel(FunctionModel):
         model_request_parameters: ModelRequestParameters,
     ) -> ModelResponse:
         self.calls.append((list(messages), model_request_parameters))
+        self.seen_settings.append(model_settings)
         return ModelResponse(
             parts=[
                 NativeToolCallPart(
@@ -236,7 +238,7 @@ def test_resolve_search_model_google_cloud_adc_without_api_key() -> None:
     assert cfg.provider == 'google-cloud'
     assert cfg.auth_mode == 'adc'
     assert cfg.project == 'sec-eng-prod'
-    assert cfg.location == 'us-central1'
+    assert cfg.location == 'global'  # newer Gemini models are served from global only (#111)
     assert isinstance(cfg.model, GoogleModel)
     summary = cfg.startup_summary()
     assert 'google-cloud:gemini-2.5-flash' in summary
@@ -246,10 +248,10 @@ def test_resolve_search_model_google_cloud_adc_without_api_key() -> None:
 
     cfg_loc = resolve_search_model(
         'google-cloud:gemini-2.5-flash',
-        env={'GOOGLE_CLOUD_PROJECT': 'sec-eng-prod', 'GOOGLE_CLOUD_LOCATION': 'global'},
+        env={'GOOGLE_CLOUD_PROJECT': 'sec-eng-prod', 'GOOGLE_CLOUD_LOCATION': 'us-central1'},
         adc_loader=fake_adc,
     )
-    assert cfg_loc.location == 'global'
+    assert cfg_loc.location == 'us-central1'
 
 
 def test_resolve_search_model_google_cloud_fails_fast_and_never_leaks_credentials() -> None:
@@ -358,6 +360,8 @@ async def test_search_agent_has_only_native_web_search_tool() -> None:
     assert len(params.native_tools) == 1
     assert isinstance(params.native_tools[0], WebSearchTool)
     assert params.native_tools[0].max_uses == SEARCH_ANTHROPIC_MAX_USES
+    # Anthropic search never runs through a code-execution sandbox (no dynamic filtering): live-verified, #111.
+    assert (fake_anth.seen_settings[0] or {}).get('anthropic_web_tools_allowed_callers') == ['direct']
 
     fake_google = FakeNativeSearchModel(name='fake-google')
     google_agent = build_search_agent(fake_google, provider='google-cloud')
@@ -367,6 +371,7 @@ async def test_search_agent_has_only_native_web_search_tool() -> None:
     assert len(g_params.native_tools) == 1
     assert isinstance(g_params.native_tools[0], WebSearchTool)
     assert g_params.native_tools[0].max_uses is None
+    assert 'anthropic_web_tools_allowed_callers' not in (fake_google.seen_settings[0] or {})
 
 
 # ── Tester integration: disabled vs enabled, audit, usage, span, framing ──────

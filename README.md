@@ -35,6 +35,8 @@ The built-in executable checks are `header-security`, `js-analysis`, and `versio
 | `list_reports`, `read_report` | Retrieve Markdown saved by `save_report` for the current run or the live session’s `--from` run. |
 | `web_search` | Optional. Look up public references through a separate `anthropic:`, `google:`, or `google-cloud:` model's native web search (`--search-model`, or `-S` in `partex.sh`). Queries leave this machine. |
 
+`--search-model` takes `anthropic:<model>` (`ANTHROPIC_API_KEY`), `google:<model>` (`GOOGLE_API_KEY` or `GEMINI_API_KEY`), or `google-cloud:<model>` (Application Default Credentials and `GOOGLE_CLOUD_PROJECT`). `google-cloud:` uses the `global` location by default, since newer Gemini models are only served there; set `GOOGLE_CLOUD_LOCATION` to override it.
+
 The live terminal includes a built-in CLAI2 plugin for operator commands. `/scope` shows the current scope and requires operator confirmation for changes. `/report` writes a redacted Markdown report, and `/secrets` writes secret values to a private file.
 
 Use `partex reports RUN_ID` to list reports saved by `save_report` and `partex reports RUN_ID NAME` to print one as Markdown. Both forms accept `--db PATH` and `--json`.
