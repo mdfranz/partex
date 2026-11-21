@@ -41,7 +41,19 @@ The live terminal includes a built-in CLAI2 plugin for operator commands. `/scop
 
 ## Active probe examples
 
-Live checks send HTTP requests and require authorization. The bundled local test app shows what these checks look for.
+Live checks send HTTP requests and require authorization. To try one against the bundled local test app, start it from the repository root:
+
+```sh
+uv run python fixtures/target_app/app.py
+```
+
+In a second terminal, run the launcher against the local URL. The launcher asks you to confirm authorization. This example needs no model API key.
+
+```sh
+./partex.sh --no-tui http://127.0.0.1:8765/
+```
+
+The version-disclosure check looks for evidence like this:
 
 | Request | Example evidence |
 | --- | --- |
