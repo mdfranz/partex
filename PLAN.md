@@ -1375,17 +1375,17 @@ client-issued ones.
 
 Each milestone ends with its experiments run and documented here. A landed component does not
 by itself satisfy its milestone gate; record the command, result, and revision when a gate is
-verified. The snapshot below reflects the checked-out branch and GitHub issue state on
+verified. The snapshot below reflects `main` and GitHub issue state on
 2026-11-21; it is not a claim that the full validation suite has passed.
 
 | Milestone | Progress and remaining work |
 |---|---|
 | M0 | Project, CI (Linux x86_64 + macOS, #86) and hermetic test harness landed; dependencies switched to locked PyPI releases (#13). The fresh-install review experiment remains part of the open M1 gate (#10). |
-| M1 | Core models, bundle loading, storage, passive engine, export, header check (`#6`, `#38`, `#52`) and CLI landed. Gate experiments remain open (#10) and storage immutability/atomicity (#40) needs fixes. |
+| M1 | Core models, bundle loading, storage, passive engine, export, header check (`#6`, `#38`, `#52`) and CLI landed. Gate experiments remain open (#10). Storage integrity/rollback errors and evidence + `requests_spent` atomicity landed (#40); run immutability after `checks_complete` (#159) and pyright over `tests/` (#160) remain open. |
 | M2 | Skill documents, registry, entry-point discovery, skills-as-data and frontmatter lint landed (#25). |
-| M3 | Engagement/scope, scoped client (`--insecure` TLS #71), role handles, live engine (with passive checks on live runs #51), fixture target, `version-disclosure` (with prefix anchoring & dedup #80), verification runner, and HAR/bundle round-trip (`import-har`/`export-bundle` #28) landed. Open: catch-all route detection (#53), HAR→active probe seeding (#76). |
+| M3 | Engagement/scope, scoped client (`--insecure` TLS #71), role handles, live engine (with passive checks on live runs #51), fixture target, `version-disclosure` (with prefix anchoring & dedup #80), verification runner, and HAR/bundle round-trip (`import-har`/`export-bundle` #28), catch-all route detection (#53), HAR→active probe seeding (`probes.py`, `--bundle`, #76), an engagement User-Agent (`http.user_agent` / `--user-agent`, default `partex/<version>`, #135), and recorded TLS state for hosts added with `/scope add` under `-k` (#101) landed. |
 | M4 | Not delivered: `summarize.py` and `partex summarize`; retry, validation and timeout gates (§13.5) remain open. |
-| M5 | Read-only `partex chat` (#49), interactive `partex agent` with operator-confirmed live scope extension (#54, #64, #72), full JS download + `js-analysis` (#69), `partex report` (#61), and `partex sandboxes` (#84) landed. Open: `--auto` mode, Monty Code Mode in live session (#83), speculation gates, headless/cancellation tests, tmux checklist, skills as deferred capabilities (#59), operator `/report` & `/secrets` (#88). The state-changing/multi-protocol policy (#119) is settled in §4.1/§4.2; its implementation (#65), websocket probing (#116), and gRPC probing (#117) are the unblocked follow-ons. |
+| M5 | Read-only `partex chat` (#49), interactive `partex agent` with operator-confirmed live scope extension (#54, #64, #72), full JS download + `js-analysis` (#69), `partex report` (#61), and `partex sandboxes` (#84) landed, plus skills-as-deferred-capabilities (#59), live-session Monty Code Mode (#83), and operator `/report` & `/secrets` (#88), and optional native web search on a separate `--search-model` (`anthropic:`, `google:`, `google-cloud:`, `openai:`; #111, #144) with results persisted in `web_research` (#113) and sources capped (#146). Open: `--auto` mode, speculation gates, headless/cancellation tests, and the tmux checklist. The state-changing/multi-protocol policy (#119) is settled in §4.1/§4.2; its implementation (#65), websocket probing (#116), and gRPC probing (#117) are the unblocked follow-ons. |
 | M6 | Not delivered: coverage target, authoring docs, target-request Logfire spans (#58), and recorded experiment results. S1 `api-inventory` / `api-contract-conformance` landed (#24); remaining staged draft skills do not enable their checks (#26, #27). |
 | M7 | Not delivered: browser capture harness (`browser.py`, `partex browse`). |
 
