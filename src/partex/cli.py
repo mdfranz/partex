@@ -301,7 +301,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument(
         '--search-model',
         default=None,
-        help='optional separate model for web_search (anthropic:<name>, google:<name>, or google-cloud:<name>)',
+        help='optional separate model for web_search (anthropic:, google:, google-cloud:, or openai:<name>)',
     )
     agent.add_argument(
         '--checks',

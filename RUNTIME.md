@@ -30,9 +30,12 @@ and `import subprocess` fail and a write to the mount raises `PermissionError`. 
 they are callable *only* from `run_code`. `http_request`, `download_asset`, `discover_js_assets`, `run_check`, and
 (when `--search-model` is set) `web_search` stay direct tool calls: scope, rate limit, budget, egress rules, and
 audit apply exactly as before, and a snippet that names one gets an undefined-name error. When `--search-model` is
-configured (`anthropic:`, `google:` API key, or `google-cloud:` ADC; never Gateway), `web_search` runs in a
+configured (`anthropic:`, `google:` API key, `google-cloud:` ADC, or `openai:`; never Gateway), `web_search` runs in a
 separate one-shot agent with `WebSearch(local=None)` (provider-native search only — partex opens no host socket)
-and zero function tools, deps, or filesystem/DB access. Downloads are stored per run (`<db>.artifacts/<run_id>/`) and only the
+and zero function tools, deps, or filesystem/DB access. On Anthropic it sends `allowed_callers=['direct']`, so the
+model calls search itself and never from a server-side code-execution sandbox (which would also drop source
+citations). On OpenAI it uses the Responses API and asks for each search's source URLs
+(`openai_include_web_search_sources`). Downloads are stored per run (`<db>.artifacts/<run_id>/`) and only the
 current run's directory is mounted, so earlier runs' files (possibly from other targets) stay invisible. Wrapped calls still write their `tool_calls` audit rows. CLAI2's
 `run.code_mode` stays off and `coder` stays unloaded. State is fresh per session.
 

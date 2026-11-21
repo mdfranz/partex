@@ -16,8 +16,10 @@ import logfire
 from pydantic_ai import Agent, ToolFailed, WebSearchTool
 from pydantic_ai.capabilities import WebSearch
 from pydantic_ai.exceptions import AgentRunError
-from pydantic_ai.messages import ModelMessage, ModelResponse, NativeToolReturnPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, NativeToolCallPart, NativeToolReturnPart
 from pydantic_ai.models import Model
+from pydantic_ai.models.anthropic import AnthropicModelSettings
+from pydantic_ai.models.openai import OpenAIResponsesModelSettings
 
 from ..errors import PartexError
 from ..models import REDACTED
@@ -36,8 +38,26 @@ SEARCH_RESULT_MAX_CHARS = 4_000
 SEARCH_ANTHROPIC_MAX_USES = 3
 """Server-side ``max_uses`` cap passed to Anthropic's native ``WebSearchTool`` per query.
 
-Google's native ``google_search`` grounding ignores ``max_uses`` and pydantic-ai raises on
-unsupported restricting settings, so this is passed for Anthropic only.
+Google's native ``google_search`` grounding and OpenAI's Responses ``web_search`` take no ``max_uses``, and
+pydantic-ai raises on unsupported restricting settings, so this is passed for Anthropic only. For those
+providers the per-session cap (:data:`SEARCH_MAX_CALLS_PER_SESSION`) is the only bound.
+"""
+
+SEARCH_ANTHROPIC_SETTINGS: AnthropicModelSettings = {'anthropic_web_tools_allowed_callers': ['direct']}
+"""Model settings for Anthropic search: the model calls ``web_search`` itself, never from code execution.
+
+Current Claude models get ``web_search_20260209``, which by default lets the model call search from a
+server-side code-execution sandbox ("dynamic filtering"). Verified live (#111): results read that way come
+back encrypted and without citations, so ``sources`` is empty, and the model also burns ``max_uses`` on
+failed sandbox calls. ``['direct']`` turns the sandbox off, keeps the search agent free of any code
+execution, and makes the tool eligible for Zero Data Retention.
+"""
+
+SEARCH_OPENAI_SETTINGS: OpenAIResponsesModelSettings = {'openai_include_web_search_sources': True}
+"""Model settings for OpenAI search: ask the Responses API to return each search's source URLs.
+
+Without it, ``web_search_call`` results carry only ``{'status': 'completed'}``, so ``sources`` is empty
+(live-verified, #144).
 """
 
 type RefusalReason = Literal['empty', 'length', 'secret', 'id', 'url', 'cap']
@@ -111,7 +131,11 @@ def _collect_urls(value: Any, seen: set[str], out: list[str]) -> None:
 
 
 def extract_source_urls(messages: Sequence[ModelMessage]) -> list[str]:
-    """Extract deduplicated source URLs from native ``web_search`` return parts in *messages*."""
+    """Extract deduplicated source URLs from native ``web_search`` parts in *messages*.
+
+    Return parts carry search results. Call parts can name a page too: OpenAI's model opens pages
+    directly (``{'type': 'open_page', 'url': ...}``), and those URLs appear only in the call args (#144).
+    """
     seen: set[str] = set()
     urls: list[str] = []
     for message in messages:
@@ -120,12 +144,24 @@ def extract_source_urls(messages: Sequence[ModelMessage]) -> list[str]:
         for part in message.parts:
             if isinstance(part, NativeToolReturnPart) and part.tool_name == WebSearchTool.kind:
                 _collect_urls(part.content, seen, urls)
+            elif isinstance(part, NativeToolCallPart) and part.tool_name == WebSearchTool.kind:
+                _collect_urls(part.args_as_dict(), seen, urls)
     return urls
+
+
+def _search_settings(provider: SearchProvider) -> AnthropicModelSettings | OpenAIResponsesModelSettings | None:
+    match provider:
+        case 'anthropic':
+            return SEARCH_ANTHROPIC_SETTINGS
+        case 'openai':
+            return SEARCH_OPENAI_SETTINGS
+        case 'google' | 'google-cloud':
+            return None
 
 
 def build_search_agent(model: Model | str, *, provider: SearchProvider) -> Agent[None, str]:
     """Build the isolated one-shot search agent: native ``WebSearchTool`` only, no function tools or deps."""
-    max_uses = SEARCH_ANTHROPIC_MAX_USES if provider == 'anthropic' else None
+    anthropic = provider == 'anthropic'
     return Agent(
         model,
         name='partex_search_agent',
@@ -133,7 +169,8 @@ def build_search_agent(model: Model | str, *, provider: SearchProvider) -> Agent
         output_type=str,
         instructions=SEARCH_AGENT_INSTRUCTIONS,
         tools=(),
-        capabilities=[WebSearch(local=None, max_uses=max_uses)],
+        capabilities=[WebSearch(local=None, max_uses=SEARCH_ANTHROPIC_MAX_USES if anthropic else None)],
+        model_settings=_search_settings(provider),
         defer_model_check=True,
     )
 

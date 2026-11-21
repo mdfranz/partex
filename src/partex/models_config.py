@@ -8,12 +8,12 @@
   OpenAI-chat-format model on that Pydantic AI Gateway route.
 
 ``resolve_search_model`` resolves the optional ``--search-model`` role (#111) to a provider with
-native web search (``anthropic:``, ``google:``, or ``google-cloud:``). Search never goes through
+native web search (``anthropic:``, ``google:``, ``google-cloud:``, or ``openai:``). Search never goes through
 the Pydantic AI Gateway and fails fast at startup if the prefix or credentials/ADC are invalid.
 
 Credentials stay in the environment: pydantic-ai reads ``PYDANTIC_AI_GATEWAY_API_KEY``,
 ``PYDANTIC_AI_GATEWAY_BASE_URL``, ``ANTHROPIC_API_KEY``, ``GOOGLE_API_KEY`` / ``GEMINI_API_KEY``,
-and Google ADC itself, and nothing here logs or stores them.
+``OPENAI_API_KEY``, and Google ADC itself, and nothing here logs or stores them.
 """
 
 import os
@@ -26,14 +26,19 @@ from pydantic_ai.models import Model
 from .errors import PartexError
 
 GATEWAY_BASE_URL_ENV = 'PYDANTIC_AI_GATEWAY_BASE_URL'
-DEFAULT_GOOGLE_CLOUD_LOCATION = 'us-central1'
+DEFAULT_GOOGLE_CLOUD_LOCATION = 'global'
+"""Vertex location for ``google-cloud:`` search. Newer Gemini models (3.x and later) are served from
+``global`` only; ``us-central1`` returns 404 for them (live-verified, #111). Override with ``GOOGLE_CLOUD_LOCATION``."""
 
-type SearchProvider = Literal['anthropic', 'google', 'google-cloud']
+type SearchProvider = Literal['anthropic', 'google', 'google-cloud', 'openai']
 type SearchAuthMode = Literal['api_key', 'adc']
 type AdcLoader = Callable[[], tuple[Any, str | None]]
 
-SEARCH_MODEL_PREFIXES: tuple[SearchProvider, ...] = ('anthropic', 'google', 'google-cloud')
+SEARCH_MODEL_PREFIXES: tuple[SearchProvider, ...] = ('anthropic', 'google', 'google-cloud', 'openai')
 """Providers accepted by ``--search-model`` (native server-side web search only, never Gateway)."""
+
+OPENAI_RESPONSES_ALIAS = 'openai-responses'
+"""Also accepted for ``openai``; both resolve to the Responses API, the only OpenAI API with a full ``web_search`` tool."""
 
 
 class ModelConfigError(PartexError):
@@ -131,7 +136,7 @@ def resolve_search_model(
     env: Mapping[str, str] | None = None,
     adc_loader: AdcLoader | None = None,
 ) -> SearchModelConfig:
-    """Validate and resolve ``--search-model`` (native search only: ``anthropic:``, ``google:``, ``google-cloud:``).
+    """Validate and resolve ``--search-model`` (native search: ``anthropic:``, ``google:``, ``google-cloud:``, ``openai:``).
 
     Fails fast with :class:`ModelConfigError` on unsupported prefixes (including ``gateway/...`` and
     bare model names) or missing credentials/ADC. Error messages never include credential values,
@@ -148,6 +153,13 @@ def resolve_search_model(
         )
     raw_prefix, _, raw_name = spec.partition(':')
     model_name = raw_name.strip()
+    if raw_prefix == 'openai-chat':
+        raise ModelConfigError(
+            "--search-model 'openai-chat:' is not supported: Chat Completions search works only on search-preview "
+            f'models without domain filters; use openai:<model> (Responses API). Accepted prefixes: {accepted}'
+        )
+    if raw_prefix == OPENAI_RESPONSES_ALIAS:
+        raw_prefix = 'openai'
     if raw_prefix not in SEARCH_MODEL_PREFIXES:
         raise ModelConfigError(
             f'--search-model provider {raw_prefix!r} is not supported; accepted prefixes: {accepted}'
@@ -167,6 +179,18 @@ def resolve_search_model(
             model_name=model_name,
             auth_mode='api_key',
             model=normalized,
+        )
+
+    if raw_prefix == 'openai':
+        if not (environ.get('OPENAI_API_KEY') or '').strip():
+            raise ModelConfigError(f'OPENAI_API_KEY is required for --search-model {normalized!r}')
+        return SearchModelConfig(
+            spec=normalized,
+            provider='openai',
+            model_name=model_name,
+            auth_mode='api_key',
+            # Pin the Responses API explicitly: ``openai:`` maps to it today, but only Responses has the full tool.
+            model=f'{OPENAI_RESPONSES_ALIAS}:{model_name}',
         )
 
     if raw_prefix == 'google':
