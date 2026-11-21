@@ -737,7 +737,7 @@ CREATE TABLE runs (
   authorized_flag INTEGER NOT NULL DEFAULT 0,  -- --authorized was passed (live runs)
   model TEXT,
   requests_spent INTEGER NOT NULL DEFAULT 0,   -- live runs: outbound requests consumed
-  write_requests_spent INTEGER NOT NULL DEFAULT 0, -- live runs: state-changing sends consumed (lands with #65)
+  write_requests_spent INTEGER NOT NULL DEFAULT 0, -- live runs: state-changing sends consumed (schema v4, #65)
   scope_snapshot TEXT,            -- serialized Scope (live runs), for cross-run coverage comparison
   error TEXT,                     -- check/validation failure diagnostic
   summary_error TEXT              -- summary generation/validation failure diagnostic
@@ -852,7 +852,8 @@ clear error, never migrated destructively (§17). Migrations are additive only: 
 an older supported store in place, one version at a time inside a single transaction (new tables
 or columns; nothing rewritten or dropped), re-reading the version under the write lock. `mode=ro`
 readers cannot migrate, so they also accept the previous supported version and treat tables it
-lacks as empty. Version 3 (#113) adds `web_research`; a version-2 store is upgraded on its next
+lacks as empty (or columns, read as their default). Version 3 (#113) adds `web_research`; version 4
+(#65) adds `runs.write_requests_spent`. Older supported stores (2 and 3) are upgraded on their next
 writer open, and version 1 is still refused.
 
 **Web research (#113).** A successful `web_search` writes its capped answer and `{url, title}`
@@ -1385,7 +1386,7 @@ verified. The snapshot below reflects `main` and GitHub issue state on
 | M2 | Skill documents, registry, entry-point discovery, skills-as-data and frontmatter lint landed (#25). |
 | M3 | Engagement/scope, scoped client (`--insecure` TLS #71), role handles, live engine (with passive checks on live runs #51), fixture target, `version-disclosure` (with prefix anchoring & dedup #80), verification runner, and HAR/bundle round-trip (`import-har`/`export-bundle` #28), catch-all route detection (#53), HAR→active probe seeding (`probes.py`, `--bundle`, #76), an engagement User-Agent (`http.user_agent` / `--user-agent`, default `partex/<version>`, #135), and recorded TLS state for hosts added with `/scope add` under `-k` (#101) landed. |
 | M4 | Not delivered: `summarize.py` and `partex summarize`; retry, validation and timeout gates (§13.5) remain open. |
-| M5 | Read-only `partex chat` (#49), interactive `partex agent` with operator-confirmed live scope extension (#54, #64, #72), full JS download + `js-analysis` (#69), `partex report` (#61), and `partex sandboxes` (#84) landed, plus skills-as-deferred-capabilities (#59), live-session Monty Code Mode (#83), and operator `/report` & `/secrets` (#88), and optional native web search on a separate `--search-model` (`anthropic:`, `google:`, `google-cloud:`, `openai:`; #111, #144) with results persisted in `web_research` (#113) and sources capped (#146). Open: `--auto` mode, speculation gates, headless/cancellation tests, and the tmux checklist. The state-changing/multi-protocol policy (#119) is settled in §4.1/§4.2; its implementation (#65), websocket probing (#116), and gRPC probing (#117) are the unblocked follow-ons. |
+| M5 | Read-only `partex chat` (#49), interactive `partex agent` with operator-confirmed live scope extension (#54, #64, #72), full JS download + `js-analysis` (#69), `partex report` (#61), and `partex sandboxes` (#84) landed, plus skills-as-deferred-capabilities (#59), live-session Monty Code Mode (#83), and operator `/report` & `/secrets` (#88), and optional native web search on a separate `--search-model` (`anthropic:`, `google:`, `google-cloud:`, `openai:`; #111, #144) with results persisted in `web_research` (#113) and sources capped (#146). Open: `--auto` mode, speculation gates, headless/cancellation tests, and the tmux checklist. The state-changing/multi-protocol policy (#119) is settled in §4.1/§4.2. Operator-approved `POST`/`PUT`/`PATCH`/`DELETE` through `http_request` landed (#65: `allowed_methods`, `max_write_requests`, `write_requests_spent`, schema v4); websocket frame sends (#116), gRPC invocation (#117) and write-bearing verify recipes still need to adopt the same gate. |
 | M6 | Not delivered: coverage target, authoring docs, target-request Logfire spans (#58), and recorded experiment results. S1 `api-inventory` / `api-contract-conformance` landed (#24); remaining staged draft skills do not enable their checks (#26, #27). |
 | M7 | Not delivered: browser capture harness (`browser.py`, `partex browse`). |
 

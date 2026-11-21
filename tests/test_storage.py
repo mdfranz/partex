@@ -763,8 +763,15 @@ async def test_web_research_ids_never_resolve_across_runs(tmp_store: RunStore):
     assert await tmp_store.web_research(second) == []
 
 
+def _downgrade_to_v3(path: Path) -> None:
+    """Make a fresh store look like a version-3 one: v4 only added ``runs.write_requests_spent`` (#65)."""
+    _execute(path, 'ALTER TABLE runs DROP COLUMN write_requests_spent')
+    _execute(path, 'PRAGMA user_version = 3')
+
+
 def _downgrade_to_v2(path: Path) -> None:
     """Make a fresh store look like a version-2 one: v3 only added ``web_research``."""
+    _downgrade_to_v3(path)
     _execute(path, 'DROP TABLE web_research')
     _execute(path, 'PRAGMA user_version = 2')
 
@@ -794,6 +801,26 @@ async def test_reader_opens_a_version_2_store_without_migrating_it(tmp_store_pat
         assert await reader.get_web_research(run_id, 'wr_0000000000000000') is None
     with closing(sqlite3.connect(tmp_store_path)) as conn:
         assert conn.execute('PRAGMA user_version').fetchone() == (2,)
+
+
+async def test_writer_migrates_a_version_3_store_and_counts_writes(tmp_store_path: Path):
+    async with await RunStore.open(tmp_store_path) as store:
+        run_id = await _run(store)
+        await store.add_evidence(run_id, _http(), count_request=True)
+    _downgrade_to_v3(tmp_store_path)
+
+    async with await RunReader.open(tmp_store_path) as reader:  # a v3 reader sees no write counter, not an error
+        run = await reader.get_run(run_id)
+        assert (run.requests_spent, run.write_requests_spent) == (1, 0)
+    async with await RunStore.open(tmp_store_path) as store:
+        write = _http('/orders').model_copy(deep=True)
+        write.http.request.method = 'POST'
+        await store.add_evidence(run_id, write.model_copy(update={'id': evidence_id(write)}), count_request=True)
+        run = await store.get_run(run_id)
+        assert (run.requests_spent, run.write_requests_spent) == (2, 1)
+        assert len(await store.evidence(run_id)) == 2  # existing data kept
+    with closing(sqlite3.connect(tmp_store_path)) as conn:
+        assert conn.execute('PRAGMA user_version').fetchone() == (SCHEMA_VERSION,)
 
 
 @pytest.mark.parametrize('opener', [RunStore.open, RunReader.open])

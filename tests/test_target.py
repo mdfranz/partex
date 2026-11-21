@@ -24,6 +24,7 @@ def engagement_for(
     ports: list[int] | None = None,
     max_requests: int = 100,
     max_rps: int = 64,
+    writes: int = 0,
 ) -> Engagement:
     server: object = target_server
     port = server.port  # pyright: ignore[reportAttributeAccessIssue]
@@ -39,6 +40,11 @@ def engagement_for(
                 'ports': ports if ports is not None else [port],
                 'max_rps': max_rps,
                 'max_requests': max_requests,
+                **(
+                    {'allowed_methods': ['GET', 'HEAD', 'OPTIONS', 'POST'], 'max_write_requests': writes}
+                    if writes
+                    else {}
+                ),
             },
             'authorization': {'attestation': 'fixture authorization', 'operator': 'test'},
         }
@@ -69,7 +75,7 @@ async def test_in_scope_request_is_captured(target_server: object) -> None:
 
 
 async def test_post_body_and_headers_sent(target_server: object) -> None:
-    engagement = engagement_for(target_server)
+    engagement = engagement_for(target_server, writes=5)
     base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
     async with ScopedHttpClient(engagement) as client:
         evidence = await client.request(
@@ -190,7 +196,7 @@ async def test_follow_redirect_to_excluded_path_refused(target_server: object) -
 
 
 async def test_303_converts_to_get(target_server: object) -> None:
-    engagement = engagement_for(target_server)
+    engagement = engagement_for(target_server, writes=5)
     base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
     async with ScopedHttpClient(engagement) as client:
         redirect = await client.request('POST', f'{base_url}/redirect?to=/api/next&code=303', body='{"a": 1}')
@@ -331,7 +337,7 @@ async def test_ip_literal_scope_host_needs_no_resolution(target_server: object) 
 
 
 async def test_secret_fields_marked_and_redacted(target_server: object) -> None:
-    engagement = engagement_for(target_server)
+    engagement = engagement_for(target_server, writes=5)
     base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
     async with ScopedHttpClient(engagement, secrets=('sekrit-token',)) as client:
         evidence = await client.request(
