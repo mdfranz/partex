@@ -1183,3 +1183,11 @@ def test_tester_instructions_describe_batch_workflow() -> None:
     assert 'http_request_batch' in TESTER_INSTRUCTIONS
     assert 'run_code' in TESTER_INSTRUCTIONS
     assert str(BATCH_MAX_ITEMS) in TESTER_INSTRUCTIONS
+
+
+async def test_run_check_rule_id_names_the_owning_check(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        result = await drive(session, tmp_store, [('run_check', {'check_id': 'error-page-disclosure'})])
+        [retried] = tool_returns(result.all_messages())
+        assert retried.outcome == 'retried'
+        assert 'reported by the version-disclosure check' in str(retried.content)

@@ -24,6 +24,7 @@ or containing control/format characters once decoded is refused outright.
 import ipaddress
 import re
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
@@ -254,6 +255,30 @@ def _path_allowed(scope: Scope, path: str) -> bool:
     return any(path_under(path, prefix) for prefix in scope.path_prefixes)
 
 
+def _edit_distance(a: str, b: str) -> int:
+    """Levenshtein distance between two short strings (hostnames)."""
+    previous = list(range(len(b) + 1))
+    for i, char_a in enumerate(a, 1):
+        current = [i]
+        for j, char_b in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (char_a != char_b)))
+        previous = current
+    return previous[-1]
+
+
+def near_miss_host(host: str, candidates: Iterable[str]) -> str | None:
+    """The one in-scope host that *host* is a small edit away from, else ``None`` (#125).
+
+    Catches a model rebuilding a long hostname from memory (a doubled or moved hyphen). In-scope hosts
+    are already known to the caller, so naming one reveals nothing. A tie for closest gives no hint.
+    """
+    limit = 2 if len(host) >= 10 else 1
+    scored = sorted((_edit_distance(host, candidate), candidate) for candidate in candidates)
+    if scored and scored[0][0] <= limit and (len(scored) == 1 or scored[1][0] > scored[0][0]):
+        return scored[0][1]
+    return None
+
+
 def check_url(scope: Scope, url: str) -> None:
     """Refuse *url* unless every interpretation of it lies inside *scope*.
 
@@ -265,7 +290,9 @@ def check_url(scope: Scope, url: str) -> None:
     view = parse_scoped_url(url)
     allowed_hosts = {normalize_host(h) for h in scope.hosts}
     if view.host not in allowed_hosts:
-        raise ScopeViolation(f'host {view.host!r} not in scope hosts', rule_code='scope-invalid')
+        suggestion = near_miss_host(view.host, allowed_hosts)
+        hint = f'; did you mean {suggestion!r}?' if suggestion else ''
+        raise ScopeViolation(f'host {view.host!r} not in scope hosts{hint}', rule_code='scope-invalid')
     allowed_ports = set(scope.ports) if scope.ports else {80, 443}
     if view.port not in allowed_ports:
         raise ScopeViolation(f'port {view.port} not in scope ports {sorted(allowed_ports)}', rule_code='scope-invalid')

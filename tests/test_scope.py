@@ -399,3 +399,28 @@ def test_extend_with_a_known_host_and_port_is_a_no_op() -> None:
 def test_extend_keeps_scheme_defaults_when_scope_has_no_explicit_ports() -> None:
     assert extend_scope(_scope(ports=[]), 'https://b.test').ports == []
     assert extend_scope(_scope(ports=[]), 'b.test:8080').ports == [80, 443, 8080]
+
+
+# ── Near-miss host hint (#125) ─────────────────────────────────────────────────
+
+
+def test_near_miss_host_suggests_the_in_scope_host() -> None:
+    scope = scope_of(hosts=['logfire-us.pydantic.dev'])
+    with pytest.raises(ScopeViolation, match=r"not in scope hosts; did you mean 'logfire-us.pydantic.dev'\?"):
+        check_url(scope, 'https://logfire--us.pydantic.dev/api')  # doubled hyphen
+    with pytest.raises(ScopeViolation, match='did you mean'):
+        check_url(scope, 'https://logfireus.pydantic.dev/api')  # dropped hyphen
+
+
+def test_no_hint_when_no_host_is_close() -> None:
+    for url in ('https://evil-example.test/api', 'https://sub.example.test/api', 'https://unrelated.test/api'):
+        with pytest.raises(ScopeViolation) as caught:
+            check_url(scope_of(), url)
+        assert 'did you mean' not in str(caught.value)
+
+
+def test_no_hint_when_two_hosts_tie() -> None:
+    scope = scope_of(hosts=['api-a.example.test', 'api-b.example.test'])
+    with pytest.raises(ScopeViolation) as caught:
+        check_url(scope, 'https://api-c.example.test/api')
+    assert 'did you mean' not in str(caught.value)
