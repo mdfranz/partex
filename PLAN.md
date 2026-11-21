@@ -322,7 +322,7 @@ row is finalized):
 |---|---|---|
 | E1 | manifest parses, `schema_version` is exactly `1` | `engagement-version` |
 | E2 | `authorization.attestation` is present and non-empty; the CLI additionally requires `--authorized` on every live command, and the stored run records both | `unauthorized` |
-| E3 | scope is non-empty: at least one host; every host parses; `exclusions` are within `path_prefixes`; `max_rps` and `max_requests` are positive with hard ceilings (64 rps, 100k requests); `allowed_methods` defaults to `GET, HEAD, OPTIONS` and entries are uppercase HTTP method tokens; `max_write_requests` defaults to 0 (no state-changing traffic) with a hard ceiling of 1,000 | `scope-invalid` |
+| E3 | scope is non-empty: at least one host; every host parses; `exclusions` are within `path_prefixes`; `max_rps` and `max_requests` are positive with hard ceilings (64 rps, 100k requests); `allowed_methods` defaults to `GET, HEAD, OPTIONS`, must include `GET`, and entries come from `{GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE}` (`CONNECT` and `TRACE` are forbidden); `max_write_requests` defaults to 0 (no state-changing traffic) with a hard ceiling of 1,000; listing a non-safe method with `max_write_requests == 0` (or `max_write_requests > 0` with safe-only methods) is rejected | `scope-invalid` |
 | E4 | `credentials` values are environment variable **names** matching `PARTEX_[A-Z0-9_]+` (the namespace keeps an engagement file from naming an unrelated secret such as `GITHUB_TOKEN`); inline values are rejected. Referenced variables must be set at run start | `credential-invalid` / `credential-missing` |
 | E5 | `base_url` host must be inside `scope.hosts` | `scope-invalid` |
 | E6 | `suggested_checks` entries that are not registered are dropped with a warning | - |
@@ -397,34 +397,45 @@ and port with the CLAI2 slash command `/scope add <host[:port]|url>`, which only
 change and shows the exact additions (ports apply to every host in scope); `/scope confirm`
 applies it, `/scope cancel` drops it. Slash commands are handled by the terminal shell and never
 reach the model, and the model has no scope tool, so a chat message cannot widen scope. The scope
-only grows (`ScopedHttpClient.set_scope` rejects any removal or budget change and re-runs E3),
-each amendment is recorded on the run as a `scope_amend` tool call, and `runs.scope_snapshot`
-holds the current scope. The command is a small partex-owned CLAI2 plugin; the session uses a
-private settings store so the operator's saved and drop-in CLAI2 plugins stay out (#64).
+only grows (`ScopedHttpClient.set_scope` rejects any removal, budget, or method-policy change and
+re-runs E3), each amendment is recorded on the run as a `scope_amend` tool call, and
+`runs.scope_snapshot` holds the current scope. The command is a small partex-owned CLAI2 plugin;
+the session uses a private settings store so the operator's saved and drop-in CLAI2 plugins stay
+out (#64).
 
-**State-changing actions (operator approval, #119).** Safe methods (`GET`, `HEAD`, `OPTIONS`)
-and listen-only websocket capture send without ceremony. Every other engine action that can
-change target state — an HTTP request with a non-safe method, a websocket frame send, a gRPC
-method invocation, or a verification recipe containing one — passes one shared approval gate
-before send:
+**State-changing actions (operator approval, #119).** Safe HTTP methods (`GET`, `HEAD`, `OPTIONS`),
+listen-only websocket capture (#116), and read-only gRPC `ServerReflection` discovery (`grpc_list`,
+#117 — its HTTP/2 `POST` framing neither requires `POST` in `allowed_methods` nor consumes
+`max_write_requests`, while still passing `check_url` on `/grpc.reflection...` and `max_requests` /
+`max_rps`) send without approval ceremony. Every other engine action that can change target state —
+an HTTP request with a non-safe method, a websocket frame send, a gRPC method invocation
+(`grpc_call`), or a verification recipe containing one — passes one shared approval gate before send:
 
-1. The engagement must authorize the method class in `scope.allowed_methods` (a gRPC
-   invocation requires `POST`; a websocket frame send requires at least one non-safe method
-   listed). Approval can never unlock a method the engagement does not list: the engagement is
-   the authorization, the prompt is per-action consent.
-2. The operator is shown the exact action (method, full URL or `service/method`, header names,
-   a redacted body summary) and chooses **approve** (that exact method + host + path + body),
-   **approve for this session** (method + host + exact path, any body — never a wildcard), or
-   **deny** (optionally with a typed reason sent back to the model). The model can never answer
-   its own prompt, and chat text never counts as approval; with no operator to ask (`--auto`,
-   `--no-tui`) the action is denied and nothing is sent.
-3. Scope `exclusions` are never approvable, for any method: an excluded path fails before a
-   prompt exists.
-4. An approved action still passes the full scope gate above, the rate limiter, and both
-   budgets: `max_requests` plus the separate `max_write_requests` counter for state-changing
-   sends. Write-budget exhaustion ends write work cleanly, like `max_requests`.
-5. Every held, approved, and denied decision is recorded on the run in `tool_calls` (action,
-   method, URL, decision, reason) with secret values redacted.
+1. **Pre-prompt authorization, scope, and budget checks.** Before any prompt is shown, the action
+   must: (a) be authorized by `scope.allowed_methods` (`grpc_call` requires `POST`; a websocket
+   frame send requires at least one non-safe method listed), (b) pass the full URL scope gate
+   (`check_url` rules 1–3: scheme, port, host, `path_prefixes`, and `exclusions` — excluded or
+   out-of-scope targets are never approvable and fail before a prompt exists), and (c) have
+   remaining room in both `max_requests` and `max_write_requests`. Approval can never unlock a
+   method or target the engagement does not authorize: the engagement is the authorization, the
+   prompt is per-action consent.
+2. **Operator consent and keying.** The operator is shown the exact action (method, full URL or
+   `service/method`, header names, a redacted body summary) and chooses **approve** (that exact
+   `method + full URL (scheme, host, port, path, query) + body`), **approve for this session**
+   (`method + scheme + host + port + exact path`, any body — never a wildcard), or **deny**
+   (optionally with a typed reason sent back to the model). The model can never answer its own
+   prompt, and chat text never counts as approval; with no interactive operator (`--auto`,
+   `partex test`, or non-TTY `partex verify`) the action is denied and nothing is sent. In
+   `partex verify`, an interactive TTY prompts under the run's stored `scope_snapshot`; a denied
+   or non-interactive write replay records verdict `inconclusive` (leaving finding status
+   unchanged, never `verification_failed`).
+3. **Send-time enforcement and budgets.** An approved action still passes `ScopedHttpClient`'s
+   send-time scope gate, rate limiter, and both budgets (`max_requests` plus the separate
+   `max_write_requests` counter, persisted on the run as `write_requests_spent`), so approval
+   never bypasses `target.py` and concurrent calls cannot overrun either budget. Write-budget
+   exhaustion ends write work cleanly, like `max_requests`.
+4. **Audit.** Every held, approved, and denied decision is recorded on the run in `tool_calls`
+   (action, method, URL, decision, reason) with secret values redacted.
 
 A scope violation raises `ScopeViolation` before any bytes hit the wire, is recorded on the
 run, and — when triggered by the agent — is raised as a `ToolFailed` tool error so the model
@@ -692,6 +703,7 @@ CREATE TABLE runs (
   authorized_flag INTEGER NOT NULL DEFAULT 0,  -- --authorized was passed (live runs)
   model TEXT,
   requests_spent INTEGER NOT NULL DEFAULT 0,   -- live runs: outbound requests consumed
+  write_requests_spent INTEGER NOT NULL DEFAULT 0, -- live runs: state-changing sends consumed (lands with #65)
   scope_snapshot TEXT,            -- serialized Scope (live runs), for cross-run coverage comparison
   error TEXT,                     -- check/validation failure diagnostic
   summary_error TEXT              -- summary generation/validation failure diagnostic
@@ -1183,7 +1195,8 @@ API), run the same passive review, confirm findings persist and export with **no
 
 (a) Passive: two fresh stores, byte-identical exports. (b) Every malformed bundle and every
 invalid engagement (missing attestation, inline credential, empty scope, base URL outside
-scope) exits 1 with a diagnostic naming the rule, with a model factory and a socket factory
+scope, disallowed/mismatched `allowed_methods` or `max_write_requests` ceiling) exits 1 with a
+diagnostic naming the rule, with a model factory and a socket factory
 that raise if ever called. (c) `--workers 1` vs `--workers 8` with reverse-order completion:
 passive exports byte-identical. (d) Concurrent readers during a live run; second writer
 serializes or exits 1 with the lock message; `PRAGMA integrity_check` passes. (e) Live
@@ -1195,9 +1208,12 @@ findings readable in `checks_failed`.
 All against the fixture app on localhost; a `conftest.py` fixture blocks every non-localhost
 socket.
 
-- *Scope gate*: requests to an out-of-scope host, an excluded path, a disallowed port, and a
-  redirect to an out-of-scope location are each refused before sending (assert no bytes hit
-  the wire via a socket-level spy); the refusals are recorded on the run.
+- *Scope gate*: HTTP and `ws`/`wss` requests to an out-of-scope host, an excluded path, a
+  disallowed port, and a redirect to an out-of-scope location are each refused before sending
+  (assert no bytes hit the wire via a socket-level spy); the refusals are recorded on the run.
+- *State-changing approval gate*: non-safe methods not in `allowed_methods`, unapproved or
+  denied writes, and writes in headless sessions (`--auto`, `test`, non-TTY `verify`) never
+  reach the wire; approved writes enforce `max_write_requests` and audit every decision.
 - *Authorization*: `test` without `--authorized` exits 1 before any network or model call.
 - *Capture*: a live `test` against the fixture app records every exchange as evidence;
   `export-bundle` round-trips into a passive `review` that reproduces the passive findings.
@@ -1289,7 +1305,7 @@ client-issued ones.
 Each milestone ends with its experiments run and documented here. A landed component does not
 by itself satisfy its milestone gate; record the command, result, and revision when a gate is
 verified. The snapshot below reflects the checked-out branch and GitHub issue state on
-2026-11-19; it is not a claim that the full validation suite has passed.
+2026-11-21; it is not a claim that the full validation suite has passed.
 
 | Milestone | Progress and remaining work |
 |---|---|
@@ -1329,7 +1345,7 @@ No §13 experiment is recorded as passed here until its gate has evidence.
 | Entry-point checks add supply-chain surface | Code loads only from installed distributions, never paths; skills are data-only; no prebuilt artifacts published |
 | Prompt injection through captured responses steers the agent | Evidence framed as untrusted data; model has no write path to findings; scope gate is code, not prompt; the worst a hostile response can do is waste budget |
 | Active checks harm a fragile target | Conservative defaults: rps ceiling, exclusion list, minimal-request verification recipes; no fuzzing payloads in v1 checks beyond error-triggering inputs (§17) |
-| Operator rubber-stamps write approvals | Writes are off by default (`allowed_methods` safe-only, `max_write_requests: 0`); approval keys on the exact method + host + path with no wildcards; exclusions are unapprovable; headless sessions always deny; every decision audited on the run (§4.2) |
+| Operator rubber-stamps write approvals | Writes are off by default (`allowed_methods` safe-only, `max_write_requests: 0`); scope and remaining budget are checked before prompting; approval keys on `method + scheme + host + port + exact path` (plus query + body for single approve) with no wildcards; headless sessions always deny; every decision audited on the run (§4.2) |
 | SQLite becomes a multi-operator tool by accretion | v1 documents one operator, one machine; store refuses unknown `user_version` |
 | Workers write to the store directly as features accrete | Single-writer rule; test asserts `RunReader` connections open `mode=ro` and check code cannot import `storage` |
 | `database is locked` under concurrent processes | WAL + `busy_timeout`; one writer connection per process; `BEGIN IMMEDIATE`; lock timeout exits 1 clearly |
