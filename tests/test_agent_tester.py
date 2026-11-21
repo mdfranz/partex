@@ -790,9 +790,9 @@ async def test_report_and_secrets_accept_an_explicit_path_and_report_failures(
 
 def test_the_model_has_no_export_tool_and_the_commands_exist_for_the_operator() -> None:
     names = set(build_tester_agent('test')._function_toolset.tools)  # pyright: ignore[reportPrivateUsage]
-    # The operator's /report and /secrets exports stay unreachable by the model (#88). The one allowed exception is
-    # save_report (#104): model-authored text, credential-scrubbed, written to its own directory, never an export.
-    assert not {name for name in names if 'report' in name or 'secret' in name or 'export' in name} - {'save_report'}
+    # The model can access its Markdown reports. The /report and /secrets exports remain operator-only.
+    report_tools = {'save_report', 'list_reports', 'read_report'}
+    assert {name for name in names if 'report' in name or 'secret' in name or 'export' in name} == report_tools
 
 
 async def test_plugin_registers_the_export_commands(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
@@ -872,6 +872,22 @@ async def test_save_report_writes_a_private_audited_file(tmp_store: RunStore, tm
         assert call.tool == 'save_report' and call.args['name'] == 'summary-1'
         assert 'Findings' not in json.dumps(call.args) + json.dumps(call.result)  # the audit never holds the text
         assert not any(artifact_dir(tmp_store.path).glob('**/summary-1*'))  # never beside captured evidence
+
+        async def audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+            await tmp_store.record_tool_call(session.run_id, tool, args, result)
+
+        (read,) = await drive_code(
+            session,
+            tmp_store,
+            ["print(await list_reports())\nprint(await read_report(name='summary-1'))"],
+            audit=audit,
+        )
+        assert 'summary-1' in read
+        assert 'See ev_abc.' in read
+        _, listing, reading = await tmp_store.tool_calls(session.run_id)
+        assert listing.tool == 'list_reports' and listing.result == {'count': 1}
+        assert reading.tool == 'read_report' and reading.result == {'found': True}
+        assert reading.args == {'name': 'summary-1', 'run': session.run_id}
 
 
 @pytest.mark.parametrize(
