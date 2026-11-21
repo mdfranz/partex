@@ -57,9 +57,4 @@ uv run partex show RUN_ID --db ./partex-probe.db --format text
 
 The first command prints the saved evidence and findings. The second opens read-only chat on that run and requires an OpenRouter API key.
 
-## In review
-
-- Optional provider-native web search uses a separate model configured through `PARTEX_SEARCH_MODEL`. Search queries go to the selected provider. [PR #112](https://github.com/mdfranz/partex/pull/112)
-- A proposed batch HTTP tool groups requests under the existing scope, rate, and request limits. [PR #115](https://github.com/mdfranz/partex/pull/115)
-
 [Design](PLAN.md)
