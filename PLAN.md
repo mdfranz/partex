@@ -843,6 +843,7 @@ emits a passive-reviewable bundle from a live run's captures (redacted by defaul
 | `partex agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--gateway-route`, `--checks`, `--from`, `--insecure`, `--db` |
 | `partex browse <engagement>` | browser capture harness (M7): record and actively probe authenticated SPA flows as evidence | `--authorized` (required), `--attach <cdp-port>`, `--db` |
 | `partex chat <run-id>` | read-only review chat over a saved run | `--model`, `--gateway-route`, `--db`, `--no-briefing` |
+| `partex reports <run-id> [name]` | list or print Markdown saved with `save_report` | `--db`, `--json` |
 
 Selection semantics unchanged: `--checks` is an explicit, ordered, de-duplicated list; unknown
 ID exits 1 listing available IDs; `--all` runs registration order; empty selection is a usage
@@ -869,6 +870,12 @@ run-scoped read tools (`list_findings`, `get_finding`, `lookup_evidence`), `load
 skill playbooks registered as on-demand deferred capabilities (`defer_loading=True`),
 evidence redacted and framed as attacker-controlled data, no write tools, and cross-run IDs
 rejected via `ToolFailed`.
+
+Both agents expose `list_reports(run='current')` and `read_report(name, run='current')` for
+Markdown saved with `save_report`. A report handle consists of its run ID and name. Report tools
+accept the current run and, when supplied, the explicit `--from` run. Results are framed as
+untrusted data and file reads are capped at 256 KiB. Live-session audit rows contain the report
+name and run for reads, along with the outcome. Standalone chat uses a read-only store.
 
 **Code Mode settings.** For `partex chat <run-id>`, attach `CodeMode(tools=['list_findings', 'get_finding', 'lookup_evidence'], eager=True, speculate=['list_findings', 'get_finding', 'lookup_evidence'] if speculate else None, mount=None, os_access=None)` directly on `partex_reviewer_agent` and keep CLAI2's `run.code_mode` and `run.speculative_code_mode` off (so CLAI2's `WorkspaceCodeMode` does not mount the host working directory and its `SpeculativeExecution` allowlist does not filter out `partex`'s tools). Keep speculation off by default and evaluate it as a reviewer opt-in. Headless `agent.run()` and `agent.iter()` use the capabilities supplied to the agent. See [RUNTIME.md](RUNTIME.md).
 
