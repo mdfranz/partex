@@ -31,7 +31,7 @@ The live terminal includes a built-in CLAI2 plugin for operator commands. `/scop
 
 ## Pydantic libraries
 
-Pydantic validates inputs such as assessment settings and captured traffic. Pydantic AI connects models to the tools they can use, and its CLAI2 package provides the interactive terminal. Monty runs model-generated Python in a sandbox when the interactive session needs to work with saved evidence. [Runtime](RUNTIME.md) · [Dependencies](DEPS.md)
+[Pydantic](https://github.com/pydantic/pydantic) validates inputs such as assessment settings and captured traffic. [Pydantic AI](https://pydantic.dev/docs/ai/overview/) connects models to the tools they can use, and its [CLAI2](https://pypi.org/project/pydantic-clai2/) package provides the interactive terminal. [Monty](https://pydantic.dev/docs/monty/get-started/) runs model-generated Python in a sandbox when the interactive session needs to work with saved evidence. [Runtime](RUNTIME.md) · [Dependencies](DEPS.md)
 
 ## Active probe examples
 
