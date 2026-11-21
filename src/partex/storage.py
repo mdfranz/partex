@@ -1104,20 +1104,24 @@ class RunStore(_Reads):
         sources: Sequence[dict[str, Any]],
         truncated: bool,
         audit_args: Any,
+        sources_total: int | None = None,
     ) -> str:
         """Persist one successful ``web_search`` and its ``tool_calls`` audit row in one transaction (#113).
 
         The research row keeps the capped answer and sources; the audit row keeps metadata only (query,
         provider, source URLs, truncated) plus the ``research_id``, never the answer. Returns the ``wr_`` ID.
+        *sources_total*, when the caller capped *sources*, is the uncapped count and goes in the audit row (#146).
         """
         research_id = 'wr_' + uuid.uuid4().hex[:16]
         call_id = 'tc_' + uuid.uuid4().hex
         source_list = [dict(source) for source in sources]
-        audit_result = {
+        audit_result: dict[str, Any] = {
             'research_id': research_id,
             'sources': [source.get('url') for source in source_list],
             'truncated': truncated,
         }
+        if sources_total is not None:
+            audit_result['sources_total'] = sources_total
 
         def write(conn: sqlite3.Connection) -> None:
             _get_run(conn, run_id)

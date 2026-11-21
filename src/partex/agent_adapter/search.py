@@ -9,9 +9,10 @@ audited without result bodies, and returned framed as untrusted data. When the s
 """
 
 import re
+import sqlite3
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 import logfire
@@ -36,6 +37,13 @@ SEARCH_MAX_CALLS_PER_SESSION = 20
 
 SEARCH_RESULT_MAX_CHARS = 4_000
 """Maximum characters of search answer text returned to the tester model."""
+
+SEARCH_MAX_SOURCES = 20
+"""Maximum sources kept per search, in first-seen order, for the tester, the audit row and the research row.
+
+One live ``openai:gpt-5.5`` query returned 57 (#146). Sources beyond the cap are dropped but counted
+(``sources_total``), so the cut is never silent.
+"""
 
 SEARCH_ANTHROPIC_MAX_USES = 3
 """Server-side ``max_uses`` cap passed to Anthropic's native ``WebSearchTool`` per query.
@@ -64,9 +72,26 @@ Without it, ``web_search_call`` results carry only ``{'status': 'completed'}``, 
 
 type RefusalReason = Literal['empty', 'length', 'secret', 'id', 'url', 'cap']
 type AuditFn = Callable[[str, dict[str, Any], dict[str, Any]], Awaitable[None]]
-type RecordFn = Callable[..., Awaitable[str]]
-"""Persists one successful search and its audit row; returns the ``wr_`` research ID
-(:meth:`partex.storage.RunStore.add_web_research` bound to the session's run)."""
+
+
+class RecordFn(Protocol):
+    """Persists one successful search and its audit row; returns the ``wr_`` research ID
+    (:meth:`partex.storage.RunStore.add_web_research` bound to the session's run)."""
+
+    def __call__(
+        self,
+        *,
+        query: str,
+        provider: str,
+        model: str,
+        auth_mode: str,
+        answer: str,
+        sources: Sequence[dict[str, Any]],
+        truncated: bool,
+        audit_args: Any,
+        sources_total: int | None = None,
+    ) -> Awaitable[str]: ...
+
 
 _PARTEX_ID_RE = re.compile(r'\b(?:ev|fn)_[A-Za-z0-9_-]+\b')
 _URL_RE = re.compile(r'[a-zA-Z][a-zA-Z0-9+.-]*://\S+')
@@ -252,7 +277,11 @@ class WebSearcher:
                 await audit('web_search', self._base_audit_args(cleaned), {'error': str(exc)})
                 raise ToolFailed(f'web search failed: {exc}') from exc
 
-            sources = extract_sources(result.new_messages())
+            all_sources = extract_sources(result.new_messages())
+            sources = all_sources[:SEARCH_MAX_SOURCES]
+            sources_extra: dict[str, int] = (
+                {'sources_total': len(all_sources)} if len(all_sources) > SEARCH_MAX_SOURCES else {}
+            )
             answer = result.output
             truncated = len(answer) > SEARCH_RESULT_MAX_CHARS
             bounded_answer = answer[:SEARCH_RESULT_MAX_CHARS]
@@ -262,26 +291,45 @@ class WebSearcher:
                 'answer': bounded_answer,
                 'sources': sources,
                 'truncated': truncated,
+                **sources_extra,
             }
             # Never write search result bodies into tool_calls; record query, provider/auth, source URLs, truncated.
+            audit_result: dict[str, Any] = {
+                'sources': [source['url'] for source in sources],
+                'truncated': truncated,
+                **sources_extra,
+            }
             if record is None:
-                await audit(
-                    'web_search',
-                    self._base_audit_args(cleaned),
-                    {'sources': [source['url'] for source in sources], 'truncated': truncated},
-                )
+                await audit('web_search', self._base_audit_args(cleaned), audit_result)
             else:
-                payload['research_id'] = await record(
-                    query=cleaned,
-                    provider=self.config.provider,
-                    model=self.config.spec,
-                    auth_mode=self.config.auth_mode,
-                    answer=bounded_answer,
-                    sources=sources,
-                    truncated=truncated,
-                    audit_args=self._base_audit_args(cleaned),
-                )
-                span.set_attribute('research_id', payload['research_id'])
+                try:
+                    payload['research_id'] = await record(
+                        query=cleaned,
+                        provider=self.config.provider,
+                        model=self.config.spec,
+                        auth_mode=self.config.auth_mode,
+                        answer=bounded_answer,
+                        sources=sources,
+                        truncated=truncated,
+                        audit_args=self._base_audit_args(cleaned),
+                        sources_total=sources_extra.get('sources_total'),
+                    )
+                    span.set_attribute('research_id', payload['research_id'])
+                except (PartexError, sqlite3.Error, OSError) as exc:
+                    # The query was sent and counted: keep its audit row even though the research row did not save.
+                    # The result is still returned (it was paid for), just without a research_id to look up later.
+                    span.set_attribute('record_failed', True)
+                    try:
+                        await audit(
+                            'web_search', self._base_audit_args(cleaned), {**audit_result, 'error': 'record-failed'}
+                        )
+                    except (PartexError, sqlite3.Error, OSError) as audit_exc:
+                        raise ToolFailed(
+                            'web search ran but neither its research row nor its audit row could be saved'
+                        ) from audit_exc
+                    payload['research_id'] = None
+                    payload['note'] = f'result not saved: {type(exc).__name__}; it cannot be looked up later'
             span.set_attribute('source_count', len(sources))
+            span.set_attribute('sources_total', len(all_sources))
             span.set_attribute('truncated', truncated)
             return frame_untrusted('web_search', payload)
