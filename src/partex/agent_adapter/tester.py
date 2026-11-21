@@ -29,6 +29,7 @@ from pydantic_ai_harness.code_mode import CodeMode, CodeModeResourceLimits
 from pydantic_monty import MountDir
 
 from ..checks.js_analysis import discover_js_urls
+from ..checks.version_disclosure import ERROR_PAGE_RISK
 from ..engine import CheckFailed, CheckSelectionError, LiveSession
 from ..errors import BudgetExhausted, PartexError, ScopeViolation
 from ..models import REDACTED, ArtifactEvidence, Finding, HttpEvidence, redact
@@ -38,6 +39,9 @@ from .tools import BRIEFING_TAG, REVIEWER_TOOLS, ReviewDeps, frame_untrusted
 
 SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS'})
 """Methods the agent may send without operator approval (the only ones in this slice)."""
+
+RULE_OWNERS = {ERROR_PAGE_RISK: 'version-disclosure'}
+"""Rule/risk IDs the model mistakes for check IDs, mapped to the check that reports them (#125)."""
 
 MODEL_BODY_CHARS = 8_000
 """Response body characters returned to the model per request; the stored evidence keeps the capped body."""
@@ -258,6 +262,11 @@ async def run_check(ctx: RunContext[TesterDeps], check_id: str) -> str:
     try:
         findings = await session.run_check(check_id)
     except CheckSelectionError as exc:
+        owner = RULE_OWNERS.get(check_id.strip())
+        if owner and exc.rule_code == 'unknown-check':
+            raise ModelRetry(
+                f'{check_id!r} is a rule reported by the {owner} check, not a check ID; run {owner}.'
+            ) from exc
         raise ModelRetry(str(exc)) from exc
     except BudgetExhausted as exc:
         await _audit(ctx, 'run_check', {'check_id': check_id}, {'refused': 'budget'})
