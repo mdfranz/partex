@@ -32,6 +32,7 @@ The built-in executable checks are `header-security`, `js-analysis`, and `versio
 | `list_runs`, `list_findings`, `get_finding`, `list_evidence`, `lookup_evidence`, `list_coverage` | Inspect saved runs, findings, evidence, and check coverage. |
 | `http_request`, `download_asset`, `discover_js_assets`, `run_check` | Make scoped requests, save assets, find JavaScript files, and run installed checks during a live session. |
 | `run_code`, `save_report` | Analyze evidence and downloaded artifacts in the Monty sandbox, or save a report from the live session. |
+| `web_search` | Optional. Look up public references through a separate `anthropic:`, `google:`, or `google-cloud:` model's native web search (`--search-model`, or `-S` in `partex.sh`). Queries leave this machine. |
 
 The live terminal includes a built-in CLAI2 plugin for operator commands. `/scope` shows the current scope and requires operator confirmation for changes. `/report` writes a redacted Markdown report, and `/secrets` writes secret values to a private file.
 

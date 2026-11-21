@@ -54,7 +54,7 @@ type InputKind = Literal['bundle', 'engagement']
 type FindingStatus = Literal['reported', 'verified', 'verification_failed']
 type SurfaceKind = Literal['host', 'endpoint', 'parameter', 'role', 'tech_banner']
 type SurfaceRel = Literal['exposes_endpoint', 'accepts_param', 'authenticated_as', 'redirects_to']
-type LlmRole = Literal['tester', 'verifier', 'summarizer', 'reviewer', 'judge']
+type LlmRole = Literal['tester', 'verifier', 'summarizer', 'reviewer', 'judge', 'search']
 
 # Run states only move forward (§6). ``checks_complete -> complete`` happens when a summary lands.
 _TRANSITIONS: dict[str, frozenset[str]] = {

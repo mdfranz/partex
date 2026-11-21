@@ -27,9 +27,12 @@ max_tool_calls=50, resource_limits=...)`. The model gets one `run_code` tool who
 with no network, shell, env, clock, or filesystem beyond the read-only `/artifacts` mount; `import socket`
 and `import subprocess` fail and a write to the mount raises `PermissionError`. Only the pure read tools
 (`list_runs`, `list_findings`, `get_finding`, `list_evidence`, `list_coverage`, `lookup_evidence`) are wrapped, so
-they are callable *only* from `run_code`. `http_request`, `download_asset`, `discover_js_assets` and `run_check`
-stay direct tool calls: scope, rate limit, budget and audit apply exactly as before, and a snippet that names
-one gets an undefined-name error. Downloads are stored per run (`<db>.artifacts/<run_id>/`) and only the
+they are callable *only* from `run_code`. `http_request`, `download_asset`, `discover_js_assets`, `run_check`, and
+(when `--search-model` is set) `web_search` stay direct tool calls: scope, rate limit, budget, egress rules, and
+audit apply exactly as before, and a snippet that names one gets an undefined-name error. When `--search-model` is
+configured (`anthropic:`, `google:` API key, or `google-cloud:` ADC; never Gateway), `web_search` runs in a
+separate one-shot agent with `WebSearch(local=None)` (provider-native search only — partex opens no host socket)
+and zero function tools, deps, or filesystem/DB access. Downloads are stored per run (`<db>.artifacts/<run_id>/`) and only the
 current run's directory is mounted, so earlier runs' files (possibly from other targets) stay invisible. Wrapped calls still write their `tool_calls` audit rows. CLAI2's
 `run.code_mode` stays off and `coder` stays unloaded. State is fresh per session.
 
