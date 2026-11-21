@@ -75,7 +75,11 @@ async def _seed(store: RunStore, evidence: list[Evidence], findings: list[Findin
 
 
 @pytest.fixture
-async def seeded(tmp_path: Path) -> AsyncIterator[tuple[RunReader, str, str, HttpEvidence, HttpEvidence, Finding]]:
+async def seeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[RunReader, str, str, HttpEvidence, HttpEvidence, Finding]]:
+    monkeypatch.delenv('PARTEX_STATE_DIR', raising=False)
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path / 'state'))
     db = tmp_path / 'partex.db'
     mine = _http('/', body=f'banner page {INJECTION}', secret=True)
     other = _http('/other-run-only')
@@ -251,7 +255,9 @@ async def test_saved_report_tools_frame_content_and_audit_metadata(
 
 
 async def test_run_chat_hands_clai2_the_reviewer_with_plugins_off(
-    seeded: tuple[RunReader, str, str, HttpEvidence, HttpEvidence, Finding], monkeypatch: pytest.MonkeyPatch
+    seeded: tuple[RunReader, str, str, HttpEvidence, HttpEvidence, Finding],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     import partex.agent_adapter
     from partex.agent_adapter import run_chat
@@ -262,10 +268,12 @@ async def test_run_chat_hands_clai2_the_reviewer_with_plugins_off(
     async def fake_chat(agent: Agent[ReviewDeps, str], **kwargs: Any) -> None:
         calls.append({'agent': agent, **kwargs})
 
+    monkeypatch.setenv('PARTEX_STATE_DIR', str(tmp_path / 'custom state'))
     monkeypatch.setattr(partex.agent_adapter, 'chat', fake_chat)
     await run_chat(run_id, reader.path, TestModel())
     (call,) = calls
     assert call['load_plugins'] is False
+    assert call['store'].path == tmp_path / 'custom state' / 'clai2' / 'config.db'
     # Saved CLAI2 preferences can't swap the model or fold tools into a run_code sandbox.
     assert (call['settings'].model, call['settings'].code_mode, call['settings'].speculative_code_mode) == (
         None,

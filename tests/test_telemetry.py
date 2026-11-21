@@ -17,13 +17,20 @@ def test_default_path_is_under_the_state_dir_for_logged_commands(tmp_path: Path)
     assert path.name.startswith('agent-') and path.suffix == '.jsonl'
 
 
+def test_default_log_uses_the_state_override(tmp_path: Path) -> None:
+    state = tmp_path / 'custom state'
+    env = {'PARTEX_STATE_DIR': str(state), 'XDG_STATE_HOME': str(tmp_path / 'xdg')}
+    path = resolve_log_path('agent', None, env)
+    assert path is not None and path.parent == state / 'logs'
+
+
 @pytest.mark.parametrize('command', ['runs', 'show', 'report', 'checks'])
 def test_read_only_commands_do_not_log_by_default(command: str, tmp_path: Path) -> None:
     assert resolve_log_path(command, None, {'XDG_STATE_HOME': str(tmp_path)}) is None
 
 
 def test_flag_beats_env_and_off_disables(tmp_path: Path) -> None:
-    env = {'PARTEX_LOG_FILE': str(tmp_path / 'env.jsonl')}
+    env = {'PARTEX_LOG_FILE': str(tmp_path / 'env.jsonl'), 'PARTEX_STATE_DIR': str(tmp_path / 'state')}
     assert resolve_log_path('agent', str(tmp_path / 'flag.jsonl'), env) == tmp_path / 'flag.jsonl'
     assert resolve_log_path('agent', None, env) == tmp_path / 'env.jsonl'
     assert resolve_log_path('agent', 'off', env) is None

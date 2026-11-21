@@ -665,10 +665,15 @@ crash); `130` interrupted.
 
 ## 7. Storage and export
 
-Single SQLite file, stdlib `sqlite3`, WAL mode. Default path: `$XDG_DATA_HOME/partex/partex.db`
-(fallback `~/.local/share/partex/`), overridable with `--db PATH` / `PARTEX_DB`. One
-operator, one machine: work runs on local workers inside one process (§7.1). The database must
-live on a local filesystem (WAL is unreliable on network mounts); documented, not detected.
+Single SQLite file, stdlib `sqlite3`, WAL mode. The CLI and launcher use `PARTEX_STATE_DIR`
+as the state directory when set, resolving relative values from the caller's working directory.
+The default state directory is `$XDG_STATE_HOME/partex` (fallback `~/.local/state/partex`). The
+database path defaults to `partex.db` within that directory and can be overridden with `--db PATH`
+or `PARTEX_DB`. The database's artifacts, saved reports, and operator exports live beside it.
+Local traces and read-only chat history use `logs/` and `clai2/` in the Partex state directory.
+One operator, one machine: work runs on local workers inside one process (§7.1).
+The database must live on a local filesystem (WAL is unreliable on network mounts); documented,
+not detected.
 
 ### 7.1 Local workers and the single-writer rule
 
@@ -1140,7 +1145,7 @@ async def summarize_run(run_id: str, store: RunStore, model: Model | str) -> Rev
   external telemetry sockets.
 - **Local trace log by default**: `review`, `test`, `verify`, `chat` and `agent` also write every
   span (model turns, tool calls, scope refusals) as JSONL to
-  `$XDG_STATE_HOME/partex/logs/<command>-<UTC>-<pid>.jsonl` (mode `0600`), via
+  `logs/<command>-<UTC>-<pid>.jsonl` within the Partex state directory (mode `0600`), via
   `telemetry.configure_telemetry` with `send_to_logfire=False` unless `--logfire` is set. This
   does not change the no-network rule above. `--log-file PATH` overrides the path, `--log-file off`
   (or `PARTEX_LOG_FILE=off`, which the test suite sets) disables it, and listing/export commands
@@ -1311,7 +1316,7 @@ client-issued ones.
   hermetic by construction; the fixture target app binds `127.0.0.1` only.
 - **Model blocking**: agents build with `defer_model_check=True`, and a session fixture fails
   any model execution that is not `TestModel`/`FunctionModel` injected via `agent.override()`.
-- **Isolation**: fresh temporary SQLite store per test; no test touches `$XDG_DATA_HOME`; no
+- **Isolation**: fresh temporary SQLite store per test; no test touches the operator's state directory; no
   test needs real credentials (fixture engagement credentials point at dummy env vars set by
   the fixture).
 - **Priority**: integration over unit — full `run_review`/`run_test` calls with test models,
@@ -1414,7 +1419,7 @@ No §13 experiment is recorded as passed here until its gate has evidence.
 ## 18. Defaults
 
 One local operator, one machine, authorized engagements only, and a credential-free validation
-suite against a local fixture target. SQLite (WAL) in the user data directory, checks on
+suite against a local fixture target. SQLite (WAL) in the user state directory, checks on
 in-process local workers, the engine as the only writer, and the target client as the only
 network door with scope enforced inside it. `review` and `test` are model-free by default
 (the default for CI); `summarize`, `agent`, and `chat` require an explicit `--model`. Passive review of
