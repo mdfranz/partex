@@ -238,6 +238,7 @@ class StoreError(PartexError):
     - ``run-not-found`` / ``finding-not-found``: unknown ID for this store
     - ``run-state``: an illegal run state transition
     - ``dangling-evidence``: a finding or verification references evidence the run doesn't have
+    - ``store-integrity``: a write violated a database constraint (for example a duplicate finding ID)
     """
 
 
@@ -497,15 +498,30 @@ class _Connection:
 
 
 def _transaction[T](conn: sqlite3.Connection, fn: Callable[[sqlite3.Connection], T]) -> T:
-    """Run *fn* inside ``BEGIN IMMEDIATE`` … ``COMMIT``, rolling back on any error."""
+    """Run *fn* inside ``BEGIN IMMEDIATE`` … ``COMMIT``, rolling back on any error.
+
+    A constraint violation surfaces as :class:`StoreError` (``store-integrity``), not a raw
+    ``sqlite3.IntegrityError``. If ``ROLLBACK`` itself fails, the original error is still the one raised (#40).
+    """
     conn.execute('BEGIN IMMEDIATE')
     try:
         result = fn(conn)
-    except BaseException:
-        conn.execute('ROLLBACK')
+    except sqlite3.IntegrityError as exc:
+        _rollback(conn, exc)
+        raise StoreError(f'write violated a database constraint: {exc}', rule_code='store-integrity') from exc
+    except BaseException as exc:
+        _rollback(conn, exc)
         raise
     conn.execute('COMMIT')
     return result
+
+
+def _rollback(conn: sqlite3.Connection, original: BaseException) -> None:
+    """Roll back, keeping *original* as the error that propagates; a rollback failure is attached as a note."""
+    try:
+        conn.execute('ROLLBACK')
+    except sqlite3.Error as rollback_exc:
+        original.add_note(f'ROLLBACK also failed: {rollback_exc!r}')
 
 
 def _apply_pragmas(conn: sqlite3.Connection, busy_timeout_ms: int) -> None:
@@ -987,9 +1003,21 @@ class RunStore(_Reads):
 
     # ── live: per-capture evidence, per-check findings (§6.1) ──
 
-    async def add_evidence(self, run_id: str, item: Evidence) -> bool:
-        """Persist one captured exchange in its own transaction. Returns ``False`` if already stored."""
-        return await self._db.run(lambda conn: _transaction(conn, lambda c: _insert_evidence(c, run_id, item)))
+    async def add_evidence(self, run_id: str, item: Evidence, *, count_request: bool = False) -> bool:
+        """Persist one captured exchange in its own transaction. Returns ``False`` if already stored.
+
+        With *count_request*, the request that produced it is added to ``requests_spent`` in the **same**
+        transaction, so a crash can never leave a stored exchange uncounted or a counted one unstored (#40).
+        The request counts even when the exchange was already stored (content-addressed): it was still sent.
+        """
+
+        def write(conn: sqlite3.Connection) -> bool:
+            inserted = _insert_evidence(conn, run_id, item)
+            if count_request:
+                conn.execute('UPDATE runs SET requests_spent = requests_spent + 1 WHERE id = ?', (run_id,))
+            return inserted
+
+        return await self._db.run(lambda conn: _transaction(conn, write))
 
     async def commit_findings(self, run_id: str, findings: Sequence[Finding]) -> None:
         """Persist one check's findings; every referenced evidence ID must already be stored."""
