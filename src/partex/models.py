@@ -295,6 +295,8 @@ class Scope(BaseModel):
     hosts: list[str] = Field(min_length=1)
     path_prefixes: list[str] = Field(default_factory=list)
     exclusions: list[str] = Field(default_factory=list)
+    urls: list[str] = Field(default_factory=list, exclude_if=lambda urls: not urls)
+    """Exact URL allowlist (#121); empty means no URL-level restriction. Left out of dumps while empty."""
     ports: Annotated[list[int], Field(default_factory=list)]
     max_rps: Annotated[int, Field(gt=0)] = 5
     max_requests: Annotated[int, Field(gt=0)] = 2000

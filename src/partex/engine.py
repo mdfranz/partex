@@ -48,7 +48,7 @@ from .models import (
     TlsPolicy,
 )
 from .probes import SeedPlan, plan_seed_probes
-from .scope import extend_scope
+from .scope import apply_urls, check_url, extend_scope, parse_urls_file
 from .storage import RunState, RunStore, run_artifact_dir
 from .target import DEFAULT_MAX_ASSET_BYTES, ScopedHttpClient
 
@@ -430,7 +430,26 @@ async def _record_tls_policy(store: RunStore, run_id: str, engagement: Engagemen
     print(f'partex: warning: TLS certificate verification is DISABLED for {", ".join(hosts)}', file=sys.stderr)
 
 
-async def _check_live_gates(engagement_path: str | Path, *, authorized: bool, insecure: bool = False) -> Engagement:
+def _apply_urls_file(engagement: Engagement, urls_file: str | Path) -> Engagement:
+    """``--urls-file`` restricts scope to the exact URLs listed; the target's ``base_url`` must be one of them (#121)."""
+    try:
+        urls = parse_urls_file(Path(urls_file).read_text(encoding='utf-8'))
+        scope = apply_urls(engagement.scope, urls)
+        check_url(scope, engagement.target.base_url)
+    except OSError as exc:
+        raise _GateRefused(f'cannot read URLs file {urls_file}: {exc}', rule_code='scope-invalid') from exc
+    except ScopeViolation as exc:
+        raise _GateRefused(f'URLs file {urls_file}: {exc}', rule_code='scope-invalid') from exc
+    return engagement.model_copy(update={'scope': scope})
+
+
+async def _check_live_gates(
+    engagement_path: str | Path,
+    *,
+    authorized: bool,
+    insecure: bool = False,
+    urls_file: str | Path | None = None,
+) -> Engagement:
     """The live gates, all before any socket: ``--authorized`` (E2 CLI half), E1–E7, credentials present."""
     if not authorized:
         raise _GateRefused('--authorized is required for every live command', rule_code='unauthorized')
@@ -441,6 +460,8 @@ async def _check_live_gates(engagement_path: str | Path, *, authorized: bool, in
     missing = check_credentials_available(engagement)
     if missing:
         raise _GateRefused(f'credential env vars not set: {", ".join(missing)}', rule_code='credential-missing')
+    if urls_file is not None:
+        engagement = await anyio.to_thread.run_sync(_apply_urls_file, engagement, urls_file)
     return _apply_insecure(engagement, insecure)
 
 
@@ -451,6 +472,7 @@ async def run_test(
     *,
     authorized: bool,
     insecure: bool = False,
+    urls_file: str | Path | None = None,
     registry: Mapping[str, Any] | None = None,
     seed_bundle: str | Path | None = None,
     max_seed: int | None = None,
@@ -484,7 +506,9 @@ async def run_test(
         return TestResult(run_id, 'invalid', selected_ids, error=message, rule_code=rule_code)
 
     try:
-        engagement = await _check_live_gates(engagement_path, authorized=authorized, insecure=insecure)
+        engagement = await _check_live_gates(
+            engagement_path, authorized=authorized, insecure=insecure, urls_file=urls_file
+        )
     except _GateRefused as exc:
         return await invalid(exc.rule_code or 'engagement-invalid', str(exc))
 
@@ -761,6 +785,7 @@ async def live_session(
     *,
     authorized: bool,
     insecure: bool = False,
+    urls_file: str | Path | None = None,
     checks: Sequence[str] = (),
     registry: Mapping[str, Any] | None = None,
 ) -> AsyncGenerator[LiveSession]:
@@ -775,7 +800,9 @@ async def live_session(
     selected = select_live_checks(registry, checks) if checks else []
     selected_ids = tuple(check.check_id for check in selected)
     try:
-        engagement = await _check_live_gates(engagement_path, authorized=authorized, insecure=insecure)
+        engagement = await _check_live_gates(
+            engagement_path, authorized=authorized, insecure=insecure, urls_file=urls_file
+        )
     except _GateRefused as exc:
         run_id = await store.create_run(
             input_kind='engagement',

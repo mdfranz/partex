@@ -52,3 +52,16 @@ def test_list_finds_its_helper_however_it_is_invoked(how: str, tmp_path: Path) -
     result = _run_list(cwd, script, db, stubs)
     assert result.returncode == 0, result.stderr
     assert 'run_' + 'a' * 32 in result.stdout and 'app.test' in result.stdout
+
+
+def test_urls_file_must_exist_before_any_traffic(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ['bash', str(SCRIPT), '-a', 'test attestation', '-u', str(tmp_path / 'missing.txt'), 'http://127.0.0.1:9/'],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 1
+    assert 'URLs file not found' in result.stderr

@@ -42,6 +42,10 @@ SKILL_DIR_ARGS: dict[str, Any] = {
     'metavar': 'DIR',
     'help': 'extra skill root offered to the model as on-demand playbooks (data only; repeatable)',
 }
+URLS_FILE_HELP = (
+    'file of authorized URLs, one per line (# comments; a trailing /* allows a path prefix). Only these URLs can be '
+    'requested, and target.base_url must be listed (#121)'
+)
 INSECURE_HELP = (
     'accept invalid TLS certificates (self-signed, expired, hostname mismatch) for this run; also '
     'engagement tls.verify=false. Recorded on the run, never available to the model'
@@ -173,6 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument('engagement', help='engagement directory or engagement.json path')
     test.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
     test.add_argument('--insecure', action='store_true', help=INSECURE_HELP)
+    test.add_argument('--urls-file', default=None, help=URLS_FILE_HELP)
     test_selection = test.add_mutually_exclusive_group()
     test_selection.add_argument(
         '--checks',
@@ -278,6 +283,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument('engagement', help='engagement directory or engagement.json path')
     agent.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
     agent.add_argument('--insecure', action='store_true', help=INSECURE_HELP)
+    agent.add_argument('--urls-file', default=None, help=URLS_FILE_HELP)
     agent.add_argument(
         '--model', required=True, help='as for chat: a model string, or a bare name with --gateway-route'
     )
@@ -394,6 +400,7 @@ def _cmd_test(args: argparse.Namespace) -> int:
                 checks,
                 authorized=bool(args.authorized),
                 insecure=bool(args.insecure),
+                urls_file=args.urls_file,
                 seed_bundle=args.bundle,
                 max_seed=args.max_seed,
             )
@@ -717,6 +724,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             model,
             authorized=bool(args.authorized),
             insecure=bool(args.insecure),
+            urls_file=Path(args.urls_file) if args.urls_file is not None else None,
             checks=checks,
             from_run=args.from_run,
             bundle=bundle,

@@ -254,6 +254,28 @@ def _path_allowed(scope: Scope, path: str) -> bool:
     return any(path_under(path, prefix) for prefix in scope.path_prefixes)
 
 
+_PREFIX_SUFFIX = '/*'
+
+
+def _entry_url(entry: str) -> str:
+    """The plain URL of an allowlist *entry*: a trailing ``/*`` (prefix marker) is dropped."""
+    return entry.removesuffix(_PREFIX_SUFFIX) or '/' if entry.endswith(_PREFIX_SUFFIX) else entry
+
+
+def _url_entry_matches(entry: str, view: ScopedUrl) -> bool:
+    """Whether the allowlist *entry* covers *view*: same host and port, and every path interpretation matches.
+
+    ``<url>`` matches that exact path only; ``<url>/*`` matches the path and everything under it (on a
+    segment boundary). Scheme and query string are not compared (the port already pins http vs https).
+    """
+    parsed = parse_scoped_url(_entry_url(entry))
+    if parsed.host != view.host or parsed.port != view.port:
+        return False
+    if entry.endswith(_PREFIX_SUFFIX):
+        return all(path_under(path, parsed.path) for path in view.candidate_paths)
+    return view.candidate_paths <= parsed.candidate_paths
+
+
 def check_url(scope: Scope, url: str) -> None:
     """Refuse *url* unless every interpretation of it lies inside *scope*.
 
@@ -272,6 +294,8 @@ def check_url(scope: Scope, url: str) -> None:
     for path in view.candidate_paths:
         if not _path_allowed(scope, path):
             raise ScopeViolation(f'path {path!r} matches no allowed prefix or an exclusion', rule_code='scope-invalid')
+    if scope.urls and not any(_url_entry_matches(entry, view) for entry in scope.urls):
+        raise ScopeViolation('URL is not in the authorized URL list', rule_code='scope-invalid')
 
 
 def validate_scope(scope: Scope) -> list[str]:
@@ -291,6 +315,11 @@ def validate_scope(scope: Scope) -> list[str]:
         for entry in getattr(scope, field_name):
             if not entry or not entry.startswith('/'):
                 problems.append(f'{field_name} entry {entry!r} must be an absolute path')
+    for entry in scope.urls:
+        try:
+            parse_scoped_url(_entry_url(entry))
+        except ScopeViolation as exc:
+            problems.append(f'urls entry {entry!r}: {exc}')
     for exclusion in scope.exclusions:
         if scope.path_prefixes and not any(path_under(exclusion, p) for p in scope.path_prefixes):
             problems.append(f'exclusion {exclusion!r} is not within any path prefix')
@@ -334,3 +363,37 @@ def extend_scope(scope: Scope, spec: str) -> Scope:
     if problems := validate_scope(extended):
         raise ScopeViolation(f'extended scope is invalid: {"; ".join(problems)}', rule_code='scope-invalid')
     return extended
+
+
+def parse_urls_file(text: str) -> list[str]:
+    """Parse an authorized-URLs file: one URL per line; blank lines and whole-line ``#`` comments are ignored (#121).
+
+    A trailing ``/*`` makes an entry a path prefix. Duplicates collapse, keeping first-seen order. Raises
+    :class:`ScopeViolation` naming the line for anything :func:`parse_scoped_url` refuses, and when the
+    file lists no URL at all (an empty allowlist would silently mean "everything in scope").
+    """
+    urls: list[str] = []
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        try:
+            parse_scoped_url(_entry_url(line))
+        except ScopeViolation as exc:
+            raise ScopeViolation(f'line {number}: {exc}', rule_code='scope-invalid') from exc
+        if line not in urls:
+            urls.append(line)
+    if not urls:
+        raise ScopeViolation('authorized URLs file lists no URLs', rule_code='scope-invalid')
+    return urls
+
+
+def apply_urls(scope: Scope, urls: list[str]) -> Scope:
+    """Return *scope* restricted to the exact *urls*; their hosts and ports are added so the other checks agree.
+
+    Hosts and ports are only ever added; path prefixes, exclusions and budgets are unchanged.
+    """
+    extended = scope
+    for url in urls:
+        extended = extend_scope(extended, _entry_url(url))
+    return extended.model_copy(update={'urls': urls})

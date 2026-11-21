@@ -339,6 +339,14 @@ tool — is validated immediately before send:
    IP) — via httpx2's transport, never hand-rolled sockets.
 3. **Path**: must start with an allowed `path_prefix` and match no `exclusions` prefix
    (exclusions win).
+   **Authorized URL list (#121).** An optional `scope.urls` narrows rule 3 to an exact allowlist: a
+   request must also match an entry on host, effective port, and every path interpretation (exact
+   path, or a path prefix for an entry ending `/*`); the query string and scheme are not compared.
+   Empty (the default) means no URL-level restriction. It is set by `--urls-file` (`partex test`,
+   `partex agent`, `partex.sh -u`): one URL per line, `#` comments, an empty file or a bad line is
+   refused as `scope-invalid` before any socket, the listed hosts and ports are added to
+   `scope.hosts`/`scope.ports`, and `target.base_url` must be listed. Exclusions still win, and unlisted
+   probes (such as a check's `/robots.txt`) are refused by the scope gate rather than failing the run.
 4. **Redirects**: never followed automatically; a redirect response is captured as evidence,
    and the new location is re-validated from rule 1 if the caller chooses to follow it.
 5. **Budgets**: a token-bucket limiter enforces `max_rps`; a run-level counter enforces

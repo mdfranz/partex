@@ -114,6 +114,7 @@ async def run_agent(
     *,
     authorized: bool,
     insecure: bool = False,
+    urls_file: Path | None = None,
     checks: tuple[str, ...] = ('version-disclosure',),
     from_run: str | None = None,
     bundle: Path | None = None,
@@ -137,7 +138,7 @@ async def run_agent(
         if from_run is not None:
             await store.get_run(from_run)  # unknown run → StoreError(run-not-found) before any socket
         async with engine.live_session(
-            engagement_path, store, authorized=authorized, insecure=insecure, checks=checks
+            engagement_path, store, authorized=authorized, insecure=insecure, urls_file=urls_file, checks=checks
         ) as session:
             seed_plan = None
             if seed_bundle is not None:
