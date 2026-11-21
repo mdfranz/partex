@@ -66,7 +66,7 @@ To review that run with a model, resume the latest saved run in read-only chat. 
 ./partex.sh -m openrouter:deepseek/deepseek-v4.1-flash-1017 --resume
 ```
 
-To use Z.ai's GLM-5.3 through Pydantic AI Gateway, set `PYDANTIC_AI_GATEWAY_API_KEY` and select the `doubleword` route:
+To use Z.ai's GLM-5.3 through Pydantic AI Gateway, set `PYDANTIC_AI_GATEWAY_API_KEY` and select the `doubleword` route. If the key's region cannot be inferred or you need a specific endpoint, set `PYDANTIC_AI_GATEWAY_BASE_URL` to the URL from your Gateway Connect page. The launcher accepts a URL that already ends in `/doubleword`.
 
 ```sh
 ./partex.sh -m zai-org/GLM-5.3 -r doubleword --resume
