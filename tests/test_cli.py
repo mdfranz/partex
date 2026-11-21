@@ -135,21 +135,24 @@ def test_reports_cli(capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Pat
 
 
 def test_db_flag_wins(tmp_path: Path) -> None:
-    env = {'PARTEX_DB': '/env/db', 'XDG_DATA_HOME': '/xdg'}
+    env = {'PARTEX_DB': '/env/db', 'PARTEX_STATE_DIR': '/custom-state', 'XDG_STATE_HOME': '/xdg'}
     assert cli.resolve_db_path(str(tmp_path / 'flag.db'), env) == tmp_path / 'flag.db'
 
 
-def test_db_env_beats_xdg() -> None:
-    assert cli.resolve_db_path(None, {'PARTEX_DB': '/env/db', 'XDG_DATA_HOME': '/xdg'}) == Path('/env/db')
+def test_db_env_beats_state_override() -> None:
+    env = {'PARTEX_DB': '/env/db', 'PARTEX_STATE_DIR': '/custom-state', 'XDG_STATE_HOME': '/xdg'}
+    assert cli.resolve_db_path(None, env) == Path('/env/db')
 
 
-def test_db_xdg_data_home() -> None:
-    assert cli.resolve_db_path(None, {'XDG_DATA_HOME': '/xdg'}) == Path('/xdg/partex/partex.db')
+def test_db_xdg_state_home() -> None:
+    env = {'XDG_STATE_HOME': '/state', 'XDG_DATA_HOME': '/old-data'}
+    assert cli.resolve_db_path(None, env) == Path('/state/partex/partex.db')
 
 
-def test_db_home_fallback_creates_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize('env', [{}, {'XDG_STATE_HOME': ''}, {'XDG_STATE_HOME': 'relative'}])
+def test_db_home_fallback_creates_nothing(env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(Path, 'home', lambda: tmp_path)
-    assert cli.resolve_db_path(None, {}) == tmp_path / '.local' / 'share' / 'partex' / 'partex.db'
+    assert cli.resolve_db_path(None, env) == tmp_path / '.local' / 'state' / 'partex' / 'partex.db'
     assert not (tmp_path / '.local').exists()
 
 
@@ -161,6 +164,36 @@ def test_db_env_used_by_commands(
     code, _, _ = run(capsys, 'review', str(VALID_BUNDLE), '--all')
     assert code == cli.EXIT_FINDINGS
     assert db_path.is_file()
+
+
+@pytest.mark.parametrize('override', [False, True])
+def test_state_db_is_shared_by_cli_readers_and_writers(
+    override: bool, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv('PARTEX_DB', raising=False)
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path / 'xdg'))
+    if override:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv('PARTEX_STATE_DIR', 'custom state')
+        state = tmp_path / 'custom state'
+    else:
+        monkeypatch.delenv('PARTEX_STATE_DIR', raising=False)
+        state = tmp_path / 'xdg' / 'partex'
+    db = state / 'partex.db'
+
+    code, out, _ = run(capsys, 'review', str(VALID_BUNDLE), '--all')
+    assert code == cli.EXIT_FINDINGS
+    run_id = json.loads(out)['run_id']
+    assert db.is_file()
+
+    code, out, _ = run(capsys, 'runs')
+    assert code == cli.EXIT_OK
+    assert [row['id'] for row in json.loads(out)] == [run_id]
+
+    write_report(run_reports_dir(db, run_id), 'summary', '# Summary\n')
+    code, out, _ = run(capsys, 'reports', run_id, 'summary')
+    assert code == cli.EXIT_OK
+    assert out == '# Summary\n'
 
 
 # ── review ────────────────────────────────────────────────────────────────────

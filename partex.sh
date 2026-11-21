@@ -14,7 +14,8 @@
 #   -S, --search-model NAME  optional separate model for web_search [PARTEX_SEARCH_MODEL]: anthropic:<name>,
 #                            google:<name> (API key), google-cloud:<name> (ADC), or openai:<name>; off unless set. Queries
 #                            leave this machine and never go through the Gateway.
-#   -d, --db PATH            database [PARTEX_DB, default ./partex-probe.db]
+#   -d, --db PATH            database [PARTEX_DB, default partex.db in the state directory]
+#                            Set PARTEX_STATE_DIR to override the state directory for all local files.
 #   -f, --from RUN_ID        let the new session read an earlier run [RUN_ID]
 #       --resume [RUN_ID]    read-only chat on an earlier run, no traffic and no target URL needed; the
 #                            latest run if RUN_ID is omitted [CHAT_ONLY=1, RUN_ID]
@@ -46,7 +47,7 @@ MODEL=${PARTEX_MODEL:-zai-org/GLM-5.3}
 ROUTE=${PARTEX_GATEWAY_ROUTE-doubleword}
 ROUTE_SET=${PARTEX_GATEWAY_ROUTE+1}
 SEARCH_MODEL=${PARTEX_SEARCH_MODEL:-}
-DB=${PARTEX_DB:-partex-probe.db}
+DB=${PARTEX_DB:-}
 ATTESTATION=${PARTEX_ATTESTATION:-}
 URLS_FILE=${PARTEX_URLS_FILE:-}
 RECURSIVE=${PARTEX_RECURSIVE:+1}
@@ -85,6 +86,19 @@ for _n in MAX_REQUESTS MAX_RPS; do
   [[ ${!_n} =~ ^[1-9][0-9]*$ ]] || { echo "$_n must be a positive integer, got: ${!_n}" >&2; exit 2; }
 done
 [[ -n $ROUTE_SET || $MODEL != *:* ]] || ROUTE=  # a full model string is not routed through a Gateway route
+case ${PARTEX_STATE_DIR:-} in
+  ''|/*) ;;
+  *) PARTEX_STATE_DIR=$(pwd -P)/$PARTEX_STATE_DIR
+     export PARTEX_STATE_DIR ;;
+esac
+state_dir=${PARTEX_STATE_DIR:-}
+if [[ -z $state_dir ]]; then  # match partex's default; only absolute XDG base paths are valid
+  case ${XDG_STATE_HOME:-} in
+    /*) state_dir=$XDG_STATE_HOME/partex ;;
+    *) state_dir=~/.local/state/partex ;;
+  esac
+fi
+DB=${DB:-$state_dir/partex.db}
 case $DB in /*) ;; *) DB=$PWD/$DB ;; esac  # absolute, before the cd below (BSD realpath has no -m)
 case $URLS_FILE in ''|/*) ;; *) URLS_FILE=$PWD/$URLS_FILE ;; esac  # likewise
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)  # absolute, resolved before the cd (works from any directory)

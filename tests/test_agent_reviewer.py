@@ -256,7 +256,9 @@ async def test_saved_report_tools_frame_content_and_audit_metadata(
 
 
 async def test_run_chat_hands_clai2_the_reviewer_with_plugins_off(
-    seeded: tuple[RunReader, str, str, HttpEvidence, HttpEvidence, Finding], monkeypatch: pytest.MonkeyPatch
+    seeded: tuple[RunReader, str, str, HttpEvidence, HttpEvidence, Finding],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     import partex.agent_adapter
     from partex.agent_adapter import run_chat
@@ -271,6 +273,7 @@ async def test_run_chat_hands_clai2_the_reviewer_with_plugins_off(
     await run_chat(run_id, reader.path, TestModel())
     (call,) = calls
     assert call['load_plugins'] is False
+    assert call['store'].path == tmp_path / 'partex.db.clai2' / 'config.db'
     # Saved CLAI2 preferences can't swap the model or fold tools into a run_code sandbox.
     assert (call['settings'].model, call['settings'].code_mode, call['settings'].speculative_code_mode) == (
         None,
@@ -279,6 +282,29 @@ async def test_run_chat_hands_clai2_the_reviewer_with_plugins_off(
     )
     assert call['agent'].name == 'partex_reviewer_agent'
     assert call['deps'].run_id == run_id
+
+
+async def test_run_chat_uses_a_separate_history_for_each_database(
+    seeded: tuple[RunReader, str, str, HttpEvidence, HttpEvidence, Finding],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import partex.agent_adapter
+
+    reader, run_id, _, _, _, _ = seeded
+    second_db = tmp_path / 'second.db'
+    async with await RunStore.open(second_db) as store:
+        second_run = await _seed(store, [], [])
+    stores: list[Path] = []
+
+    async def fake_chat(agent: Agent[ReviewDeps, str], **kwargs: Any) -> None:
+        stores.append(kwargs['store'].path)
+
+    monkeypatch.setattr(partex.agent_adapter, 'chat', fake_chat)
+    await partex.agent_adapter.run_chat(run_id, reader.path, TestModel(), briefing=False)
+    await partex.agent_adapter.run_chat(second_run, second_db, TestModel(), briefing=False)
+
+    assert stores == [tmp_path / 'partex.db.clai2' / 'config.db', tmp_path / 'second.db.clai2' / 'config.db']
 
 
 async def test_run_chat_unknown_run_never_opens_the_terminal(

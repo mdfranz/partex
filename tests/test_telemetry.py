@@ -17,13 +17,20 @@ def test_default_path_is_under_the_state_dir_for_logged_commands(tmp_path: Path)
     assert path.name.startswith('agent-') and path.suffix == '.jsonl'
 
 
+def test_default_log_uses_the_state_override(tmp_path: Path) -> None:
+    state = tmp_path / 'custom state'
+    env = {'PARTEX_STATE_DIR': str(state), 'XDG_STATE_HOME': str(tmp_path / 'xdg')}
+    path = resolve_log_path('agent', None, env)
+    assert path is not None and path.parent == state / 'logs'
+
+
 @pytest.mark.parametrize('command', ['runs', 'show', 'report', 'checks'])
 def test_read_only_commands_do_not_log_by_default(command: str, tmp_path: Path) -> None:
     assert resolve_log_path(command, None, {'XDG_STATE_HOME': str(tmp_path)}) is None
 
 
 def test_flag_beats_env_and_off_disables(tmp_path: Path) -> None:
-    env = {'PARTEX_LOG_FILE': str(tmp_path / 'env.jsonl')}
+    env = {'PARTEX_LOG_FILE': str(tmp_path / 'env.jsonl'), 'PARTEX_STATE_DIR': str(tmp_path / 'state')}
     assert resolve_log_path('agent', str(tmp_path / 'flag.jsonl'), env) == tmp_path / 'flag.jsonl'
     assert resolve_log_path('agent', None, env) == tmp_path / 'env.jsonl'
     assert resolve_log_path('agent', 'off', env) is None
@@ -34,7 +41,8 @@ def test_flag_beats_env_and_off_disables(tmp_path: Path) -> None:
 
 
 def test_spans_are_appended_as_jsonl_with_private_mode(tmp_path: Path) -> None:
-    path = tmp_path / 'logs' / 'run.jsonl'
+    state = tmp_path / 'partex'
+    path = state / 'logs' / 'run.jsonl'
     exporter = JsonlSpanExporter(path)
     logfire.configure(send_to_logfire=False, console=False, additional_span_processors=[SimpleSpanProcessor(exporter)])
     with logfire.span('outer', run='r1'):
@@ -45,6 +53,8 @@ def test_spans_are_appended_as_jsonl_with_private_mode(tmp_path: Path) -> None:
     outer = next(line for line in lines if line['name'] == 'outer')
     assert outer['attributes']['run'] == 'r1' and outer['status'] == 'UNSET' and len(outer['trace_id']) == 32
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
 
 
 def test_log_file_is_created_lazily_on_the_first_span(tmp_path: Path) -> None:

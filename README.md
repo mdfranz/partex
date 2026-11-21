@@ -82,15 +82,39 @@ To use Z.ai's GLM-5.3 through Pydantic AI Gateway, set `PYDANTIC_AI_GATEWAY_API_
 
 - `./partex.sh --help` shows options for the interactive testing launcher.
 - `./partex.sh -u urls.txt <target-url>` restricts the session to the URLs in `urls.txt` (one per line, `#` comments, a trailing `/*` allows a path prefix). The target URL is optional with `-u`: the first listed URL is used (an explicit one must be listed). A URL without a port covers both 80 and 443; add `:port` to pin one. Anything unlisted is refused by the scope gate. Add `--recursive` to treat every listed URL as a path prefix, so a file containing `http://foo/` allows everything under `foo`.
-- `./partex.sh list` lists saved runs from the launcher's database.
+- `./partex.sh list` lists saved runs from the default database.
 - `uv run partex --help` lists the available CLI commands.
 
-To inspect a saved run, copy its ID from `./partex.sh list` and substitute it below. The launcher uses `./partex-probe.db` by default.
+To inspect a saved run, copy its ID from `./partex.sh list` and substitute it below.
 
 ```sh
-uv run partex show RUN_ID --db ./partex-probe.db --format text
+uv run partex show RUN_ID --format text
 ```
 
 This prints the saved evidence and findings. To open a particular run in chat, pass its ID after `--resume`.
+
+## Local state
+
+Set `PARTEX_STATE_DIR` to choose a directory for all local Partex state. The CLI and launcher interpret relative values from the directory you run them in.
+
+```sh
+export PARTEX_STATE_DIR="$HOME/partex-state"
+```
+
+Without this override, the CLI and launcher store local state under `$XDG_STATE_HOME/partex`. If `XDG_STATE_HOME` is unset, empty, or relative, they use `~/.local/state/partex`.
+Partex keeps its local run database and history together so a single setting controls where its persistent state goes.
+
+| Path within the state directory | Contents |
+| --- | --- |
+| `partex.db` | Saved runs, evidence, findings, and audit records |
+| `partex.db.artifacts/` | Downloaded artifacts by run |
+| `partex.db.reports/` | Saved Markdown reports by run |
+| `partex.db.exports/` | Operator exports from `/report` and `/secrets` |
+| `logs/` | Local JSONL traces |
+| `partex.db.clai2/` | Read-only chat history and terminal settings for this database |
+
+Use `--db PATH` or `PARTEX_DB` to select a different database. Its artifacts, reports, operator exports, and read-only chat history are stored alongside it. Live `agent` sessions use temporary terminal storage. Use `--log-file PATH` or `PARTEX_LOG_FILE` to select a different trace file. Commands that accept `--out` write to the path you provide.
+
+Existing data stays where it is. To open previous runs, point `--db` at the original database, such as `./partex-probe.db` for the launcher or `${XDG_DATA_HOME:-$HOME/.local/share}/partex/partex.db` for the CLI.
 
 [Design](PLAN.md)

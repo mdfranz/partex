@@ -104,7 +104,17 @@ async def run_chat(
         summary = await brief(model, deps, console) if briefing else None
         await _pause_on(summary, console)
         agent = build_reviewer_agent(model, briefing=summary, skills=skills)
-        await chat(agent, deps=deps, load_plugins=False, console=console, settings=CHAT_SETTINGS)
+        # CLAI2 stores conversations, input history, and telemetry beside its settings database.
+        chat_dir = db_path.with_name(f'{db_path.name}.clai2')
+        chat_dir.mkdir(mode=0o700, exist_ok=True)
+        await chat(
+            agent,
+            deps=deps,
+            load_plugins=False,
+            store=SettingsStore(chat_dir / 'config.db'),
+            console=console,
+            settings=CHAT_SETTINGS,
+        )
 
 
 async def run_agent(

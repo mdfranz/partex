@@ -29,6 +29,7 @@ from .errors import PartexError
 from .export import IncludeSecretsWarning, export_run_data, write_run_export
 from .har_io import export_bundle, import_har
 from .ids import canonical_json
+from .paths import STATE_DIR_ENV, state_dir
 from .probes import seed_summary
 from .registry import build_registry
 from .report import gather_report_payload, render_report_text
@@ -69,7 +70,7 @@ _FATAL_SELECTION_CODES = frozenset({'unknown-check', 'not-passive', 'not-active'
 
 
 def resolve_db_path(cli_value: str | None, env: dict[str, str] | None = None) -> Path:
-    """``--db`` > ``$PARTEX_DB`` > ``$XDG_DATA_HOME/partex/partex.db`` > ``~/.local/share/partex/partex.db``.
+    """``--db`` > ``$PARTEX_DB`` > ``partex.db`` within the Partex state directory.
 
     Pure: never creates directories (the writer creates the parent on open; readers must not).
     """
@@ -78,8 +79,7 @@ def resolve_db_path(cli_value: str | None, env: dict[str, str] | None = None) ->
         return Path(cli_value)
     if environ.get(DB_ENV):
         return Path(environ[DB_ENV])
-    data_home = environ.get('XDG_DATA_HOME') or str(Path.home() / '.local' / 'share')
-    return Path(data_home) / 'partex' / 'partex.db'
+    return state_dir(environ) / 'partex.db'
 
 
 def _wants_json(explicit: bool = False) -> bool:
@@ -169,9 +169,13 @@ def build_parser() -> argparse.ArgumentParser:
         f"'off' disables; or set {LOG_FILE_ENV})",
     )
     with_db = argparse.ArgumentParser(add_help=False, parents=[common])
-    with_db.add_argument('--db', default=None, help=f'database path (default: ${DB_ENV} or the user data dir)')
+    with_db.add_argument('--db', default=None, help=f'database path (default: ${DB_ENV} or partex.db in the state dir)')
 
-    parser = argparse.ArgumentParser(prog='partex', description='Evidence-backed web application security testing.')
+    parser = argparse.ArgumentParser(
+        prog='partex',
+        description='Evidence-backed web application security testing.',
+        epilog=f'Set {STATE_DIR_ENV} to override the directory for local Partex state.',
+    )
     parser.add_argument('--version', action='version', version=f'partex {engine.engine_version()}')
     subparsers = parser.add_subparsers(dest='command', required=True, metavar='COMMAND')
 

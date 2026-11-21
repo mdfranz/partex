@@ -14,10 +14,11 @@ SCRIPT = REPO / 'partex.sh'
 pytestmark = pytest.mark.skipif(shutil.which('bash') is None, reason='bash not available')
 
 
-def _run_list(cwd: Path, script: str, db: Path, stub_dir: Path) -> subprocess.CompletedProcess[str]:
+def _run_list(cwd: Path, script: str, stub_dir: Path, *args: str) -> subprocess.CompletedProcess[str]:
     stub = stub_dir / 'uv'  # `uv run partex runs --json` -> a canned run list; nothing real is executed
     stub.write_text(
         '#!/bin/sh\n'
+        'if [ "$4" = runs ]; then printf "state dir: %s\\n" "${PARTEX_STATE_DIR:-}" >&2; fi\n'
         'echo \'[{"id":"run_' + 'a' * 32 + '","created_at":"2026-11-19T01:02:03+00:00","state":"checks_complete",'
         '"input_kind":"engagement","input_ref":"/tmp/e","findings_count":2,"requests_spent":5,'
         '"model":null,"hosts":["app.test"]}]\'\n'
@@ -25,7 +26,7 @@ def _run_list(cwd: Path, script: str, db: Path, stub_dir: Path) -> subprocess.Co
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
     env = {**os.environ, 'PATH': f'{stub_dir}{os.pathsep}{os.environ["PATH"]}'}
     return subprocess.run(
-        ['bash', script, 'list', '-d', str(db)],
+        ['bash', script, 'list', *args],
         cwd=cwd,
         env=env,
         check=False,
@@ -49,9 +50,54 @@ def test_list_finds_its_helper_however_it_is_invoked(how: str, tmp_path: Path) -
         'relative-from-parent': (REPO.parent, os.path.relpath(SCRIPT, REPO.parent)),
         'relative-from-elsewhere': (elsewhere, os.path.relpath(SCRIPT, elsewhere)),
     }[how]
-    result = _run_list(cwd, script, db, stubs)
+    result = _run_list(cwd, script, stubs, '-d', str(db))
     assert result.returncode == 0, result.stderr
     assert 'run_' + 'a' * 32 in result.stdout and 'app.test' in result.stdout
+
+
+@pytest.mark.parametrize('state_home', ['absolute', 'relative', 'unset'])
+def test_list_uses_the_state_database_by_default(
+    state_home: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv('PARTEX_DB', raising=False)
+    monkeypatch.delenv('PARTEX_STATE_DIR', raising=False)
+    monkeypatch.setenv('HOME', str(tmp_path))
+    state_root = tmp_path / '.local' / 'state'
+    if state_home == 'absolute':
+        state_root = tmp_path / 'xdg state'
+        monkeypatch.setenv('XDG_STATE_HOME', str(state_root))
+    elif state_home == 'relative':
+        monkeypatch.setenv('XDG_STATE_HOME', 'relative-state')
+    else:
+        monkeypatch.delenv('XDG_STATE_HOME', raising=False)
+    db = state_root / 'partex' / 'partex.db'
+    db.parent.mkdir(parents=True)
+    db.touch()
+    stubs = tmp_path / 'stubs'
+    stubs.mkdir()
+
+    result = _run_list(tmp_path, str(SCRIPT), stubs)
+
+    assert result.returncode == 0, result.stderr
+    assert f'1 saved run(s) in {db}' in result.stdout
+
+
+def test_list_passes_a_relative_state_override_to_partex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv('PARTEX_DB', raising=False)
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path / 'xdg'))
+    monkeypatch.setenv('PARTEX_STATE_DIR', 'custom state')
+    state = tmp_path.resolve() / 'custom state'
+    state.mkdir()
+    db = state / 'partex.db'
+    db.touch()
+    stubs = tmp_path / 'stubs'
+    stubs.mkdir()
+
+    result = _run_list(tmp_path, str(SCRIPT), stubs)
+
+    assert result.returncode == 0, result.stderr
+    assert f'1 saved run(s) in {db}' in result.stdout
+    assert result.stderr.strip() == f'state dir: {state}'
 
 
 def test_urls_file_must_exist_before_any_traffic(tmp_path: Path) -> None:

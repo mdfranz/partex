@@ -7,7 +7,7 @@ operator passes ``--logfire``. It is created ``0600`` because spans carry model 
 (already secret-redacted by the tools, but still engagement data).
 
 ``--log-file PATH`` picks the file, ``--log-file off`` (or ``PARTEX_LOG_FILE=off``) disables it, and the
-default is ``$XDG_STATE_HOME/partex/logs/<command>-<UTC time>-<pid>.jsonl``.
+default is ``logs/<command>-<UTC time>-<pid>.jsonl`` within the Partex state directory.
 """
 
 import json
@@ -20,6 +20,8 @@ from typing import Any, TextIO
 
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
+
+from .paths import mkdir_private, state_dir
 
 LOG_FILE_ENV = 'PARTEX_LOG_FILE'
 LOGGED_COMMANDS = frozenset({'review', 'test', 'verify', 'chat', 'agent'})
@@ -37,9 +39,8 @@ def resolve_log_path(command: str, cli_value: str | None, env: Mapping[str, str]
         return None if value.lower() in {'off', 'none', '0', 'false'} else Path(value)
     if command not in LOGGED_COMMANDS:
         return None
-    state_home = environ.get('XDG_STATE_HOME') or str(Path.home() / '.local' / 'state')
     stamp = datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')
-    return Path(state_home) / 'partex' / 'logs' / f'{command}-{stamp}-{os.getpid()}.jsonl'
+    return state_dir(environ) / 'logs' / f'{command}-{stamp}-{os.getpid()}.jsonl'
 
 
 def _iso(nanos: int | None) -> str | None:
@@ -80,7 +81,7 @@ class JsonlSpanExporter(SpanExporter):
 
     def _open(self) -> TextIO:
         if self._file is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            mkdir_private(self.path.parent)
             fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             self._file = os.fdopen(fd, 'a', encoding='utf-8')
         return self._file
