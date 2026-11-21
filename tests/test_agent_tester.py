@@ -1202,3 +1202,12 @@ async def test_run_check_rule_id_names_the_owning_check(tmp_store: RunStore, tmp
         [retried] = tool_returns(result.all_messages())
         assert retried.outcome == 'retried'
         assert 'reported by the version-disclosure check' in str(retried.content)
+
+
+async def test_download_asset_audit_row_records_status(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    """download_asset rows carry the response status and evidence ID, like http_request rows (#126)."""
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        await drive(session, tmp_store, [('download_asset', {'path': '/robots.txt'})])
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert call.tool == 'download_asset'
+        assert call.result['status'] == 200 and call.result['evidence_id'].startswith('ev_')

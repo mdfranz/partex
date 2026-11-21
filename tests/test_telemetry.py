@@ -45,3 +45,11 @@ def test_spans_are_appended_as_jsonl_with_private_mode(tmp_path: Path) -> None:
     outer = next(line for line in lines if line['name'] == 'outer')
     assert outer['attributes']['run'] == 'r1' and outer['status'] == 'UNSET' and len(outer['trace_id']) == 32
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_log_file_is_created_lazily_on_the_first_span(tmp_path: Path) -> None:
+    """A run that exits before emitting any span (usage error, gate refusal) leaves no empty log (#126)."""
+    path = tmp_path / 'logs' / 'early-exit.jsonl'
+    exporter = JsonlSpanExporter(path)
+    exporter.shutdown()
+    assert not path.exists() and not path.parent.exists()
