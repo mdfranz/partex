@@ -1,12 +1,13 @@
 """Hermetic test harness for partex (PLAN §14).
 
-Enforces three session-wide isolation boundaries:
+Enforces four session-wide isolation boundaries:
 1. Network: blocks any IPv4/IPv6 socket connect to a non-loopback address.
 2. Models: disables real provider requests and rejects any model other than
    `TestModel` / `FunctionModel`.
 3. Telemetry: configures Logfire with `send_to_logfire=False`, blocks any attempt
    to re-enable remote telemetry export, and exposes `capfire` (via `logfire.testing`)
    plus `in_memory_span_exporter` for span assertions.
+4. Local storage: points Partex state and XDG state and config at temporary directories.
 
 Later issues add fixture modules under `tests/plugins/` and register them in
 `pytest_plugins` below without modifying the guard fixtures.
@@ -125,6 +126,18 @@ def block_real_models() -> Generator[None]:
         yield
     finally:
         mp.undo()
+
+
+@pytest.fixture(scope='session', autouse=True)
+def isolate_local_storage(tmp_path_factory: pytest.TempPathFactory) -> Generator[None]:
+    """Keep default persistent state and config in a temporary directory for the suite."""
+    root = tmp_path_factory.mktemp('partex-storage')
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv('PARTEX_STATE_DIR', str(root / 'partex'))
+        mp.setenv('XDG_STATE_HOME', str(root / 'xdg-state'))
+        mp.setenv('XDG_CONFIG_HOME', str(root / 'xdg-config'))
+        mp.delenv('PARTEX_DB', raising=False)
+        yield
 
 
 @pytest.fixture(scope='session', autouse=True)

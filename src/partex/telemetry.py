@@ -21,7 +21,7 @@ from typing import Any, TextIO
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
-from .paths import state_dir
+from .paths import mkdir_private, state_dir
 
 LOG_FILE_ENV = 'PARTEX_LOG_FILE'
 LOGGED_COMMANDS = frozenset({'review', 'test', 'verify', 'chat', 'agent'})
@@ -81,7 +81,7 @@ class JsonlSpanExporter(SpanExporter):
 
     def _open(self) -> TextIO:
         if self._file is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            mkdir_private(self.path.parent)
             fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             self._file = os.fdopen(fd, 'a', encoding='utf-8')
         return self._file

@@ -667,13 +667,16 @@ crash); `130` interrupted.
 
 Single SQLite file, stdlib `sqlite3`, WAL mode. The CLI and launcher use `PARTEX_STATE_DIR`
 as the state directory when set, resolving relative values from the caller's working directory.
-The default state directory is `$XDG_STATE_HOME/partex` (fallback `~/.local/state/partex`). The
-database path defaults to `partex.db` within that directory and can be overridden with `--db PATH`
-or `PARTEX_DB`. The database's artifacts, saved reports, and operator exports live beside it.
-Local traces and read-only chat history use `logs/` and `clai2/` in the Partex state directory.
-One operator, one machine: work runs on local workers inside one process (§7.1).
-The database must live on a local filesystem (WAL is unreliable on network mounts); documented,
-not detected.
+The default state directory is `$XDG_STATE_HOME/partex` (fallback `~/.local/state/partex`). This
+keeps the database of local runs and the associated history under one root. The database path
+defaults to `partex.db` within that directory and can be overridden with `--db PATH` or `PARTEX_DB`.
+Artifacts, saved reports, operator exports, and read-only chat history live beside the database.
+Read-only chat uses `<db>.clai2/`, and live `agent` sessions use temporary terminal storage. Trace
+logs default to `logs/` in the state directory. Directories created for the database and trace
+logs use mode `0700`.
+
+One operator runs work on local workers inside one process (§7.1). SQLite WAL requires a local
+filesystem for reliable operation. Partex assumes the database is on one.
 
 ### 7.1 Local workers and the single-writer rule
 
@@ -1316,9 +1319,8 @@ client-issued ones.
   hermetic by construction; the fixture target app binds `127.0.0.1` only.
 - **Model blocking**: agents build with `defer_model_check=True`, and a session fixture fails
   any model execution that is not `TestModel`/`FunctionModel` injected via `agent.override()`.
-- **Isolation**: fresh temporary SQLite store per test; no test touches the operator's state directory; no
-  test needs real credentials (fixture engagement credentials point at dummy env vars set by
-  the fixture).
+- **Isolation** uses fresh temporary SQLite stores. A session fixture points default Partex state
+  and XDG state and config at temporary directories. Engagement fixtures use dummy credentials.
 - **Priority**: integration over unit — full `run_review`/`run_test` calls with test models,
   real SQLite on tmp paths, real cancel scopes, the real fixture app.
 - **Terminal**: headless in CI (`Console(file=StringIO())`); interactive behavior (Esc,

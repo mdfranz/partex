@@ -102,6 +102,7 @@ export PARTEX_STATE_DIR="$HOME/partex-state"
 ```
 
 Without this override, the CLI and launcher store local state under `$XDG_STATE_HOME/partex`. If `XDG_STATE_HOME` is unset, empty, or relative, they use `~/.local/state/partex`.
+Partex keeps its local run database and history together so a single setting controls where its persistent state goes.
 
 | Path within the state directory | Contents |
 | --- | --- |
@@ -110,9 +111,9 @@ Without this override, the CLI and launcher store local state under `$XDG_STATE_
 | `partex.db.reports/` | Saved Markdown reports by run |
 | `partex.db.exports/` | Operator exports from `/report` and `/secrets` |
 | `logs/` | Local JSONL traces |
-| `clai2/` | Read-only chat history and terminal settings |
+| `partex.db.clai2/` | Read-only chat history and terminal settings for this database |
 
-Use `--db PATH` or `PARTEX_DB` to select a different database. Its artifacts, reports, and operator exports are stored alongside it. Use `--log-file PATH` or `PARTEX_LOG_FILE` to select a different trace file. Commands that accept `--out` write to the path you provide.
+Use `--db PATH` or `PARTEX_DB` to select a different database. Its artifacts, reports, operator exports, and read-only chat history are stored alongside it. Live `agent` sessions use temporary terminal storage. Use `--log-file PATH` or `PARTEX_LOG_FILE` to select a different trace file. Commands that accept `--out` write to the path you provide.
 
 Existing data stays where it is. To open previous runs, point `--db` at the original database, such as `./partex-probe.db` for the launcher or `${XDG_DATA_HOME:-$HOME/.local/share}/partex/partex.db` for the CLI.
 

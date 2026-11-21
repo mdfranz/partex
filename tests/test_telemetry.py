@@ -41,7 +41,8 @@ def test_flag_beats_env_and_off_disables(tmp_path: Path) -> None:
 
 
 def test_spans_are_appended_as_jsonl_with_private_mode(tmp_path: Path) -> None:
-    path = tmp_path / 'logs' / 'run.jsonl'
+    state = tmp_path / 'partex'
+    path = state / 'logs' / 'run.jsonl'
     exporter = JsonlSpanExporter(path)
     logfire.configure(send_to_logfire=False, console=False, additional_span_processors=[SimpleSpanProcessor(exporter)])
     with logfire.span('outer', run='r1'):
@@ -52,6 +53,8 @@ def test_spans_are_appended_as_jsonl_with_private_mode(tmp_path: Path) -> None:
     outer = next(line for line in lines if line['name'] == 'outer')
     assert outer['attributes']['run'] == 'r1' and outer['status'] == 'UNSET' and len(outer['trace_id']) == 32
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
 
 
 def test_log_file_is_created_lazily_on_the_first_span(tmp_path: Path) -> None:

@@ -17,3 +17,14 @@ def state_dir(env: Mapping[str, str] | None = None) -> Path:
     if not root.is_absolute():
         root = Path.home() / '.local' / 'state'
     return root / 'partex'
+
+
+def mkdir_private(directory: Path) -> None:
+    """Create missing directories with mode 0700 and preserve existing modes."""
+    try:
+        directory.mkdir(mode=0o700, exist_ok=True)
+    except FileNotFoundError:
+        if directory == directory.parent:
+            raise
+        mkdir_private(directory.parent)
+        directory.mkdir(mode=0o700, exist_ok=True)

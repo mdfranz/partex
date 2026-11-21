@@ -1,6 +1,7 @@
 """Tests for the SQLite RunStore — PLAN §7, §7.1."""
 
 import sqlite3
+import stat
 from contextlib import closing
 from pathlib import Path
 
@@ -135,9 +136,16 @@ async def test_connection_pragmas(tmp_store: RunStore):
     assert pragmas == [1, 1, 5000]  # synchronous=NORMAL is 1
 
 
-async def test_open_creates_parent_directories(tmp_path: Path):
-    async with await RunStore.open(tmp_path / 'deep' / 'er' / 'partex.db') as store:
+async def test_open_creates_private_parent_directories(tmp_path: Path):
+    existing = tmp_path / 'existing'
+    existing.mkdir()
+    existing.chmod(0o755)
+    state = existing / 'deep' / 'er'
+    async with await RunStore.open(state / 'partex.db') as store:
         assert store.path.is_file()
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(existing.stat().st_mode) == 0o755
 
 
 async def test_reopen_keeps_data(tmp_store_path: Path):

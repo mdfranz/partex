@@ -27,7 +27,6 @@ from rich.rule import Rule
 from .. import engine
 from ..bundle import LoadedBundle, load_bundle
 from ..models_config import SearchModelConfig
-from ..paths import state_dir
 from ..probes import plan_seed_probes, plan_summary, seed_lines
 from ..storage import RunReader, RunStore, run_artifact_dir
 from .reviewer import BRIEFING_PROMPT, build_reviewer_agent
@@ -106,8 +105,8 @@ async def run_chat(
         await _pause_on(summary, console)
         agent = build_reviewer_agent(model, briefing=summary, skills=skills)
         # CLAI2 stores conversations, input history, and telemetry beside its settings database.
-        chat_dir = state_dir() / 'clai2'
-        chat_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        chat_dir = db_path.with_name(f'{db_path.name}.clai2')
+        chat_dir.mkdir(mode=0o700, exist_ok=True)
         await chat(
             agent,
             deps=deps,

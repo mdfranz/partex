@@ -47,6 +47,7 @@ from .models import (
     Scope,
     Verification,
 )
+from .paths import mkdir_private
 
 SCHEMA_VERSION = 2  # 2: findings.subject (#39)
 DEFAULT_BUSY_TIMEOUT_MS = 5000
@@ -750,7 +751,7 @@ class RunStore(_Reads):
         db_path = Path(path)
 
         def connect() -> sqlite3.Connection:
-            db_path.parent.mkdir(parents=True, exist_ok=True)
+            mkdir_private(db_path.parent)
             conn = sqlite3.connect(db_path, isolation_level=None, check_same_thread=False)
             try:
                 _apply_pragmas(conn, busy_timeout_ms)
