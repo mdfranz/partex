@@ -6,23 +6,29 @@ collapsing, surface_nodes + coverage_entries persistence, secret/value redaction
 byte-identical export determinism.
 """
 
+import http.server
 import json
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import anyio
 import pytest
 
 from partex import cli
+from partex.bundle import MAX_CONTENT_BYTES
 from partex.checks.api_inventory import (
     CHECK_ID,
     ApiContractConformanceCheck,
     api_contract_conformance_check,
     collapse_path_ids,
 )
-from partex.engine import CheckFailed, run_review
+from partex.engine import CheckFailed, live_session, run_review, run_test
 from partex.export import export_run_json
-from partex.ids import evidence_id
+from partex.har_io import export_bundle
+from partex.ids import evidence_id, sha256_hex
 from partex.models import ConfigEvidence, ConfigExcerpt, HttpEvidence, HttpExchange, HttpRequest, HttpResponse
 from partex.registry import build_registry
 from partex.storage import RunReader, RunStore
@@ -472,3 +478,370 @@ async def test_passive_bad_surface_hook_fails_atomically_publishing_nothing(tmp_
     assert 'unregistered evidence' in (result.error or '')
     assert await tmp_store.evidence(result.run_id) == []
     assert CheckFailed
+
+
+# ── Live OpenAPI capture -> ConfigEvidence registration (issue #155) ─────────
+
+
+_LIVE_OPENAPI_JSON = json.dumps(
+    {
+        'openapi': '3.1.0',
+        'info': {'title': 'Live Fixture API', 'version': '3.2.0'},
+        'paths': {
+            '/api/users/me': {
+                'get': {
+                    'responses': {
+                        '200': {
+                            'description': 'current user',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'additionalProperties': False,
+                                        'properties': {
+                                            'id': {'type': 'integer'},
+                                            'username': {'type': 'string'},
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
+            },
+            '/api/users/{id}': {
+                'get': {
+                    'responses': {
+                        '200': {
+                            'description': 'user by id',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'additionalProperties': False,
+                                        'properties': {
+                                            'id': {'type': 'integer'},
+                                            'username': {'type': 'string'},
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    }
+                }
+            },
+            '/api/items': {
+                'post': {
+                    'responses': {'201': {'description': 'created'}},
+                }
+            },
+        },
+    }
+)
+
+_LIVE_ASSET_OPENAPI_YAML = """\
+openapi: 3.0.3
+info:
+  title: Asset Spec
+paths:
+  /api/ping:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  pong:
+                    type: boolean
+"""
+
+_OVERSIZED_OPENAPI_JSON = json.dumps(
+    {
+        'openapi': '3.1.0',
+        'info': {'title': 'Oversized', 'version': '1.0'},
+        'paths': {'/api/big': {'get': {'description': 'x' * (MAX_CONTENT_BYTES + 1024)}}},
+    }
+)
+
+
+class _OpenApiFixtureServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self) -> None:
+        super().__init__(('127.0.0.1', 0), _OpenApiFixtureHandler)
+        self.seq = 0
+
+    @property
+    def port(self) -> int:
+        return int(self.server_address[1])
+
+    @property
+    def base_url(self) -> str:
+        return f'http://127.0.0.1:{self.port}'
+
+
+class _OpenApiFixtureHandler(http.server.BaseHTTPRequestHandler):
+    def do_HEAD(self) -> None:
+        self._dispatch(send_body=False)
+
+    def do_GET(self) -> None:
+        self._dispatch(send_body=True)
+
+    def _dispatch(self, *, send_body: bool) -> None:
+        srv: _OpenApiFixtureServer = self.server  # type: ignore[assignment]
+        srv.seq += 1
+        path = urlsplit(self.path).path
+        routes: dict[str, tuple[int, str, str]] = {
+            '/': (200, 'text/html', '<html><body>live fixture</body></html>'),
+            '/openapi.json': (200, 'application/json', _LIVE_OPENAPI_JSON),
+            '/specs/service.yaml': (200, 'application/yaml', _LIVE_ASSET_OPENAPI_YAML),
+            '/api/users/me': (200, 'application/json', '{"id":1,"username":"alice"}'),
+            '/api/users/42': (
+                200,
+                'application/json',
+                '{"id":42,"username":"bob","password_hash":"$2b$12$secretvalue"}',
+            ),
+            '/api/internal/debug': (200, 'application/json', '{"env":"staging"}'),
+            '/api/ping': (200, 'application/json', '{"pong":true}'),
+            '/non-openapi.json': (200, 'application/json', '{"status":"ok","openapi":"nope"}'),
+            '/swagger.json': (
+                200,
+                'application/json',
+                '{"swagger":"2.0","info":{"title":"v2","version":"1"},"paths":{}}',
+            ),
+            '/error-spec.json': (500, 'application/json', _LIVE_OPENAPI_JSON),
+            '/missing-spec.json': (404, 'application/json', _LIVE_OPENAPI_JSON),
+            '/huge-spec.json': (200, 'application/json', _OVERSIZED_OPENAPI_JSON),
+        }
+        status, ct, body = routes.get(path, (404, 'application/json', '{"error":"not found"}'))
+        payload = body.encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', ct)
+        self.send_header('Content-Length', str(len(payload)))
+        self.send_header('X-Seq', str(srv.seq))
+        self.end_headers()
+        if send_body:
+            self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+@pytest.fixture
+def live_openapi_server() -> Iterator[_OpenApiFixtureServer]:
+    srv = _OpenApiFixtureServer()
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield srv
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+
+def _write_live_engagement(root: Path, srv: _OpenApiFixtureServer) -> Path:
+    eng_dir = root / 'engagement'
+    eng_dir.mkdir(parents=True, exist_ok=True)
+    (eng_dir / 'engagement.json').write_text(
+        json.dumps(
+            {
+                'schema_version': 1,
+                'target': {'name': 'live-openapi', 'base_url': srv.base_url},
+                'scope': {
+                    'hosts': ['127.0.0.1'],
+                    'path_prefixes': ['/'],
+                    'exclusions': [],
+                    'ports': [srv.port],
+                    'max_rps': 64,
+                    'max_requests': 50,
+                },
+                'authorization': {'attestation': 'loopback test', 'operator': 'pytest'},
+                'suggested_checks': [CHECK_ID],
+            }
+        ),
+        encoding='utf-8',
+    )
+    return eng_dir
+
+
+def test_api_inventory_skill_documents_live_openapi_registration() -> None:
+    skill_md = (Path(__file__).resolve().parents[1] / 'skills' / 'api-inventory' / 'SKILL.md').read_text(
+        encoding='utf-8'
+    )
+    assert "automatically registers a derived `ConfigEvidence(format='openapi')`" in skill_md
+    assert 'download_asset' in skill_md
+    assert 'even if `/openapi.json` was fetched over' not in skill_md
+
+
+async def test_live_session_registers_openapi_spec_idempotently_and_checks_conformance(
+    live_openapi_server: _OpenApiFixtureServer,
+    tmp_path: Path,
+    tmp_store: RunStore,
+) -> None:
+    eng_dir = _write_live_engagement(tmp_path, live_openapi_server)
+    base = live_openapi_server.base_url
+
+    async with live_session(eng_dir, tmp_store, authorized=True) as session:
+        # Before fetching a spec, api-contract-conformance records not_applicable.
+        assert await session.run_check(CHECK_ID) == []
+        pre_cov = await tmp_store.coverage(session.run_id)
+        assert [(c.surface, c.outcome) for c in pre_cov] == [(base, 'not_applicable')]
+
+        # Live fetch of /openapi.json derives ConfigEvidence(format='openapi') without extra request spend.
+        spent_before = session.requests_spent
+        spec_http = await session.request('GET', f'{base}/openapi.json')
+        assert session.requests_spent == spent_before + 1
+
+        cfg_items = [item for item in session.captured if isinstance(item, ConfigEvidence)]
+        assert len(cfg_items) == 1
+        cfg_ev = cfg_items[0]
+        assert cfg_ev.config.format == 'openapi'
+        assert cfg_ev.config.path == '/openapi.json'
+        assert cfg_ev.config.revision == '3.2.0'
+        assert cfg_ev.source == f'derived:{spec_http.id}:{base}/openapi.json'
+
+        # Running api-contract-conformance right after fetching the spec does NOT self-flag GET /openapi.json,
+        # and reports needs_follow_up coverage for every declared operation (not not_applicable).
+        await session.request('HEAD', f'{base}/openapi.json')
+        assert await session.run_check(CHECK_ID) == []
+        spec_only_cov = {c.surface: c.outcome for c in await tmp_store.coverage(session.run_id) if c.surface != base}
+        assert spec_only_cov == {
+            'GET /api/users/me': 'needs_follow_up',
+            'GET /api/users/{id}': 'needs_follow_up',
+            'POST /api/items': 'needs_follow_up',
+        }
+
+        # Re-fetching the same spec (even with a new X-Seq response header and ?v=2 query) does not duplicate it.
+        spec_http_2 = await session.request('GET', f'{base}/openapi.json?v=2')
+        assert spec_http_2.id != spec_http.id
+        assert [item.id for item in session.captured if isinstance(item, ConfigEvidence)] == [cfg_ev.id]
+        stored_cfg = [item for item in await tmp_store.evidence(session.run_id) if isinstance(item, ConfigEvidence)]
+        assert [item.id for item in stored_cfg] == [cfg_ev.id]
+
+        # Exercise conforming, BOPLA-violating, and undocumented endpoints, then run api-contract-conformance.
+        await session.request('GET', f'{base}/api/users/me')
+        await session.request('GET', f'{base}/api/users/42')
+        await session.request('GET', f'{base}/api/internal/debug')
+        findings = await session.run_check(CHECK_ID)
+        assert {(f.subject, f.severity) for f in findings} == {
+            ('op:GET /api/users/{id}', 'high'),
+            ('op:GET /api/internal/debug', 'medium'),
+        }
+        assert all('$2b$12$secretvalue' not in f.description for f in findings)
+
+        cov_after = {c.surface: c.outcome for c in await tmp_store.coverage(session.run_id) if c.surface != base}
+        assert cov_after == {
+            'GET /api/users/me': 'no_issue_found',
+            'GET /api/users/{id}': 'reported',
+            'POST /api/items': 'needs_follow_up',
+            'GET /api/internal/debug': 'reported',
+        }
+
+        # Non-OpenAPI JSON, Swagger 2.0, non-2xx (500 & 404 with spec body), and oversized bodies are ignored.
+        for ignored_path in (
+            '/non-openapi.json',
+            '/swagger.json',
+            '/error-spec.json',
+            '/missing-spec.json',
+            '/huge-spec.json',
+        ):
+            await session.request('GET', f'{base}{ignored_path}')
+        assert [item.id for item in session.captured if isinstance(item, ConfigEvidence)] == [cfg_ev.id]
+        assert [item.id for item in await tmp_store.evidence(session.run_id) if isinstance(item, ConfigEvidence)] == [
+            cfg_ev.id
+        ]
+
+
+async def test_live_session_download_asset_registers_openapi_spec_and_rejects_oversized(
+    live_openapi_server: _OpenApiFixtureServer,
+    tmp_path: Path,
+    tmp_store: RunStore,
+) -> None:
+    eng_dir = _write_live_engagement(tmp_path, live_openapi_server)
+    base = live_openapi_server.base_url
+
+    async with live_session(eng_dir, tmp_store, authorized=True) as session:
+        # Oversized and Swagger 2.0 downloaded assets are not registered as ConfigEvidence.
+        await session.download_asset(f'{base}/huge-spec.json')
+        await session.download_asset(f'{base}/swagger.json')
+        assert not [item for item in session.captured if isinstance(item, ConfigEvidence)]
+
+        # Downloading a valid OpenAPI 3.0 YAML spec registers ConfigEvidence with body sha256 fallback revision.
+        art_ev = await session.download_asset(f'{base}/specs/service.yaml')
+        cfg_items = [item for item in session.captured if isinstance(item, ConfigEvidence)]
+        assert len(cfg_items) == 1
+        cfg_ev = cfg_items[0]
+        assert cfg_ev.config.format == 'openapi'
+        assert cfg_ev.config.path == '/specs/service.yaml'
+        assert cfg_ev.config.revision == sha256_hex(_LIVE_ASSET_OPENAPI_YAML.encode('utf-8'))
+        assert cfg_ev.source == f'derived:{art_ev.id}:{base}/specs/service.yaml'
+
+        # Re-fetching the same spec via http_request or download_asset does not duplicate ConfigEvidence.
+        await session.download_asset(f'{base}/specs/service.yaml')
+        await session.request('GET', f'{base}/specs/service.yaml')
+        assert [item.id for item in session.captured if isinstance(item, ConfigEvidence)] == [cfg_ev.id]
+        assert [item.id for item in await tmp_store.evidence(session.run_id) if isinstance(item, ConfigEvidence)] == [
+            cfg_ev.id
+        ]
+
+        await session.request('GET', f'{base}/api/ping')
+        assert await session.run_check(CHECK_ID) == []
+        cov = {c.surface: c.outcome for c in await tmp_store.coverage(session.run_id)}
+        assert cov == {'GET /api/ping': 'no_issue_found'}
+
+
+async def test_run_test_registers_live_openapi_and_roundtrips_through_export_bundle(
+    live_openapi_server: _OpenApiFixtureServer,
+    tmp_path: Path,
+    tmp_store: RunStore,
+) -> None:
+    base = live_openapi_server.base_url
+    urls = tmp_path / 'urls.txt'
+    urls.write_text(f'{base}/\n{base}/openapi.json\n{base}/api/users/42\n', encoding='utf-8')
+
+    # Seed via an earlier run or pass /openapi.json as base_url so run_test captures it before passive checks.
+    spec_eng_dir = tmp_path / 'spec_engagement'
+    spec_eng_dir.mkdir()
+    (spec_eng_dir / 'engagement.json').write_text(
+        json.dumps(
+            {
+                'schema_version': 1,
+                'target': {'name': 'live-openapi', 'base_url': f'{base}/openapi.json'},
+                'scope': {
+                    'hosts': ['127.0.0.1'],
+                    'path_prefixes': ['/'],
+                    'exclusions': [],
+                    'ports': [live_openapi_server.port],
+                    'max_rps': 64,
+                    'max_requests': 20,
+                },
+                'authorization': {'attestation': 'loopback test', 'operator': 'pytest'},
+                'suggested_checks': [CHECK_ID],
+            }
+        ),
+        encoding='utf-8',
+    )
+    live_res = await run_test(spec_eng_dir, tmp_store, [CHECK_ID], authorized=True, urls_file=urls)
+    assert live_res.state == 'checks_complete'
+    assert live_res.findings == ()
+    assert {(c.surface, c.outcome) for c in live_res.coverage} == {
+        ('GET /api/users/me', 'needs_follow_up'),
+        ('GET /api/users/{id}', 'needs_follow_up'),
+        ('POST /api/items', 'needs_follow_up'),
+    }
+
+    exported = tmp_path / 'exported-bundle'
+    await export_bundle(tmp_store, live_res.run_id, exported)
+    replay = await run_review(exported, tmp_store, [CHECK_ID])
+    assert replay.state == 'checks_complete'
+    assert replay.findings == ()
+    assert {(c.surface, c.outcome) for c in await tmp_store.coverage(replay.run_id)} == {
+        ('GET /api/users/me', 'needs_follow_up'),
+        ('GET /api/users/{id}', 'needs_follow_up'),
+        ('POST /api/items', 'needs_follow_up'),
+    }

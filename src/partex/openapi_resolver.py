@@ -12,12 +12,13 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import yaml
 
-from .ids import normalized_operation_key
-from .models import ConfigEvidence, Severity
+from .bundle import MAX_CONTENT_BYTES
+from .ids import evidence_id, normalized_operation_key, sha256_hex
+from .models import ConfigEvidence, ConfigExcerpt, Severity
 
 HTTP_METHODS = frozenset({'get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'})
 
@@ -25,6 +26,7 @@ MAX_OPENAPI_NODES = 25_000
 MAX_SCHEMA_DEPTH = 64
 
 _OAS_VERSION_RE = re.compile(r'^3\.(?:0|1)(?:\.\d+.*)?$')
+_YAML_OPENAPI_KEY_RE = re.compile(r'(?m)^["\']?openapi["\']?\s*:')
 _TEMPLATE_TOKEN_RE = re.compile(r'\{([^{}/]+)\}')
 _PERCENT_PAIR_RE = re.compile(r'%([0-9A-Fa-f]{2})')
 _UNRESERVED_CHARS = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~')
@@ -715,12 +717,7 @@ def load_openapi_contract(evidence: ConfigEvidence) -> LoadedContract:
             load_error=f'unsupported OpenAPI specification version ({found}; expected 3.0.x or 3.1.x)',
         )
 
-    info = doc.get('info')
-    info_version: str | None = None
-    if isinstance(info, dict):
-        raw_info_ver = cast(dict[str, Any], info).get('version')
-        if isinstance(raw_info_ver, (str, int, float)) and str(raw_info_ver).strip():
-            info_version = str(raw_info_ver).strip()
+    info_version = _extract_info_version(doc)
     effective_revision = cfg.revision if cfg.revision is not None else info_version
 
     raw_paths = doc.get('paths')
@@ -813,6 +810,78 @@ def load_openapi_contract(evidence: ConfigEvidence) -> LoadedContract:
         server_prefixes=root_prefixes,
         unresolved_refs=tuple(dict.fromkeys(all_unresolved)),
     )
+
+
+def _extract_info_version(doc: Mapping[str, Any]) -> str | None:
+    info = doc.get('info')
+    if not isinstance(info, dict):
+        return None
+    raw_info_ver = cast(dict[str, Any], info).get('version')
+    if not isinstance(raw_info_ver, bool) and isinstance(raw_info_ver, (str, int, float)):
+        version = str(raw_info_ver).strip()
+        if version:
+            return version
+    return None
+
+
+def _clean_spec_url(url: str) -> str:
+    """Strip userinfo, query string, and fragment from *url* so URL secrets never enter ``source``."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url.split('?', 1)[0].split('#', 1)[0]
+    netloc = parts.netloc.rsplit('@', 1)[-1]
+    return urlunsplit((parts.scheme, netloc, parts.path, '', ''))
+
+
+def derive_openapi_config_evidence(
+    content: str,
+    *,
+    origin_id: str,
+    url: str,
+) -> ConfigEvidence | None:
+    """Derive a ``format='openapi'`` :class:`~partex.models.ConfigEvidence` when *content* is an OpenAPI 3.0/3.1 spec.
+
+    Pure, deterministic, and idempotent:
+    - Rejects empty strings, payloads exceeding :data:`~partex.bundle.MAX_CONTENT_BYTES`, non-OpenAPI JSON/YAML,
+      Swagger ``2.0``, documents without a ``paths`` mapping, and documents exceeding :data:`MAX_OPENAPI_NODES`
+      or :data:`MAX_SCHEMA_DEPTH`.
+    - ``source`` records the originating ``ev_`` ID and sanitized URL (excluded from ``evidence_id``).
+    - ``revision`` is ``info.version`` when non-empty, else the UTF-8 body's ``sha256`` hex digest.
+    """
+    if not content or 'openapi' not in content or 'paths' not in content:
+        return None
+    stripped = content.lstrip('\ufeff \t\r\n')
+    if not stripped or stripped.startswith(('<', '[')):
+        return None
+    if not stripped.startswith(('{', '---')) and _YAML_OPENAPI_KEY_RE.search(content) is None:
+        return None
+    raw_bytes = content.encode('utf-8')
+    if len(raw_bytes) > MAX_CONTENT_BYTES:
+        return None
+    doc, parse_err = _parse_document(content)
+    if doc is None or parse_err is not None:
+        return None
+    raw_version = doc.get('openapi')
+    if not isinstance(raw_version, str) or not _OAS_VERSION_RE.match(raw_version.strip()):
+        return None
+    if not isinstance(doc.get('paths'), dict):
+        return None
+
+    revision = _extract_info_version(doc) or sha256_hex(raw_bytes)
+    path = normalize_request_path(url)
+    clean_url = _clean_spec_url(url)
+    ev = ConfigEvidence(
+        id='',
+        source=f'derived:{origin_id}:{clean_url}',
+        config=ConfigExcerpt(
+            path=path,
+            format='openapi',
+            content=content,
+            revision=revision,
+        ),
+    )
+    return ev.model_copy(update={'id': evidence_id(ev)})
 
 
 def load_openapi_contracts(evidence: Sequence[Any]) -> list[LoadedContract]:
