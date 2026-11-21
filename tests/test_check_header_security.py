@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from partex.checks.header_security import (
     CHECK_ID,
     CHECK_VERSION,
+    MAX_LISTED_URLS,
     HeaderSecurityCheck,
     _is_session_cookie,
 )
@@ -1186,3 +1187,29 @@ def test_aggregation_separates_non_default_ports_and_omits_url_credentials():
     assert 'https://example.test:8443/service' in custom.description
     for secret in ('password', 'secret', 'fragment'):
         assert secret not in custom.description
+
+
+def test_grouped_finding_lists_at_most_max_listed_urls():
+    """#140: many URLs on one host name the first MAX_LISTED_URLS (sorted) and count the rest; all IDs stay."""
+    total = MAX_LISTED_URLS + 25
+    exchanges = [
+        _http_evidence(url=f'https://app.example.test/page/{i:03d}', resp_headers={'Content-Type': 'text/html'})
+        for i in range(total)
+    ]
+    forward = [f for f in HeaderSecurityCheck().review(exchanges) if f.title == 'Missing HSTS header']
+    backward = [f for f in HeaderSecurityCheck().review(list(reversed(exchanges))) if f.title == 'Missing HSTS header']
+    (finding,) = forward
+    assert len(finding.evidence_ids) == total
+    listed = [line for line in finding.description.splitlines() if line.startswith('- https://')]
+    assert listed == [f'- https://app.example.test/page/{i:03d}' for i in range(MAX_LISTED_URLS)]
+    assert finding.description.endswith('- … and 25 more (see the evidence IDs)')
+    assert backward[0].description == finding.description  # deterministic regardless of evidence order
+
+
+def test_grouped_finding_at_the_cap_has_no_remainder_line():
+    exchanges = [
+        _http_evidence(url=f'https://app.example.test/p{i}', resp_headers={'Content-Type': 'text/html'})
+        for i in range(MAX_LISTED_URLS)
+    ]
+    (finding,) = [f for f in HeaderSecurityCheck().review(exchanges) if f.title == 'Missing HSTS header']
+    assert 'more (see the evidence IDs)' not in finding.description

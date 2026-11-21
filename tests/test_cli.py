@@ -819,3 +819,31 @@ def test_chat_offers_installed_check_skills_and_extra_skill_dirs(
     # Playbooks for installed checks are offered; drafts whose checks are not installed are not.
     assert {'header-review', 'version-disclosure', 'js-analysis', 'my-playbook'} <= set(names)
     assert not {'api-inventory', 'authorization-testing', 'auth-session-controls'} & set(names)
+
+
+HOSTILE_REPORT = '# Report\n\x1b[2Jcleared \x1b]8;;https://evil.test\x07link\x1b]8;;\x07 \x1b]0;title\x07\x9b31m\tok\n'
+
+
+def test_reports_cli_neutralizes_terminal_controls_on_a_tty(
+    capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#141: on a terminal, escape sequences in a saved report are shown, not executed."""
+    run_id = review_run_id(capsys, db, config_only_bundle(tmp_path / 'bundle'))
+    write_report(run_reports_dir(db, run_id), 'hostile', HOSTILE_REPORT)
+    args = ('reports', run_id, 'hostile', '--db', str(db))
+
+    monkeypatch.setattr(sys.stdout, 'isatty', lambda: True)
+    code, out, _ = run(capsys, *args)
+    assert code == 0
+    assert '\x1b' not in out and '\x07' not in out and '\x9b' not in out
+    assert out == (
+        '# Report\n\\x1b[2Jcleared \\x1b]8;;https://evil.test\\x07link\\x1b]8;;\\x07 \\x1b]0;title\\x07\\x9b31m\tok\n'
+    )
+    code, out, _ = run(capsys, *args, '--json')
+    assert json.loads(out)['content'] == HOSTILE_REPORT  # --json is unchanged (escaped by JSON itself)
+
+
+def test_reports_cli_keeps_raw_bytes_when_piped(capsys: pytest.CaptureFixture[str], db: Path, tmp_path: Path) -> None:
+    run_id = review_run_id(capsys, db, config_only_bundle(tmp_path / 'bundle'))
+    write_report(run_reports_dir(db, run_id), 'hostile', HOSTILE_REPORT)
+    assert run(capsys, 'reports', run_id, 'hostile', '--db', str(db)) == (0, HOSTILE_REPORT, '')

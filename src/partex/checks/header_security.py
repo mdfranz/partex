@@ -40,7 +40,10 @@ from ..models import Evidence, FindingDraft, HttpEvidence, Severity, get_all, ge
 # ── Check metadata ────────────────────────────────────────────────────────────
 
 CHECK_ID = 'header-security'
-CHECK_VERSION = '1.2'
+CHECK_VERSION = '1.3'  # 1.3: the affected-URL list in a grouped finding is capped (#140)
+
+MAX_LISTED_URLS = 50
+"""Affected URLs named in one grouped finding's description; the rest are counted (every evidence ID is kept)."""
 CHECK_TITLE = 'HTTP Response Header Security'
 CHECK_DESCRIPTION = (
     'Evaluate HTTP responses for missing or misconfigured security headers: HSTS, CSP '
@@ -640,7 +643,10 @@ def _review_header_security(evidence: Sequence[Evidence]) -> list[FindingDraft]:
             severity = 'medium' if len(details_by_summary[first.summary]) > 1 else 'low'
         description = ' '.join([*summaries, f'Affected host: {host}. {len(ids)} captured response(s).', *sorted(notes)])
         if urls:
-            description += '\n\nAffected URLs:\n' + '\n'.join(f'- {url}' for url in urls)
+            listed = urls[:MAX_LISTED_URLS]
+            description += '\n\nAffected URLs:\n' + '\n'.join(f'- {url}' for url in listed)
+            if len(urls) > len(listed):
+                description += f'\n- … and {len(urls) - len(listed)} more (see the evidence IDs)'
         drafts.append(
             FindingDraft(
                 check_id=CHECK_ID,
