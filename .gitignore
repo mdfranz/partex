@@ -45,6 +45,7 @@ htmlcov/
 /pydantic-clai2/
 /pydantic-monty*/
 
-# Downloaded target assets and operator exports (may hold secrets), beside the local DB.
+# Downloaded target assets, operator exports, and saved reports (may hold secrets), beside the local DB.
 *.db.artifacts/
 *.db.exports/
+*.db.reports/
