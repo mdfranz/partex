@@ -312,6 +312,7 @@ async def download_asset(ctx: RunContext[TesterDeps], path: str, headers: dict[s
         args,
         {
             'evidence_id': evidence.id,
+            'status': evidence.artifact.status_code,
             'sha256': evidence.artifact.sha256,
             'size_bytes': evidence.artifact.size_bytes,
         },

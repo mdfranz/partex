@@ -503,7 +503,7 @@ def test_log_file_is_local_only_and_on_for_live_commands(
     assert [name for name, _ in logfire_calls] == ['configure', 'instrument_pydantic_ai']
     config = logfire_calls[0][1]
     assert config['send_to_logfire'] is False and len(config['additional_span_processors']) == 1
-    assert log.exists()
+    assert not log.exists()  # created lazily on the first span; this run exits before emitting one (#126)
 
 
 def test_log_file_off_and_read_only_commands_do_not_configure(
