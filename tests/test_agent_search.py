@@ -7,6 +7,7 @@ import importlib.util
 import json
 import subprocess
 from collections.abc import AsyncIterator, Callable, Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from partex import agent_adapter, cli
 from partex.agent_adapter import TesterDeps, WebSearcher, build_search_agent, build_tester_agent, run_agent
 from partex.agent_adapter.search import (
     SEARCH_ANTHROPIC_MAX_USES,
+    SEARCH_MAX_SOURCES,
     SEARCH_QUERY_MAX_CHARS,
     SEARCH_RESULT_MAX_CHARS,
     QueryRefused,
@@ -51,7 +53,7 @@ from partex.export import export_run_data
 from partex.models import REDACTED
 from partex.models_config import ModelConfigError, SearchModelConfig, resolve_search_model
 from partex.operator_export import render_markdown_report
-from partex.storage import RunReader, RunStore
+from partex.storage import RunReader, RunStore, StoreError
 from partex.telemetry import JsonlSpanExporter
 
 _TARGET_APP = Path(__file__).parent.parent / 'fixtures' / 'target_app' / 'app.py'
@@ -814,3 +816,98 @@ async def test_web_search_persists_research_and_read_tools_expose_it_across_sess
     text = cli._render_text(payload, first_run)  # pyright: ignore[reportPrivateUsage]
     assert 'web research: 1' in text
     assert 'nginx 1.24.0 cve (google-cloud, 1 sources)' in text
+
+
+# ── Sources cap and failed research saves (#146) ───────────────────────────────
+
+
+def _searcher_with_sources(count: int) -> WebSearcher:
+    fake = FakeNativeSearchModel(
+        sources_content=[{'url': f'https://advisories.example/{i}', 'title': f'Advisory {i}'} for i in range(count)],
+        name='fake-anth',
+    )
+    config = SearchModelConfig(
+        spec='anthropic:fake', provider='anthropic', model_name='fake', auth_mode='api_key', model=fake
+    )
+    return WebSearcher(config=config, agent=build_search_agent(fake, provider='anthropic'))
+
+
+async def _new_run(store: RunStore) -> str:
+    return await store.create_run(
+        input_kind='engagement', input_ref='x', input_sha256='', engine_version='t', selected_checks=()
+    )
+
+
+async def test_sources_are_capped_and_the_cut_is_counted_everywhere(tmp_path: Path) -> None:
+    total = SEARCH_MAX_SOURCES + 7
+    expected = [f'https://advisories.example/{i}' for i in range(SEARCH_MAX_SOURCES)]  # first-seen order kept
+    audited: list[dict[str, Any]] = []
+
+    async def audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        audited.append(result)
+
+    # Without a research store: the framed result and the plain audit row are both capped and counted.
+    framed = _inner(await _searcher_with_sources(total).search('nginx cve', secrets=(), audit=audit), 'web_search')
+    assert [source['url'] for source in framed['sources']] == expected
+    assert framed['sources_total'] == total
+    assert audited == [{'sources': expected, 'truncated': False, 'sources_total': total}]
+
+    # With the research store: the research row and its linked audit row are capped and counted too.
+    async with await RunStore.open(tmp_path / 'runs.db') as store:
+        run_id = await _new_run(store)
+        record = partial(store.add_web_research, run_id)
+        framed = _inner(
+            await _searcher_with_sources(total).search('nginx cve', secrets=(), audit=audit, record=record),
+            'web_search',
+        )
+        (entry,) = await store.web_research(run_id)
+        assert [source['url'] for source in entry.sources] == expected
+        (call,) = await store.tool_calls(run_id)
+        assert call.result['sources'] == expected and call.result['sources_total'] == total
+        assert framed['research_id'] == entry.id
+
+        # At or under the cap nothing is dropped and no count is added.
+        framed = _inner(
+            await _searcher_with_sources(SEARCH_MAX_SOURCES).search(
+                'nginx cve', secrets=(), audit=audit, record=record
+            ),
+            'web_search',
+        )
+        assert len(framed['sources']) == SEARCH_MAX_SOURCES and 'sources_total' not in framed
+        assert 'sources_total' not in (await store.tool_calls(run_id))[-1].result
+
+
+async def test_a_failed_research_save_still_leaves_an_audit_row_and_returns_the_result() -> None:
+    audited: list[dict[str, Any]] = []
+
+    async def audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        audited.append({'tool': tool, 'query': args['query'], **result})
+
+    async def broken_record(**_: Any) -> str:
+        raise StoreError('database is locked', rule_code='store-locked')
+
+    searcher = _searcher_with_sources(2)
+    framed = _inner(await searcher.search('nginx cve', secrets=(), audit=audit, record=broken_record), 'web_search')
+    assert framed['research_id'] is None and 'not saved' in framed['note']
+    assert 'CVE-2024-7347' in framed['answer']  # the paid-for result still reaches the tester
+    assert audited == [
+        {
+            'tool': 'web_search',
+            'query': 'nginx cve',
+            'sources': ['https://advisories.example/0', 'https://advisories.example/1'],
+            'truncated': False,
+            'error': 'record-failed',
+        }
+    ]
+    assert searcher.calls_used == 1  # the query was sent, so it still counts against the session cap
+
+
+async def test_a_search_that_cannot_be_saved_or_audited_fails_the_tool() -> None:
+    async def broken_audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+        raise OSError('disk full')
+
+    async def broken_record(**_: Any) -> str:
+        raise OSError('disk full')
+
+    with pytest.raises(ToolFailed, match='neither its research row nor its audit row'):
+        await _searcher_with_sources(1).search('nginx cve', secrets=(), audit=broken_audit, record=broken_record)
