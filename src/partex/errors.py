@@ -38,8 +38,13 @@ class ScopeViolation(PartexError):
 
     Raised before any bytes hit the wire.  When triggered by an agent tool,
     it surfaces as a ``ToolFailed`` so the model sees the failure without
-    burning its tool retry budget.
+    burning its tool retry budget.  ``kind`` says which rule refused the request
+    (``host``, ``port``, ``path``, ``url-list``), or ``None`` for a malformed URL.
     """
+
+    def __init__(self, message: str, *, rule_code: str | None = None, kind: str | None = None) -> None:
+        super().__init__(message, rule_code=rule_code)
+        self.kind = kind
 
 
 class BudgetExhausted(PartexError):

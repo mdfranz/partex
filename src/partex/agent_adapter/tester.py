@@ -132,8 +132,7 @@ async def http_request(
     except ScopeViolation as exc:
         await _audit(ctx, 'http_request', args, {'refused': 'scope', 'reason': str(exc)})
         raise ToolFailed(
-            f'refused by the engagement scope (nothing was sent): {exc}. You cannot change scope: if the operator '
-            'wants this host or port, they run /scope add <host[:port]> then /scope confirm.'
+            f'refused by the engagement scope (nothing was sent): {exc}. {scope_refusal_advice(exc)}'
         ) from exc
     except BudgetExhausted as exc:
         await _audit(ctx, 'http_request', args, {'refused': 'budget'})
@@ -147,6 +146,21 @@ async def http_request(
 
 def _batch_url(session: LiveSession, item: BatchRequestItem) -> str:
     return item.path if '://' in item.path else urljoin(session.engagement.target.base_url, item.path)
+
+
+def scope_refusal_advice(exc: ScopeViolation) -> str:
+    """What the model should tell the operator after a scope refusal; the advice depends on which rule refused."""
+    if exc.kind == 'url-list':
+        return (
+            "This URL is not in the operator's authorized URL list. You cannot change scope: if the operator wants it "
+            'tested, they run /scope add <url> (end with /* for a path prefix) then /scope confirm.'
+        )
+    if exc.kind in {'host', 'port'}:
+        return (
+            'You cannot change scope: if the operator wants this host or port, they run /scope add <host[:port]> '
+            'then /scope confirm.'
+        )
+    return 'You cannot change scope; this URL is outside the engagement rules (path, exclusion, or malformed).'
 
 
 async def _run_batch_item(session: LiveSession, item: BatchRequestItem) -> dict[str, Any]:
@@ -163,8 +177,8 @@ async def _run_batch_item(session: LiveSession, item: BatchRequestItem) -> dict[
         return {
             'path': item.path,
             'refused': 'scope',
-            'reason': f'refused by the engagement scope (nothing was sent): {exc}. You cannot change scope: if the '
-            'operator wants this host or port, they run /scope add <host[:port]> then /scope confirm.',
+            'kind': exc.kind,
+            'reason': f'refused by the engagement scope (nothing was sent): {exc}. {scope_refusal_advice(exc)}',
         }
     except BudgetExhausted as exc:
         return {'path': item.path, 'refused': 'budget', 'reason': f'the engagement request budget is spent: {exc}'}
@@ -274,8 +288,7 @@ async def download_asset(ctx: RunContext[TesterDeps], path: str, headers: dict[s
     except ScopeViolation as exc:
         await _audit(ctx, 'download_asset', args, {'refused': 'scope', 'reason': str(exc)})
         raise ToolFailed(
-            f'refused by the engagement scope (nothing was sent): {exc}. You cannot change scope: if the operator '
-            'wants this host or port, they run /scope add <host[:port]> then /scope confirm.'
+            f'refused by the engagement scope (nothing was sent): {exc}. {scope_refusal_advice(exc)}'
         ) from exc
     except BudgetExhausted as exc:
         await _audit(ctx, 'download_asset', args, {'refused': 'budget'})

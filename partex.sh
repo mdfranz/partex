@@ -5,7 +5,7 @@
 #   ./partex.sh http://192.168.12.1/home      # asks who authorized the test
 #   ./partex.sh -a 'I own 192.168.12.1 and authorize this test, 2026-11-19' http://192.168.12.1/home
 #
-# Usage: ./partex.sh [options] <target-url>   |   ./partex.sh list [-d DB]       (flags override the environment variables in [])
+# Usage: ./partex.sh [options] <target-url> | -u URLS_FILE   |   ./partex.sh list [-d DB]       (flags override the environment variables in [])
 #   -a, --attestation TEXT   who authorized testing the target [PARTEX_ATTESTATION]; prompted for if unset
 #   -m, --model NAME         model [PARTEX_MODEL, default zai-org/GLM-5.3]
 #   -r, --route NAME         gateway route for a bare model name [PARTEX_GATEWAY_ROUTE, default doubleword]. A
@@ -20,6 +20,11 @@
 #                            latest run if RUN_ID is omitted [CHAT_ONLY=1, RUN_ID]
 #   -k, --insecure           accept invalid TLS certificates (self-signed, expired, mismatch) for the target
 #                            [PARTEX_INSECURE=1]; recorded on the run, never available to the model
+#   -u, --urls-file PATH     file of authorized URLs, one per line (# comments; a trailing /* allows a path prefix)
+#                            [PARTEX_URLS_FILE]. Only those URLs can be requested. <target-url> is then optional: the first
+#                            URL in the file is the baseline target; an explicit one must be listed.
+#       --recursive          with -u: treat every listed URL as a path prefix (http://foo/ allows all of foo)
+#                            [PARTEX_RECURSIVE=1]
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
 #   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000]
 #   -R, --max-rps N          requests per second [PARTEX_MAX_RPS, default 2; ceiling 64]
@@ -43,6 +48,8 @@ ROUTE_SET=${PARTEX_GATEWAY_ROUTE+1}
 SEARCH_MODEL=${PARTEX_SEARCH_MODEL:-}
 DB=${PARTEX_DB:-partex-probe.db}
 ATTESTATION=${PARTEX_ATTESTATION:-}
+URLS_FILE=${PARTEX_URLS_FILE:-}
+RECURSIVE=${PARTEX_RECURSIVE:+1}
 LIST=
 INSECURE=${PARTEX_INSECURE:+1}
 RESUME=${CHAT_ONLY:+1}
@@ -59,6 +66,8 @@ while [[ $# -gt 0 ]]; do
     -d|--db) DB=${2?$1 needs a value}; shift 2 ;;
     -f|--from) RUN_ID=${2?$1 needs a value}; shift 2 ;;
     --resume) RESUME=1; shift; if [[ ${1:-} == run_* ]]; then RUN_ID=$1; shift; fi ;;
+    --recursive) RECURSIVE=1; shift ;;
+    -u|--urls-file) URLS_FILE=${2?$1 needs a value}; shift 2 ;;
     -k|--insecure) INSECURE=1; shift ;;
     -l|--list) LIST=1; shift ;;
     -n|--max-requests) MAX_REQUESTS=${2?$1 needs a value}; shift 2 ;;
@@ -77,6 +86,7 @@ for _n in MAX_REQUESTS MAX_RPS; do
 done
 [[ -n $ROUTE_SET || $MODEL != *:* ]] || ROUTE=  # a full model string is not routed through a Gateway route
 case $DB in /*) ;; *) DB=$PWD/$DB ;; esac  # absolute, before the cd below (BSD realpath has no -m)
+case $URLS_FILE in ''|/*) ;; *) URLS_FILE=$PWD/$URLS_FILE ;; esac  # likewise
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)  # absolute, resolved before the cd (works from any directory)
 cd "$SCRIPT_DIR"
 partex() { uv run --quiet partex "$@"; }
@@ -109,13 +119,25 @@ print(runs[-1]["id"] if runs else "")')
   exec uv run --quiet partex chat "$RUN_ID" --db "$DB" --model "$MODEL" ${ROUTE:+--gateway-route "$ROUTE"}
 fi
 
-[[ -n $TARGET_URL ]] || { echo "usage: $0 [options] <target-url>  (-h for options)" >&2; exit 2; }
+[[ -z $URLS_FILE || -f $URLS_FILE ]] || { echo "URLs file not found: $URLS_FILE" >&2; exit 1; }
+if [[ -z $TARGET_URL && -n $URLS_FILE ]]; then  # no <target-url>: the first URL in the file is the baseline target
+  while IFS= read -r _line || [[ -n $_line ]]; do
+    _line=${_line#"${_line%%[![:space:]]*}"}; _line=${_line%"${_line##*[![:space:]]}"}  # trim
+    [[ -z $_line || $_line == '#'* ]] && continue
+    TARGET_URL=${_line%\*}  # a trailing /* prefix marker becomes the prefix's own URL
+    break
+  done < "$URLS_FILE"
+  [[ -n $TARGET_URL ]] || { echo "no URLs in $URLS_FILE" >&2; exit 1; }
+  echo "target: $TARGET_URL (first URL in $URLS_FILE)"
+fi
+[[ -n $TARGET_URL ]] || { echo "usage: $0 [options] [<target-url> | -u URLS_FILE]  (-h for options)" >&2; exit 2; }
 if [[ -z $ATTESTATION ]]; then
   [[ -t 0 ]] || { echo "pass --attestation (or set PARTEX_ATTESTATION): who authorized testing $TARGET_URL" >&2; exit 1; }
   echo "Testing $TARGET_URL sends live requests; partex needs a written authorization on record."
   read -r -p "Authorization (e.g. 'I own this host and authorize this test, $(date +%F)'): " ATTESTATION
   [[ -n $ATTESTATION ]] || { echo "no authorization given; nothing was sent" >&2; exit 1; }
 fi
+[[ -z $RECURSIVE || -n $URLS_FILE ]] || { echo "--recursive needs a URLs file (-u)" >&2; exit 2; }
 [[ $TARGET_URL =~ ^(https?)://([^/:]+)(:([0-9]+))?(/.*)?$ ]] || { echo "bad TARGET_URL: $TARGET_URL" >&2; exit 1; }
 host=${BASH_REMATCH[2]} port=${BASH_REMATCH[4]:-$([[ ${BASH_REMATCH[1]} == https ]] && echo 443 || echo 80)}
 json_str() { python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$1"; }
@@ -143,7 +165,7 @@ JSON
 
 if [[ -n $NO_TUI ]]; then
   rc=0
-  result=$(partex test "$eng" --authorized --checks version-disclosure --db "$DB") || rc=$?
+  result=$(partex test "$eng" --authorized --checks version-disclosure --db "$DB" ${URLS_FILE:+--urls-file "$URLS_FILE"} ${RECURSIVE:+--recursive}) || rc=$?
   printf '%s\n' "$result"
   run=$(grep -o 'run_[0-9a-f]\{32\}' <<<"$result" | head -1 || true)
   [[ -n $run ]] && partex show "$run" --db "$DB" --format text
@@ -157,4 +179,4 @@ if [[ -n $ROUTE || $MODEL == gateway/* || $MODEL != *:* ]] && [[ -z ${PYDANTIC_A
 fi
 echo "opening a partex agent session on $TARGET_URL (db: $DB)"
 uv run --quiet partex agent "$eng" --authorized --db "$DB" --model "$MODEL" ${ROUTE:+--gateway-route "$ROUTE"} \
-  ${SEARCH_MODEL:+--search-model "$SEARCH_MODEL"} --checks version-disclosure ${RUN_ID:+--from "$RUN_ID"}
+  ${SEARCH_MODEL:+--search-model "$SEARCH_MODEL"} ${URLS_FILE:+--urls-file "$URLS_FILE"} ${RECURSIVE:+--recursive} --checks version-disclosure ${RUN_ID:+--from "$RUN_ID"}

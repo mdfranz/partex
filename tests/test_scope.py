@@ -15,11 +15,13 @@ from partex.models import Scope
 from partex.scope import (
     MAX_REQUESTS_CEILING,
     MAX_RPS_CEILING,
+    apply_urls,
     check_url,
     extend_scope,
     normalize_host,
     parse_scope_target,
     parse_scoped_url,
+    parse_urls_file,
     validate_scope,
 )
 
@@ -399,3 +401,160 @@ def test_extend_with_a_known_host_and_port_is_a_no_op() -> None:
 def test_extend_keeps_scheme_defaults_when_scope_has_no_explicit_ports() -> None:
     assert extend_scope(_scope(ports=[]), 'https://b.test').ports == []
     assert extend_scope(_scope(ports=[]), 'b.test:8080').ports == [80, 443, 8080]
+
+
+# ── Authorized URL allowlist (#121) ────────────────────────────────────────────
+
+
+def urls_scope(*urls: str) -> Scope:
+    return scope_of(path_prefixes=['/'], exclusions=[], urls=list(urls), ports=[443, 8443])
+
+
+def test_urls_exact_entry_allows_only_that_path() -> None:
+    scope = urls_scope('https://example.test/api/users')
+    check_url(scope, 'https://example.test/api/users')
+    check_url(scope, 'https://example.test/api/users?id=1')  # query strings are not compared
+    for refused in ('https://example.test/api/users/1', 'https://example.test/api', 'https://example.test/api/users/'):
+        with pytest.raises(ScopeViolation, match='authorized URL list'):
+            check_url(scope, refused)
+
+
+def test_urls_prefix_entry_covers_subtree_on_segment_boundary() -> None:
+    scope = urls_scope('https://example.test/api/*')
+    check_url(scope, 'https://example.test/api')
+    check_url(scope, 'https://example.test/api/a/b')
+    with pytest.raises(ScopeViolation):
+        check_url(scope, 'https://example.test/apix')
+
+
+def test_urls_entry_pins_host_and_port() -> None:
+    scope = urls_scope('https://example.test/a')
+    with pytest.raises(ScopeViolation):
+        check_url(scope, 'https://example.test:8443/a')  # same host, other (in-scope) port
+    check_url(
+        scope_of(path_prefixes=['/'], exclusions=[], urls=['https://example.test:8443/a'], ports=[443, 8443]),
+        'https://example.test:8443/a',
+    )
+
+
+def test_urls_entry_refuses_encoded_and_dot_segment_variants() -> None:
+    scope = urls_scope('https://example.test/a/b')
+    for refused in ('https://example.test/a/%62', 'https://example.test/a/../a/b/../c'):
+        with pytest.raises(ScopeViolation):
+            check_url(scope, refused)
+
+
+def test_urls_do_not_override_exclusions() -> None:
+    scope = scope_of(path_prefixes=['/'], exclusions=['/logout'], urls=['https://example.test/*'], ports=[443])
+    with pytest.raises(ScopeViolation):
+        check_url(scope, 'https://example.test/logout')
+
+
+def test_empty_urls_means_no_url_restriction() -> None:
+    check_url(scope_of(), 'https://example.test/api/anything')
+
+
+def test_parse_urls_file_skips_comments_blanks_and_duplicates() -> None:
+    text = '# authorized\n\nhttps://a.test/x\n  https://a.test/y/*  \nhttps://a.test/x\n'
+    assert parse_urls_file(text) == ['https://a.test/x', 'https://a.test/y/*']
+
+
+@pytest.mark.parametrize('text', ['', '# only a comment\n\n'])
+def test_parse_urls_file_refuses_an_empty_list(text: str) -> None:
+    with pytest.raises(ScopeViolation, match='no URLs'):
+        parse_urls_file(text)
+
+
+def test_parse_urls_file_names_the_bad_line() -> None:
+    with pytest.raises(ScopeViolation, match=r'line 2: .*scheme'):
+        parse_urls_file('https://a.test/ok\nftp://a.test/no\n')
+
+
+def test_apply_urls_adds_hosts_and_ports_and_sets_allowlist() -> None:
+    scope = apply_urls(scope_of(ports=[443]), ['https://other.test:8443/a', 'https://example.test/b/*'])
+    assert scope.urls == ['https://other.test:8443/a', 'https://example.test/b/*']
+    assert 'other.test' in scope.hosts
+    assert 8443 in scope.ports
+    check_url(
+        scope_of(path_prefixes=['/'], ports=[443, 8443], hosts=['example.test', 'other.test'], urls=scope.urls),
+        'https://other.test:8443/a',
+    )
+
+
+def test_validate_scope_flags_a_bad_urls_entry() -> None:
+    assert any('urls entry' in problem for problem in validate_scope(scope_of(urls=['ftp://example.test/'])))
+
+
+def test_urls_entry_without_a_port_covers_both_default_ports() -> None:
+    scope = scope_of(
+        path_prefixes=['/'],
+        exclusions=[],
+        urls=['https://example.test/a', 'http://other.test/b/*'],
+        hosts=['example.test', 'other.test'],
+        ports=[80, 443],
+    )
+    for allowed in ('http://example.test/a', 'https://example.test/a', 'http://other.test/b/c', 'https://other.test/b'):
+        check_url(scope, allowed)
+    with pytest.raises(ScopeViolation):
+        check_url(scope, 'http://example.test/other')
+
+
+def test_apply_urls_always_opens_80_and_443() -> None:
+    scope = apply_urls(scope_of(ports=[8080]), ['https://example.test/a'])
+    assert {80, 443, 8080} <= set(scope.ports)
+    assert apply_urls(scope_of(ports=[]), ['https://example.test/a']).ports == []  # empty already means 80 and 443
+
+
+# ── Denial kinds and growing a URL list (#121) ─────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ('url', 'kind'),
+    [
+        ('https://other.test/a', 'host'),
+        ('https://example.test:9999/a', 'port'),
+        ('https://example.test/b', 'url-list'),
+    ],
+)
+def test_denials_say_which_rule_refused(url: str, kind: str) -> None:
+    scope = scope_of(path_prefixes=['/'], exclusions=[], urls=['https://example.test/a'], ports=[443])
+    with pytest.raises(ScopeViolation) as caught:
+        check_url(scope, url)
+    assert caught.value.kind == kind
+
+
+def test_path_denial_kind() -> None:
+    with pytest.raises(ScopeViolation) as caught:
+        check_url(scope_of(), 'https://example.test/not-api')
+    assert caught.value.kind == 'path'
+
+
+def test_extend_scope_with_a_url_list_adds_the_url_not_just_the_host() -> None:
+    scope = apply_urls(scope_of(path_prefixes=['/'], exclusions=[], ports=[443]), ['https://example.test/a'])
+    extended = extend_scope(scope, 'https://example.test/openapi.json')
+    assert extended.urls == ['https://example.test/a', 'https://example.test/openapi.json']
+    check_url(extended, 'https://example.test/openapi.json')
+    assert extend_scope(extended, 'https://example.test/openapi.json') == extended  # idempotent
+    with_prefix = extend_scope(extended, 'https://example.test/docs/*')
+    check_url(with_prefix, 'https://example.test/docs/x')
+
+
+def test_extend_scope_with_a_url_list_refuses_a_bare_host_with_a_hint() -> None:
+    scope = apply_urls(scope_of(path_prefixes=['/'], exclusions=[], ports=[443]), ['https://example.test/a'])
+    with pytest.raises(ScopeViolation, match=r'scope grows by URL.*https://new\.test/\*'):
+        extend_scope(scope, 'new.test')
+
+
+def test_parse_urls_file_recursive_makes_every_entry_a_prefix() -> None:
+    text = 'http://foo/\nhttps://bar.test/app/?q=1#frag\nhttps://baz.test:8443/x/*\n'
+    assert parse_urls_file(text, recursive=True) == [
+        'http://foo/*',
+        'https://bar.test/app/*',
+        'https://baz.test:8443/x/*',
+    ]
+    scope = apply_urls(
+        scope_of(path_prefixes=['/'], exclusions=[], ports=[80, 443]),
+        parse_urls_file('http://example.test/', recursive=True),
+    )
+    check_url(scope, 'http://example.test/any/deep/path')
+    check_url(scope, 'https://example.test/')

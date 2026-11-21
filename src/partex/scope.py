@@ -254,6 +254,32 @@ def _path_allowed(scope: Scope, path: str) -> bool:
     return any(path_under(path, prefix) for prefix in scope.path_prefixes)
 
 
+_PREFIX_SUFFIX = '/*'
+_DEFAULT_PORT_SET = frozenset({80, 443})
+
+
+def _entry_url(entry: str) -> str:
+    """The plain URL of an allowlist *entry*: a trailing ``/*`` (prefix marker) is dropped."""
+    return entry.removesuffix(_PREFIX_SUFFIX) or '/' if entry.endswith(_PREFIX_SUFFIX) else entry
+
+
+def _url_entry_matches(entry: str, view: ScopedUrl) -> bool:
+    """Whether the allowlist *entry* covers *view*: same host and port, and every path interpretation matches.
+
+    ``<url>`` matches that exact path only; ``<url>/*`` matches the path and everything under it (on a
+    segment boundary). The query string is not compared. An entry without an explicit port covers both
+    scheme defaults (80 and 443, whichever scheme it names); an explicit port pins that port.
+    """
+    plain = _entry_url(entry)
+    parsed = parse_scoped_url(plain)
+    ports = {parsed.port} if urlsplit(plain).port is not None else _DEFAULT_PORT_SET
+    if parsed.host != view.host or view.port not in ports:
+        return False
+    if entry.endswith(_PREFIX_SUFFIX):
+        return all(path_under(path, parsed.path) for path in view.candidate_paths)
+    return view.candidate_paths <= parsed.candidate_paths
+
+
 def check_url(scope: Scope, url: str) -> None:
     """Refuse *url* unless every interpretation of it lies inside *scope*.
 
@@ -265,13 +291,19 @@ def check_url(scope: Scope, url: str) -> None:
     view = parse_scoped_url(url)
     allowed_hosts = {normalize_host(h) for h in scope.hosts}
     if view.host not in allowed_hosts:
-        raise ScopeViolation(f'host {view.host!r} not in scope hosts', rule_code='scope-invalid')
+        raise ScopeViolation(f'host {view.host!r} not in scope hosts', rule_code='scope-invalid', kind='host')
     allowed_ports = set(scope.ports) if scope.ports else {80, 443}
     if view.port not in allowed_ports:
-        raise ScopeViolation(f'port {view.port} not in scope ports {sorted(allowed_ports)}', rule_code='scope-invalid')
+        raise ScopeViolation(
+            f'port {view.port} not in scope ports {sorted(allowed_ports)}', rule_code='scope-invalid', kind='port'
+        )
     for path in view.candidate_paths:
         if not _path_allowed(scope, path):
-            raise ScopeViolation(f'path {path!r} matches no allowed prefix or an exclusion', rule_code='scope-invalid')
+            raise ScopeViolation(
+                f'path {path!r} matches no allowed prefix or an exclusion', rule_code='scope-invalid', kind='path'
+            )
+    if scope.urls and not any(_url_entry_matches(entry, view) for entry in scope.urls):
+        raise ScopeViolation('URL is not in the authorized URL list', rule_code='scope-invalid', kind='url-list')
 
 
 def validate_scope(scope: Scope) -> list[str]:
@@ -291,6 +323,11 @@ def validate_scope(scope: Scope) -> list[str]:
         for entry in getattr(scope, field_name):
             if not entry or not entry.startswith('/'):
                 problems.append(f'{field_name} entry {entry!r} must be an absolute path')
+    for entry in scope.urls:
+        try:
+            parse_scoped_url(_entry_url(entry))
+        except ScopeViolation as exc:
+            problems.append(f'urls entry {entry!r}: {exc}')
     for exclusion in scope.exclusions:
         if scope.path_prefixes and not any(path_under(exclusion, p) for p in scope.path_prefixes):
             problems.append(f'exclusion {exclusion!r} is not within any path prefix')
@@ -316,6 +353,28 @@ def parse_scope_target(spec: str) -> tuple[str, frozenset[int]]:
     return parsed.host, frozenset({parsed.port} if explicit_port else {80, 443})
 
 
+def _extend_url_list(scope: Scope, spec: str) -> Scope:
+    """``extend_scope`` when an authorized URL list is active: only a full URL (``…/*`` for a prefix) widens it.
+
+    A bare host or ``host:port`` would change nothing a request is checked against, so it is refused with a hint.
+    """
+    spec = spec.strip()
+    if '://' not in spec:
+        raise ScopeViolation(
+            f'an authorized URL list is active, so scope grows by URL, not host: use /scope add <url> '
+            f'(end it with /* for a path prefix), e.g. https://{spec}/*',
+            rule_code='scope-invalid',
+        )
+    plain = _entry_url(spec)
+    parse_scoped_url(plain)  # refuse anything ambiguous before it joins the list
+    if spec in scope.urls:
+        return scope
+    extended = apply_urls(scope, [*scope.urls, spec])
+    if problems := validate_scope(extended):
+        raise ScopeViolation(f'extended scope is invalid: {"; ".join(problems)}', rule_code='scope-invalid')
+    return extended
+
+
 def extend_scope(scope: Scope, spec: str) -> Scope:
     """Return *scope* plus the host and port(s) named by *spec*; it only ever grows.
 
@@ -323,6 +382,13 @@ def extend_scope(scope: Scope, spec: str) -> Scope:
     adding a port keeps 80 and 443 explicitly. Raises :class:`ScopeViolation` when *spec* is ambiguous
     or the result fails the E3 checks.
     """
+    if scope.urls:
+        return _extend_url_list(scope, spec)
+    return _extend_hosts_ports(scope, spec)
+
+
+def _extend_hosts_ports(scope: Scope, spec: str) -> Scope:
+    """The host/port half of :func:`extend_scope`, ignoring any URL list."""
     host, ports = parse_scope_target(spec)
     hosts = scope.hosts if host in {normalize_host(h) for h in scope.hosts} else [*scope.hosts, host]
     if scope.ports:
@@ -334,3 +400,51 @@ def extend_scope(scope: Scope, spec: str) -> Scope:
     if problems := validate_scope(extended):
         raise ScopeViolation(f'extended scope is invalid: {"; ".join(problems)}', rule_code='scope-invalid')
     return extended
+
+
+def _as_prefix(url: str) -> str:
+    """*url* as a ``/*`` path-prefix entry: query and fragment dropped, so ``http://foo/`` becomes ``http://foo/*``."""
+    if url.endswith(_PREFIX_SUFFIX):
+        return url
+    parts = urlsplit(url)
+    return f'{parts.scheme}://{parts.netloc}{parts.path.rstrip("/")}{_PREFIX_SUFFIX}'
+
+
+def parse_urls_file(text: str, *, recursive: bool = False) -> list[str]:
+    """Parse an authorized-URLs file: one URL per line; blank lines and whole-line ``#`` comments are ignored (#121).
+
+    A trailing ``/*`` makes an entry a path prefix; with *recursive* every entry is one. Duplicates collapse, keeping first-seen order. Raises
+    :class:`ScopeViolation` naming the line for anything :func:`parse_scoped_url` refuses, and when the
+    file lists no URL at all (an empty allowlist would silently mean "everything in scope").
+    """
+    urls: list[str] = []
+    for number, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        try:
+            parse_scoped_url(_entry_url(line))
+        except ScopeViolation as exc:
+            raise ScopeViolation(f'line {number}: {exc}', rule_code='scope-invalid') from exc
+        if recursive:
+            line = _as_prefix(line)
+        if line not in urls:
+            urls.append(line)
+    if not urls:
+        raise ScopeViolation('authorized URLs file lists no URLs', rule_code='scope-invalid')
+    return urls
+
+
+def apply_urls(scope: Scope, urls: list[str]) -> Scope:
+    """Return *scope* restricted to the exact *urls*; their hosts and ports are added so the other checks agree.
+
+    Hosts and ports are only ever added (80 and 443 always, since entries without a port cover both);
+    path prefixes, exclusions and budgets are unchanged.
+    """
+    extended = scope
+    for url in urls:
+        extended = _extend_hosts_ports(extended, _entry_url(url))
+    ports = extended.ports
+    if ports:  # 80 and 443 are always open for the listed URLs; an empty list already means exactly those
+        ports = [*ports, *sorted(_DEFAULT_PORT_SET - set(ports))]
+    return extended.model_copy(update={'urls': urls, 'ports': ports})

@@ -1089,7 +1089,8 @@ async def test_http_request_batch_partial_failure_keeps_successful_results(
         (call,) = await tmp_store.tool_calls(session.run_id)
         assert _summary(call.result) == {'total': 5, 'sent': 2, 'refused': 3, 'errored': 0}
         assert [r.get('refused') for r in call.result['items']] == [None, 'method', 'scope', 'scope', None]
-        assert '/scope add' in rows[2]['reason']
+        assert rows[2]['kind'] == 'path'
+        assert 'outside the engagement rules' in rows[2]['reason']
 
 
 async def test_http_request_batch_enforces_item_cap(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
@@ -1183,3 +1184,13 @@ def test_tester_instructions_describe_batch_workflow() -> None:
     assert 'http_request_batch' in TESTER_INSTRUCTIONS
     assert 'run_code' in TESTER_INSTRUCTIONS
     assert str(BATCH_MAX_ITEMS) in TESTER_INSTRUCTIONS
+
+
+def test_scope_refusal_advice_depends_on_the_rule() -> None:
+    from partex.agent_adapter.tester import scope_refusal_advice
+    from partex.errors import ScopeViolation
+
+    assert '/scope add <url>' in scope_refusal_advice(ScopeViolation('x', kind='url-list'))
+    assert '/scope add <host[:port]>' in scope_refusal_advice(ScopeViolation('x', kind='host'))
+    assert '/scope add <host[:port]>' in scope_refusal_advice(ScopeViolation('x', kind='port'))
+    assert 'outside the engagement rules' in scope_refusal_advice(ScopeViolation('x', kind='path'))

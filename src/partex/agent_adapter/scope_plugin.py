@@ -27,7 +27,8 @@ SUBCOMMANDS = ('add', 'confirm', 'cancel')
 
 def describe(scope: Scope) -> str:
     ports = ', '.join(map(str, scope.ports)) or '80/443 (scheme defaults)'
-    return f'hosts: {", ".join(scope.hosts)}\nports: {ports}\npaths: {", ".join(scope.path_prefixes) or "/"}'
+    text = f'hosts: {", ".join(scope.hosts)}\nports: {ports}\npaths: {", ".join(scope.path_prefixes) or "/"}'
+    return text + (f'\nauthorized URLs: {len(scope.urls)} (/scope add <url> to add one)' if scope.urls else '')
 
 
 @dataclass(slots=True)
@@ -51,12 +52,14 @@ class ScopeControl:
             return f'Refused: {exc}'
         added_hosts = [h for h in after.hosts if h not in before.hosts]
         added_ports = [p for p in after.ports if p not in before.ports]
-        if not added_hosts and not added_ports:
+        added_urls = [u for u in after.urls if u not in before.urls]
+        if not added_hosts and not added_ports and not added_urls:
             self.pending = None
             return 'Already in scope; nothing to add.'
         self.pending = spec
         lines = ['Would add to the engagement scope (ports apply to every host in scope):']
         lines += [f'  + host {host}' for host in added_hosts] + [f'  + port {port}' for port in added_ports]
+        lines += [f'  + url {url}' for url in added_urls]
         lines.append('Not in effect yet. Type /scope confirm to apply it, or /scope cancel.')
         return '\n'.join(lines)
 

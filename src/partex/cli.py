@@ -42,6 +42,11 @@ SKILL_DIR_ARGS: dict[str, Any] = {
     'metavar': 'DIR',
     'help': 'extra skill root offered to the model as on-demand playbooks (data only; repeatable)',
 }
+RECURSIVE_HELP = 'with --urls-file: treat every listed URL as a path prefix (http://foo/ allows everything under it)'
+URLS_FILE_HELP = (
+    'file of authorized URLs, one per line (# comments; a trailing /* allows a path prefix). Only these URLs can be '
+    'requested, and target.base_url must be listed (#121)'
+)
 INSECURE_HELP = (
     'accept invalid TLS certificates (self-signed, expired, hostname mismatch) for this run; also '
     'engagement tls.verify=false. Recorded on the run, never available to the model'
@@ -173,6 +178,8 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument('engagement', help='engagement directory or engagement.json path')
     test.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
     test.add_argument('--insecure', action='store_true', help=INSECURE_HELP)
+    test.add_argument('--urls-file', default=None, help=URLS_FILE_HELP)
+    test.add_argument('--recursive', action='store_true', help=RECURSIVE_HELP)
     test_selection = test.add_mutually_exclusive_group()
     test_selection.add_argument(
         '--checks',
@@ -278,6 +285,8 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument('engagement', help='engagement directory or engagement.json path')
     agent.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
     agent.add_argument('--insecure', action='store_true', help=INSECURE_HELP)
+    agent.add_argument('--urls-file', default=None, help=URLS_FILE_HELP)
+    agent.add_argument('--recursive', action='store_true', help=RECURSIVE_HELP)
     agent.add_argument(
         '--model', required=True, help='as for chat: a model string, or a bare name with --gateway-route'
     )
@@ -384,6 +393,9 @@ def _cmd_test(args: argparse.Namespace) -> int:
     if args.max_seed is not None and args.bundle is None:
         print('partex: usage: --max-seed requires --bundle', file=sys.stderr)
         return EXIT_USAGE
+    if args.recursive and args.urls_file is None:
+        print('partex: usage: --recursive requires --urls-file', file=sys.stderr)
+        return EXIT_USAGE
     db_path = resolve_db_path(args.db)
 
     async def go() -> engine.TestResult:
@@ -394,6 +406,8 @@ def _cmd_test(args: argparse.Namespace) -> int:
                 checks,
                 authorized=bool(args.authorized),
                 insecure=bool(args.insecure),
+                urls_file=args.urls_file,
+                recursive=bool(args.recursive),
                 seed_bundle=args.bundle,
                 max_seed=args.max_seed,
             )
@@ -697,6 +711,9 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     from .agent_adapter import run_agent
     from .models_config import resolve_model, resolve_search_model
 
+    if args.recursive and args.urls_file is None:
+        print('partex: usage: --recursive requires --urls-file', file=sys.stderr)
+        return EXIT_USAGE
     db_path = resolve_db_path(args.db)
     checks = tuple(_split_checks(args.checks))
     if args.from_run is not None:
@@ -717,6 +734,8 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             model,
             authorized=bool(args.authorized),
             insecure=bool(args.insecure),
+            urls_file=Path(args.urls_file) if args.urls_file is not None else None,
+            recursive=bool(args.recursive),
             checks=checks,
             from_run=args.from_run,
             bundle=bundle,
