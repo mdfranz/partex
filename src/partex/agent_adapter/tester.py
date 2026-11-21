@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urljoin
 
+import anyio
 import anyio.to_thread
+from pydantic import BaseModel
 from pydantic_ai import Agent, ModelRetry, RunContext, ToolFailed
 from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.framing import wrap
@@ -39,6 +41,21 @@ SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS'})
 
 MODEL_BODY_CHARS = 8_000
 """Response body characters returned to the model per request; the stored evidence keeps the capped body."""
+
+BATCH_MAX_ITEMS = 50
+"""Hard cap on requests per ``http_request_batch`` call, matching ``CODE_MODE_MAX_TOOL_CALLS``."""
+
+BATCH_CONCURRENCY = 10
+"""Maximum number of in-flight requests per ``http_request_batch`` call (an upper bound: the engagement rate
+limiter still paces the sends, so this does not multiply throughput)."""
+
+
+class BatchRequestItem(BaseModel):
+    """One request specification for :func:`http_request_batch`."""
+
+    method: str
+    path: str
+    headers: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -126,6 +143,91 @@ async def http_request(
         raise ToolFailed(f'request failed: {exc}') from exc
     await _audit(ctx, 'http_request', args, {'evidence_id': evidence.id, 'status': evidence.http.response.status_code})
     return frame_untrusted('http_exchange', _exchange_for_model(evidence))
+
+
+def _batch_url(session: LiveSession, item: BatchRequestItem) -> str:
+    return item.path if '://' in item.path else urljoin(session.engagement.target.base_url, item.path)
+
+
+async def _run_batch_item(session: LiveSession, item: BatchRequestItem) -> dict[str, Any]:
+    verb = item.method.strip().upper()
+    if verb not in SAFE_METHODS:
+        return {
+            'path': item.path,
+            'refused': 'method',
+            'reason': f'{verb} is not available: only GET, HEAD, and OPTIONS are allowed',
+        }
+    try:
+        evidence = await session.request(verb, _batch_url(session, item), headers=item.headers)
+    except ScopeViolation as exc:
+        return {
+            'path': item.path,
+            'refused': 'scope',
+            'reason': f'refused by the engagement scope (nothing was sent): {exc}. You cannot change scope: if the '
+            'operator wants this host or port, they run /scope add <host[:port]> then /scope confirm.',
+        }
+    except BudgetExhausted as exc:
+        return {'path': item.path, 'refused': 'budget', 'reason': f'the engagement request budget is spent: {exc}'}
+    except PartexError as exc:
+        return {'path': item.path, 'error': 'request_failed', 'reason': str(exc)}
+    except Exception as exc:  # noqa: BLE001 - one item's unexpected failure must not discard the rest of the batch
+        return {'path': item.path, 'error': 'internal', 'reason': f'{type(exc).__name__}: {exc}'}
+    return {'path': item.path, 'status': evidence.http.response.status_code, 'evidence_id': evidence.id}
+
+
+async def http_request_batch(ctx: RunContext[TesterDeps], requests: list[BatchRequestItem]) -> str:
+    """Send up to 50 safe-method requests concurrently and return a summary per item.
+
+    Each item is validated and sent through the same engagement scope, rate limit, request budget,
+    and evidence capture as ``http_request``. A refused or failed item does not abort the rest of
+    the batch. Returns ``{path, status, evidence_id}`` for sent requests (use ``lookup_evidence`` to
+    read bodies) or ``{path, refused/error, reason}`` for items that were not sent.
+
+    Args:
+        requests: Up to 50 ``{method, path, headers?}`` items (GET, HEAD, or OPTIONS only).
+    """
+    session = ctx.deps.session
+    if len(requests) > BATCH_MAX_ITEMS:
+        await _audit(ctx, 'http_request_batch', {'count': len(requests)}, {'refused': 'cap'})
+        raise ToolFailed(
+            f'batch size {len(requests)} exceeds the {BATCH_MAX_ITEMS}-item per-call limit; '
+            f'split into batches of at most {BATCH_MAX_ITEMS} requests.'
+        )
+
+    limiter = anyio.CapacityLimiter(BATCH_CONCURRENCY)
+    items: list[dict[str, Any] | None] = [None] * len(requests)
+
+    async def _send_one(index: int, item: BatchRequestItem) -> None:
+        async with limiter:
+            items[index] = await _run_batch_item(session, item)
+
+    async with anyio.create_task_group() as tg:
+        for index, item in enumerate(requests):
+            tg.start_soon(_send_one, index, item)
+
+    resolved = [row for row in items if row is not None]
+    sent = sum(1 for row in resolved if 'evidence_id' in row)
+    refused = sum(1 for row in resolved if 'refused' in row)
+    errored = sum(1 for row in resolved if 'error' in row)
+    # Audit parity with http_request: every item's method/url/header names, and its outcome (header values never).
+    args = {
+        'count': len(requests),
+        'requests': [
+            {
+                'method': item.method.strip().upper(),
+                'url': _batch_url(session, item),
+                'header_names': sorted(item.headers or {}),
+            }
+            for item in requests
+        ],
+    }
+    await _audit(
+        ctx,
+        'http_request_batch',
+        args,
+        {'total': len(requests), 'sent': sent, 'refused': refused, 'errored': errored, 'items': resolved},
+    )
+    return frame_untrusted('http_exchange_batch', resolved)
 
 
 async def run_check(ctx: RunContext[TesterDeps], check_id: str) -> str:
@@ -299,7 +401,15 @@ async def save_report(ctx: RunContext[TesterDeps], name: str, content: str) -> s
     return f'saved {path} ({size} bytes)'
 
 
-TESTER_TOOLS = (*REVIEWER_TOOLS, http_request, download_asset, discover_js_assets, run_check, save_report)
+TESTER_TOOLS = (
+    *REVIEWER_TOOLS,
+    http_request,
+    http_request_batch,
+    download_asset,
+    discover_js_assets,
+    run_check,
+    save_report,
+)
 
 CODE_MODE_TOOLS = tuple(tool.__name__ for tool in REVIEWER_TOOLS)
 """The only tools a ``run_code`` snippet can call (#83): the pure, redacted read tools. Everything that can
@@ -337,7 +447,9 @@ You help a security operator test one target interactively, under a written auth
 operator directs; you send the requests they ask for, run checks, and explain what the evidence
 shows. Do not probe beyond what the operator asked without saying what you intend first.
 
-Tools: http_request (GET, HEAD, OPTIONS only), download_asset (GET-only full-body download for
+Tools: http_request (GET, HEAD, OPTIONS only), http_request_batch (send up to 50 safe-method requests
+in one call and get {path, status, evidence_id} or {path, refused/error, reason} per item; use
+lookup_evidence for bodies), download_asset (GET-only full-body download for
 large assets such as JS bundles, returning metadata + ev_ ID without the body), discover_js_assets
 (lists <script src> and import URLs from captured evidence without fetching), run_check (registered
 partex checks, e.g. js-analysis; the only way a finding is recorded), save_report (write a Markdown report
@@ -348,7 +460,9 @@ one. Earlier runs are read-only.
 
 run_code runs Python in a sandbox with no network, shell, or environment. Inside it you can call the read
 tools only and read downloaded files under /artifacts (read-only). Use it to analyze or correlate captured
-data; requests, downloads, and checks are still direct tool calls. The sandbox is Monty, a Python subset,
+data, or to generate and filter candidate paths and hand the resulting list to http_request_batch in one
+call instead of looping http_request from chat (split lists larger than 50 items across batches);
+requests, downloads, and checks are still direct tool calls. The sandbox is Monty, a Python subset,
 not CPython:
 - /artifacts holds this run's downloads named by sha256 with no extension; list_evidence says which file
   is which. Nothing else is mounted, so do not walk / or probe for other directories.

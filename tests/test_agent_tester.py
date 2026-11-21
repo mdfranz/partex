@@ -20,10 +20,16 @@ from pydantic_ai.models.test import TestModel
 from partex import engine, target
 from partex.agent_adapter import CHAT_SETTINGS, TesterDeps, build_tester_agent, run_agent
 from partex.agent_adapter.scope_plugin import ScopeControl, ScopePlugin, current_control
-from partex.agent_adapter.tester import CODE_MODE_TOOLS, MODEL_BODY_CHARS, TESTER_INSTRUCTIONS, TESTER_TOOLS
+from partex.agent_adapter.tester import (
+    BATCH_MAX_ITEMS,
+    CODE_MODE_TOOLS,
+    MODEL_BODY_CHARS,
+    TESTER_INSTRUCTIONS,
+    TESTER_TOOLS,
+)
 from partex.agent_adapter.tools import REVIEWER_TOOLS
 from partex.engine import LiveSession, LiveSessionRefused, live_session
-from partex.errors import ScopeViolation
+from partex.errors import PartexError, ScopeViolation
 from partex.models import REDACTED
 from partex.storage import MAX_REPORT_BYTES, RunStore, artifact_dir, run_reports_dir
 
@@ -1016,3 +1022,164 @@ async def test_run_code_sees_only_this_runs_artifacts(tmp_store: RunStore, tmp_p
 def test_session_namer_is_off_for_chat_and_agent() -> None:
     """CLAI2 caps the namer at 250 output tokens, which a reasoning model spends before answering (#102)."""
     assert CHAT_SETTINGS.session_namer is False
+
+
+def _unwrap_untrusted(payload: str) -> Any:
+    return json.loads(payload.split('>', 1)[1].rsplit('<', 1)[0])
+
+
+def _summary(result: Any) -> dict[str, Any]:
+    return {k: v for k, v in result.items() if k != 'items'}
+
+
+async def test_http_request_batch_sends_and_captures_evidence(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        before = len(target_app.requests)
+        batch = [
+            {'method': 'GET', 'path': '/'},
+            {'method': 'get', 'path': '/robots.txt', 'headers': {'Authorization': 'Bearer t0k'}},
+            {'method': 'GET', 'path': '/missing'},
+        ]
+        result = await drive(session, tmp_store, [('http_request_batch', {'requests': batch})])
+        (returned,) = (str(p.content) for p in tool_returns(result.all_messages()))
+        assert returned.startswith('<partex_untrusted_data kind="http_exchange_batch"')
+        rows = _unwrap_untrusted(returned)
+        assert [r['path'] for r in rows] == ['/', '/robots.txt', '/missing']
+        assert [r['status'] for r in rows] == [200, 200, 404]
+        assert all('evidence_id' in r and 'body' not in r for r in rows)
+        assert len(target_app.requests) == before + 3
+
+        stored_ids = {e.id for e in await tmp_store.evidence(session.run_id)}
+        assert {r['evidence_id'] for r in rows} <= stored_ids
+
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert call.tool == 'http_request_batch'
+        assert _summary(call.result) == {'total': 3, 'sent': 3, 'refused': 0, 'errored': 0}
+        assert [r['method'] for r in call.args['requests']] == ['GET', 'GET', 'GET']
+        assert call.args['requests'][1]['header_names'] == ['Authorization']
+        assert call.result['items'] == rows
+        assert 't0k' not in json.dumps(call.args) + json.dumps(call.result)
+
+
+async def test_http_request_batch_partial_failure_keeps_successful_results(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        before = len(target_app.requests)
+        batch = [
+            {'method': 'GET', 'path': '/robots.txt'},
+            {'method': 'POST', 'path': '/'},
+            {'method': 'GET', 'path': '/admin/shutdown'},
+            {'method': 'GET', 'path': 'http://evil.test/'},
+            {'method': 'GET', 'path': '/'},
+        ]
+        result = await drive(session, tmp_store, [('http_request_batch', {'requests': batch})])
+        (returned,) = (str(p.content) for p in tool_returns(result.all_messages()))
+        rows = _unwrap_untrusted(returned)
+        assert len(rows) == 5
+        assert rows[0]['path'] == '/robots.txt' and 'evidence_id' in rows[0]
+        assert rows[1]['refused'] == 'method'
+        assert rows[2]['refused'] == 'scope'
+        assert rows[3]['refused'] == 'scope'
+        assert rows[4]['path'] == '/' and 'evidence_id' in rows[4]
+        assert len(target_app.requests) == before + 2
+
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert _summary(call.result) == {'total': 5, 'sent': 2, 'refused': 3, 'errored': 0}
+        assert [r.get('refused') for r in call.result['items']] == [None, 'method', 'scope', 'scope', None]
+        assert '/scope add' in rows[2]['reason']
+
+
+async def test_http_request_batch_enforces_item_cap(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        before = list(target_app.requests)
+        batch = [{'method': 'GET', 'path': f'/p{i}'} for i in range(BATCH_MAX_ITEMS + 1)]
+        result = await drive(session, tmp_store, [('http_request_batch', {'requests': batch})])
+        (failed,) = tool_returns(result.all_messages())
+        assert getattr(failed, 'outcome', None) == 'failed'
+        assert str(BATCH_MAX_ITEMS) in str(failed.content)
+        assert target_app.requests == before
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert call.result == {'refused': 'cap'}
+
+
+async def test_http_request_batch_accepts_exactly_the_cap_and_empty(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        full = [{'method': 'GET', 'path': f'/p{i}'} for i in range(BATCH_MAX_ITEMS)]
+        result = await drive(
+            session,
+            tmp_store,
+            [('http_request_batch', {'requests': full}), ('http_request_batch', {'requests': []})],
+        )
+        first, second = (_unwrap_untrusted(str(p.content)) for p in tool_returns(result.all_messages()))
+        assert len(first) == BATCH_MAX_ITEMS and all('evidence_id' in r for r in first)
+        assert second == []
+
+
+async def test_http_request_batch_reports_failed_and_unexpected_items(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        real = session.request
+
+        async def flaky(method: str, url: str, **kwargs: Any) -> Any:
+            if url.endswith('/boom'):
+                raise PartexError('connection reset')
+            if url.endswith('/bug'):
+                raise RuntimeError('unexpected')
+            return await real(method, url, **kwargs)
+
+        monkeypatch.setattr(session, 'request', flaky)
+        batch = [{'method': 'GET', 'path': p} for p in ('/', '/boom', '/bug', '/robots.txt')]
+        result = await drive(session, tmp_store, [('http_request_batch', {'requests': batch})])
+        (returned,) = (str(p.content) for p in tool_returns(result.all_messages()))
+        rows = _unwrap_untrusted(returned)
+        assert [r.get('error') for r in rows] == [None, 'request_failed', 'internal', None]
+        assert 'evidence_id' in rows[0] and 'evidence_id' in rows[3]
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert _summary(call.result) == {'total': 4, 'sent': 2, 'refused': 0, 'errored': 2}
+
+
+async def test_http_request_batch_respects_budget_under_concurrency(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    async with live_session(engagement(tmp_path, target_app, max_requests=4), tmp_store, authorized=True) as session:
+        # Baseline used 1 request; 3 remain in the budget for the 6-item batch.
+        batch = [{'method': 'GET', 'path': f'/item-{i}'} for i in range(6)]
+        result = await drive(session, tmp_store, [('http_request_batch', {'requests': batch})])
+        (returned,) = (str(p.content) for p in tool_returns(result.all_messages()))
+        rows = _unwrap_untrusted(returned)
+        sent_rows = [r for r in rows if 'evidence_id' in r]
+        budget_rows = [r for r in rows if r.get('refused') == 'budget']
+        assert len(sent_rows) == 3
+        assert len(budget_rows) == 3
+        assert len(target_app.requests) == 4
+        assert session.requests_spent == 4
+
+        (call,) = await tmp_store.tool_calls(session.run_id)
+        assert _summary(call.result) == {'total': 6, 'sent': 3, 'refused': 3, 'errored': 0}
+
+
+async def test_http_request_batch_is_direct_tool_not_code_mode_tool(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    assert 'http_request_batch' in {tool.__name__ for tool in TESTER_TOOLS}
+    assert 'http_request_batch' not in CODE_MODE_TOOLS
+    out, sent = await run_snippets(
+        tmp_store,
+        tmp_path,
+        target_app,
+        ['await http_request_batch([{"method": "GET", "path": "/"}])'],
+    )
+    assert 'Name `http_request_batch` used when not defined' in out[0]
+    assert sent == 0
+
+
+def test_tester_instructions_describe_batch_workflow() -> None:
+    assert 'http_request_batch' in TESTER_INSTRUCTIONS
+    assert 'run_code' in TESTER_INSTRUCTIONS
+    assert str(BATCH_MAX_ITEMS) in TESTER_INSTRUCTIONS

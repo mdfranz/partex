@@ -21,13 +21,16 @@
 #   -k, --insecure           accept invalid TLS certificates (self-signed, expired, mismatch) for the target
 #                            [PARTEX_INSECURE=1]; recorded on the run, never available to the model
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
+#   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000]
+#   -R, --max-rps N          requests per second [PARTEX_MAX_RPS, default 2; ceiling 64]
 #       --no-tui             run `partex test` + show only [NO_TUI=1]
 #   -h, --help
 # Required for the chat step: PYDANTIC_AI_GATEWAY_API_KEY when the model goes through the Gateway (a bare model
 # name, or gateway/...); a direct provider string such as openai:... needs that provider's own key (OPENAI_API_KEY).
 #
 # Traffic: the session opens with 3 GETs (TARGET_URL, /robots.txt, /partex-nonexistent-probe-0); after that
-# only what you ask for in the chat (GET/HEAD/OPTIONS). 2 req/s, budget 50 per session, host and port locked
+# only what you ask for in the chat (GET/HEAD/OPTIONS). 2 req/s, budget 50 per session (--max-rps /
+# --max-requests change them), host and port locked
 # to TARGET_URL, /logout|/reboot|/reset|/restart|/factory excluded — scope is checked by partex, not the model.
 set -euo pipefail
 export PYDANTIC_AI_NO_BANNER=${PYDANTIC_AI_NO_BANNER:-1}  # skip pydantic-ai's startup banner between findings and briefing
@@ -44,6 +47,8 @@ LIST=
 INSECURE=${PARTEX_INSECURE:+1}
 RESUME=${CHAT_ONLY:+1}
 NO_TUI=${NO_TUI:-}
+MAX_REQUESTS=${PARTEX_MAX_REQUESTS:-50}
+MAX_RPS=${PARTEX_MAX_RPS:-2}
 RUN_ID=${RUN_ID:-}   # with --resume: the run to open; otherwise the run to read (--from)
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -56,6 +61,8 @@ while [[ $# -gt 0 ]]; do
     --resume) RESUME=1; shift; if [[ ${1:-} == run_* ]]; then RUN_ID=$1; shift; fi ;;
     -k|--insecure) INSECURE=1; shift ;;
     -l|--list) LIST=1; shift ;;
+    -n|--max-requests) MAX_REQUESTS=${2?$1 needs a value}; shift 2 ;;
+    -R|--max-rps) MAX_RPS=${2?$1 needs a value}; shift 2 ;;
     --no-tui) NO_TUI=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
@@ -65,6 +72,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ $# -eq 0 || -n $TARGET_URL ]] || TARGET_URL=$1
+for _n in MAX_REQUESTS MAX_RPS; do
+  [[ ${!_n} =~ ^[1-9][0-9]*$ ]] || { echo "$_n must be a positive integer, got: ${!_n}" >&2; exit 2; }
+done
 [[ -n $ROUTE_SET || $MODEL != *:* ]] || ROUTE=  # a full model string is not routed through a Gateway route
 case $DB in /*) ;; *) DB=$PWD/$DB ;; esac  # absolute, before the cd below (BSD realpath has no -m)
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)  # absolute, resolved before the cd (works from any directory)
@@ -122,8 +132,8 @@ cat > "$eng/engagement.json" <<JSON
     "path_prefixes": ["/"],
     "exclusions": ["/logout", "/reboot", "/reset", "/restart", "/factory"],
     "ports": [$port],
-    "max_rps": 2,
-    "max_requests": 50
+    "max_rps": $MAX_RPS,
+    "max_requests": $MAX_REQUESTS
   },
   $TLS_JSON
   "authorization": {"attestation": $(json_str "$ATTESTATION"), "operator": $(json_str "${USER:-operator}")},
