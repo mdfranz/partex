@@ -3,13 +3,15 @@
 Search runs in its own one-shot ``Agent`` with ``WebSearch(local=None)`` and zero function tools,
 deps, DB, target-client, or filesystem access. The tester exposes ``web_search(query)`` only when
 ``--search-model`` is configured; every query is validated against egress rules, capped per session,
-audited without result bodies, and returned framed as untrusted data.
+audited without result bodies, and returned framed as untrusted data. When the session supplies a
+``record`` callback, a successful search is also persisted (capped answer and sources) in the run's
+``web_research`` table, linked to its audit row by ``research_id`` (#113).
 """
 
 import re
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 import logfire
@@ -62,6 +64,9 @@ Without it, ``web_search_call`` results carry only ``{'status': 'completed'}``, 
 
 type RefusalReason = Literal['empty', 'length', 'secret', 'id', 'url', 'cap']
 type AuditFn = Callable[[str, dict[str, Any], dict[str, Any]], Awaitable[None]]
+type RecordFn = Callable[..., Awaitable[str]]
+"""Persists one successful search and its audit row; returns the ``wr_`` research ID
+(:meth:`partex.storage.RunStore.add_web_research` bound to the session's run)."""
 
 _PARTEX_ID_RE = re.compile(r'\b(?:ev|fn)_[A-Za-z0-9_-]+\b')
 _URL_RE = re.compile(r'[a-zA-Z][a-zA-Z0-9+.-]*://\S+')
@@ -116,37 +121,54 @@ def validate_search_query(query: str, *, secrets: Iterable[str] = ()) -> str:
     return cleaned
 
 
-def _collect_urls(value: Any, seen: set[str], out: list[str]) -> None:
+def _source_title(entry: dict[Any, Any]) -> str | None:
+    """A readable label for one source: its ``title``, else its ``domain`` (Google grounding), else ``None``."""
+    for key in ('title', 'domain'):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _collect_sources(value: Any, seen: set[str], out: list[dict[str, str | None]]) -> None:
     if isinstance(value, dict):
-        for key, item in value.items():  # pyright: ignore[reportUnknownVariableType]
+        entry = cast('dict[Any, Any]', value)
+        for key, item in entry.items():
             if key in {'url', 'uri'} and isinstance(item, str) and item.startswith(('http://', 'https://')):
                 if item not in seen:
                     seen.add(item)
-                    out.append(item)
+                    out.append({'url': item, 'title': _source_title(entry)})
             else:
-                _collect_urls(item, seen, out)
+                _collect_sources(item, seen, out)
     elif isinstance(value, list):
-        for item in value:  # pyright: ignore[reportUnknownVariableType]
-            _collect_urls(item, seen, out)
+        for item in cast('list[Any]', value):
+            _collect_sources(item, seen, out)
 
 
-def extract_source_urls(messages: Sequence[ModelMessage]) -> list[str]:
-    """Extract deduplicated source URLs from native ``web_search`` parts in *messages*.
+def extract_sources(messages: Sequence[ModelMessage]) -> list[dict[str, str | None]]:
+    """Deduplicated ``{"url", "title"}`` sources from native ``web_search`` parts in *messages*.
 
     Return parts carry search results. Call parts can name a page too: OpenAI's model opens pages
     directly (``{'type': 'open_page', 'url': ...}``), and those URLs appear only in the call args (#144).
+    Google grounding often returns opaque ``vertexaisearch.cloud.google.com`` redirect URLs; the title (or
+    domain) is what tells a reader which site was used, so it is kept alongside the URL (#113).
     """
     seen: set[str] = set()
-    urls: list[str] = []
+    sources: list[dict[str, str | None]] = []
     for message in messages:
         if not isinstance(message, ModelResponse):
             continue
         for part in message.parts:
             if isinstance(part, NativeToolReturnPart) and part.tool_name == WebSearchTool.kind:
-                _collect_urls(part.content, seen, urls)
+                _collect_sources(part.content, seen, sources)
             elif isinstance(part, NativeToolCallPart) and part.tool_name == WebSearchTool.kind:
-                _collect_urls(part.args_as_dict(), seen, urls)
-    return urls
+                _collect_sources(part.args_as_dict(), seen, sources)
+    return sources
+
+
+def extract_source_urls(messages: Sequence[ModelMessage]) -> list[str]:
+    """Extract deduplicated source URLs from native ``web_search`` parts in *messages*."""
+    return [source['url'] or '' for source in extract_sources(messages)]
 
 
 def _search_settings(provider: SearchProvider) -> AnthropicModelSettings | OpenAIResponsesModelSettings | None:
@@ -194,8 +216,14 @@ class WebSearcher:
             args['project'] = self.config.project
         return args
 
-    async def search(self, query: str, *, secrets: Iterable[str], audit: AuditFn) -> str:
-        """Validate *query*, run the isolated search agent, audit, and return framed untrusted data."""
+    async def search(
+        self, query: str, *, secrets: Iterable[str], audit: AuditFn, record: RecordFn | None = None
+    ) -> str:
+        """Validate *query*, run the isolated search agent, audit, and return framed untrusted data.
+
+        With *record*, a successful search is persisted together with its audit row and the returned payload
+        carries its ``research_id``; refused and failed searches are only audited and never persisted.
+        """
         secret_tuple = tuple(s for s in secrets if s)
         with logfire.span(
             'partex.web_search',
@@ -224,25 +252,36 @@ class WebSearcher:
                 await audit('web_search', self._base_audit_args(cleaned), {'error': str(exc)})
                 raise ToolFailed(f'web search failed: {exc}') from exc
 
-            sources = extract_source_urls(result.new_messages())
+            sources = extract_sources(result.new_messages())
             answer = result.output
             truncated = len(answer) > SEARCH_RESULT_MAX_CHARS
             bounded_answer = answer[:SEARCH_RESULT_MAX_CHARS]
 
+            payload: dict[str, Any] = {
+                'query': cleaned,
+                'answer': bounded_answer,
+                'sources': sources,
+                'truncated': truncated,
+            }
             # Never write search result bodies into tool_calls; record query, provider/auth, source URLs, truncated.
-            await audit(
-                'web_search',
-                self._base_audit_args(cleaned),
-                {'sources': sources, 'truncated': truncated},
-            )
+            if record is None:
+                await audit(
+                    'web_search',
+                    self._base_audit_args(cleaned),
+                    {'sources': [source['url'] for source in sources], 'truncated': truncated},
+                )
+            else:
+                payload['research_id'] = await record(
+                    query=cleaned,
+                    provider=self.config.provider,
+                    model=self.config.spec,
+                    auth_mode=self.config.auth_mode,
+                    answer=bounded_answer,
+                    sources=sources,
+                    truncated=truncated,
+                    audit_args=self._base_audit_args(cleaned),
+                )
+                span.set_attribute('research_id', payload['research_id'])
             span.set_attribute('source_count', len(sources))
             span.set_attribute('truncated', truncated)
-            return frame_untrusted(
-                'web_search',
-                {
-                    'query': cleaned,
-                    'answer': bounded_answer,
-                    'sources': sources,
-                    'truncated': truncated,
-                },
-            )
+            return frame_untrusted('web_search', payload)

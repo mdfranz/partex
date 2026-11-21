@@ -115,8 +115,10 @@ def test_agent_is_named_and_needs_no_credentials_to_build() -> None:
         'list_evidence',
         'list_findings',
         'list_reports',
+        'list_research',
         'list_runs',
         'lookup_evidence',
+        'lookup_research',
         'read_report',
     ]
 
@@ -209,6 +211,9 @@ def test_reviewer_has_no_write_or_network_tools() -> None:
         'list_coverage',
         'list_evidence',
         'lookup_evidence',
+        '_research_summary',
+        'list_research',
+        'lookup_research',
         'list_reports',
         'read_report',
     }

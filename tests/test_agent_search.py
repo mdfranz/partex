@@ -14,7 +14,7 @@ import logfire
 import pytest
 from google.auth.credentials import AnonymousCredentials
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from pydantic_ai import ModelProfile, ToolFailed, WebSearchTool
+from pydantic_ai import ModelProfile, RunContext, ToolFailed, WebSearchTool
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -29,7 +29,7 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.usage import RequestUsage
+from pydantic_ai.usage import RequestUsage, RunUsage
 from rich.console import Console
 
 from partex import agent_adapter, cli
@@ -43,11 +43,15 @@ from partex.agent_adapter.search import (
     validate_search_query,
 )
 from partex.agent_adapter.tester import WEB_SEARCH_UNAVAILABLE_LINE
+from partex.agent_adapter.tester import web_search as web_search_tool
+from partex.agent_adapter.tools import ReviewDeps, list_research, lookup_research
 from partex.agent_adapter.usage import UsageRecordingModel
 from partex.engine import live_session
+from partex.export import export_run_data
 from partex.models import REDACTED
 from partex.models_config import ModelConfigError, SearchModelConfig, resolve_search_model
-from partex.storage import RunStore
+from partex.operator_export import render_markdown_report
+from partex.storage import RunReader, RunStore
 from partex.telemetry import JsonlSpanExporter
 
 _TARGET_APP = Path(__file__).parent.parent / 'fixtures' / 'target_app' / 'app.py'
@@ -527,7 +531,7 @@ async def test_web_search_end_to_end_audit_usage_span_truncation_and_refusals(
         inner = json.loads(framed.removeprefix(prefix).removesuffix(suffix))
         assert inner['truncated'] is True
         assert len(inner['answer']) == SEARCH_RESULT_MAX_CHARS
-        assert inner['sources'] == ['https://nginx.org/en/security_advisories.html']
+        assert inner['sources'] == [{'url': 'https://nginx.org/en/security_advisories.html', 'title': 'nginx'}]
         assert len(fake_search_model.calls) == 1
 
         # 3. Cap refusal after max_calls=1.
@@ -713,3 +717,100 @@ def test_partex_sh_help_mentions_search_model() -> None:
     proc = subprocess.run(['bash', str(script), '--help'], capture_output=True, text=True, check=True)
     assert '--search-model' in proc.stdout
     assert 'PARTEX_SEARCH_MODEL' in proc.stdout
+
+
+# ── Persisted web research (#113) ──────────────────────────────────────────────
+
+
+def _ctx(deps: Any) -> RunContext[Any]:
+    return RunContext(deps=deps, model=FakeNativeSearchModel(), usage=RunUsage())
+
+
+def _inner(framed: str, kind: str) -> Any:
+    prefix = f'<partex_untrusted_data kind="{kind}">'
+    assert framed.startswith(prefix), framed[:80]
+    return json.loads(framed[len(prefix) : -len('</partex_untrusted_data>')])
+
+
+async def test_web_search_persists_research_and_read_tools_expose_it_across_sessions(
+    tmp_path: Path, target_app: Any
+) -> None:
+    eng = _engagement(tmp_path, target_app)
+    db = tmp_path / 'runs.db'
+    fake = FakeNativeSearchModel(
+        answer='Nginx 1.24.0 has CVE-2024-7347.',
+        sources_content=[
+            {'uri': 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAA', 'domain': 'nvd.nist.gov'}
+        ],
+        name='gemini-test',
+    )
+    config = SearchModelConfig(
+        spec='google-cloud:gemini-test',
+        provider='google-cloud',
+        model_name='gemini-test',
+        auth_mode='adc',
+        model=fake,
+        project='example-project',
+        location='global',
+    )
+
+    async with await RunStore.open(db) as store, live_session(eng, store, authorized=True, checks=()) as session:
+        searcher = WebSearcher(config=config, agent=build_search_agent(fake, provider='google-cloud'))
+        deps = TesterDeps(run_id=session.run_id, reader=store, session=session, store=store, searcher=searcher)
+
+        # A refused query is audited but never persisted.
+        with pytest.raises(ToolFailed):
+            await web_search_tool(_ctx(deps), 'see ev_1234 please')
+        assert await store.web_research(session.run_id) == []
+
+        framed = await web_search_tool(_ctx(deps), 'nginx 1.24.0 cve')
+        result = _inner(framed, 'web_search')
+        research_id = result['research_id']
+        assert research_id.startswith('wr_')
+        assert result['sources'] == [
+            {'url': 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAA', 'title': 'nvd.nist.gov'}
+        ]
+        (entry,) = await store.web_research(session.run_id)
+        assert (entry.id, entry.model, entry.auth_mode) == (research_id, 'google-cloud:gemini-test', 'adc')
+        calls = [call for call in await store.tool_calls(session.run_id) if call.tool == 'web_search']
+        assert calls[-1].result['research_id'] == research_id
+        assert 'CVE-2024-7347.' not in json.dumps([call.result for call in calls])
+        first_run = session.run_id
+
+    # A later read-only reader (partex chat, or agent --from) sees it, always framed as untrusted web_search data.
+    async with await RunStore.open(db) as store:
+        later = await store.create_run(
+            input_kind='engagement', input_ref='x', input_sha256='', engine_version='t', selected_checks=()
+        )
+    async with await RunReader.open(db) as reader:
+        deps = ReviewDeps(run_id=later, reader=reader, previous_run_id=first_run)
+        listed = _inner(await list_research(_ctx(deps), run='previous'), 'web_search')
+        assert [item['id'] for item in listed] == [research_id]
+        assert listed[0]['sources'] == 1
+        full = _inner(await lookup_research(_ctx(deps), research_id, run='previous'), 'web_search')
+        assert full['answer'] == 'Nginx 1.24.0 has CVE-2024-7347.'
+        assert _inner(await list_research(_ctx(deps)), 'web_search') == []  # nothing in the later run itself
+        with pytest.raises(ToolFailed, match='no web research'):
+            await lookup_research(_ctx(deps), research_id)  # IDs never resolve across runs
+
+        payload = await export_run_data(reader, first_run)
+    assert payload['web_research'] == [
+        {
+            'answer': 'Nginx 1.24.0 has CVE-2024-7347.',
+            'auth_mode': 'adc',
+            'model': 'google-cloud:gemini-test',
+            'provider': 'google-cloud',
+            'query': 'nginx 1.24.0 cve',
+            'sources': [
+                {'url': 'https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAA', 'title': 'nvd.nist.gov'}
+            ],
+            'truncated': False,
+        }
+    ]
+    report = render_markdown_report(payload, first_run)
+    assert '## Web research' in report
+    assert '> Nginx 1.24.0 has CVE-2024-7347.' in report
+    assert 'nvd.nist.gov: <https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAA>' in report
+    text = cli._render_text(payload, first_run)  # pyright: ignore[reportPrivateUsage]
+    assert 'web research: 1' in text
+    assert 'nginx 1.24.0 cve (google-cloud, 1 sources)' in text

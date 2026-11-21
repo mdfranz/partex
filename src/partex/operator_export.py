@@ -115,6 +115,24 @@ def render_markdown_report(payload: dict[str, Any], run_id: str) -> str:
             else f'- {c["surface"]} / {c["risk_area"]}: {c["outcome"]}'
             for c in coverage
         ]
+    research: list[dict[str, Any]] = payload.get('web_research', [])
+    if research:
+        lines += [
+            '',
+            '## Web research',
+            '',
+            '_Answers from a separate search model over public web pages; not evidence._',
+        ]
+        for entry in research:
+            lines += ['', f'### {_cell(entry["query"])}', '', f'{entry["provider"]} `{entry["model"]}`', '']
+            lines += ['> ' + line if line else '>' for line in entry['answer'].splitlines()]
+            if entry['truncated']:
+                lines.append('> _(truncated)_')
+            if entry['sources']:
+                lines += ['', 'Sources:']
+                lines += [
+                    f'- {_cell(source.get("title") or source["url"])}: <{source["url"]}>' for source in entry['sources']
+                ]
     if payload['summary'] is not None:
         lines += ['', '## Summary', '', payload['summary']['narrative']]
     lines += ['', '_Secrets are redacted in this report._', '']
