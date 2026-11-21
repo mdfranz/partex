@@ -9,7 +9,7 @@ import re
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal, Self, cast
 
-from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, TypeAdapter, field_validator, model_validator
 
 Severity = Literal['info', 'low', 'medium', 'high', 'critical']
 
@@ -324,6 +324,43 @@ class TlsPolicy(BaseModel):
     insecure_hosts: list[str] = Field(default_factory=list)
 
 
+USER_AGENT_MAX_CHARS = 512
+_USER_AGENT_CHARS = re.compile(r'[\x20-\x7e]+')
+
+
+def check_user_agent(value: str) -> str:
+    """Validate a configured User-Agent (#135): one line of printable ASCII, not blank, at most 512 characters.
+
+    Printable ASCII rules out CR/LF (header injection), every other control or format character, and values
+    an HTTP/1.1 header cannot carry. Raises :class:`ValueError`; returns *value* unchanged.
+    """
+    if not value.strip():
+        raise ValueError('user_agent must not be empty')
+    if len(value) > USER_AGENT_MAX_CHARS:
+        raise ValueError(f'user_agent exceeds {USER_AGENT_MAX_CHARS} characters ({len(value)} given)')
+    if not _USER_AGENT_CHARS.fullmatch(value):
+        raise ValueError('user_agent must be a single line of printable ASCII (no control or format characters)')
+    return value
+
+
+class HttpPolicy(BaseModel):
+    """HTTP presentation for the target client (#135), symmetric with :class:`TlsPolicy`.
+
+    ``user_agent`` is sent on every request this engagement makes unless a request sets its own. Unset means
+    ``partex/<engine version>``, never the HTTP library's own default (which would disclose the tool stack).
+    Not a secret: it is captured in evidence like any other request header.
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    user_agent: str | None = None
+
+    @field_validator('user_agent')
+    @classmethod
+    def _valid_user_agent(cls, value: str | None) -> str | None:
+        return None if value is None else check_user_agent(value)
+
+
 class Authorization(BaseModel):
     """Authorization attestation — required before any live traffic."""
 
@@ -342,6 +379,7 @@ class Engagement(BaseModel):
     target: EngagementTarget
     scope: Scope
     tls: TlsPolicy = Field(default_factory=TlsPolicy)
+    http: HttpPolicy = Field(default_factory=HttpPolicy)
     authorization: Authorization
     credentials: dict[str, str] = Field(default_factory=dict)
     roles: dict[str, str] = Field(default_factory=dict)

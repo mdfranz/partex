@@ -24,6 +24,7 @@ FAILURE_FIXTURES = {
     'inline-credential': 'credential-invalid',
     'bad-env-var-name': 'credential-invalid',
     'role-duplicate-env': 'credential-invalid',
+    'bad-user-agent': 'http-invalid',
 }
 
 

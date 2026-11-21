@@ -116,6 +116,7 @@ async def run_agent(
     insecure: bool = False,
     urls_file: Path | None = None,
     recursive: bool = False,
+    user_agent: str | None = None,
     checks: tuple[str, ...] = ('version-disclosure',),
     from_run: str | None = None,
     bundle: Path | None = None,
@@ -145,6 +146,7 @@ async def run_agent(
             insecure=insecure,
             urls_file=urls_file,
             recursive=recursive,
+            user_agent=user_agent,
             checks=checks,
         ) as session:
             seed_plan = None

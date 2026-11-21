@@ -31,6 +31,7 @@ callback.  ``target.py`` never writes storage.
 
 import codecs
 import hashlib
+import importlib.metadata
 import ipaddress
 import os
 import socket
@@ -248,6 +249,14 @@ class _PinnedTransport(httpx2.AsyncHTTPTransport):
         await super().aclose()
 
 
+def default_user_agent() -> str:
+    """``partex/<engine version>``: what a run presents as when the engagement sets no ``http.user_agent`` (#135).
+
+    Honest and stable per run, without disclosing the underlying HTTP library and its version.
+    """
+    return f'partex/{importlib.metadata.version("partex")}'
+
+
 class ScopedHttpClient:
     """The engagement-scoped HTTP client — the single send-time scope gate.
 
@@ -291,10 +300,13 @@ class ScopedHttpClient:
         self._budget = (
             budget if budget is not None else RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps)
         )
+        # A client-level default, so every send path inherits it (request, download_asset, redirects, seeded
+        # probes, agent tools, verify replay); a request's own User-Agent header still wins (#135).
         self._client = httpx2.AsyncClient(
             transport=_PinnedTransport(self._pins, inner=transport, is_insecure=self._tls_unverified),
             follow_redirects=False,
             timeout=timeout,
+            headers={'User-Agent': engagement.http.user_agent or default_user_agent()},
         )
 
     @property
