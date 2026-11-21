@@ -21,6 +21,14 @@ This example reviews bundled HTTP traffic offline. It prints sample findings and
 - **Run authorized live checks.** Capture responses within a defined target scope and request budget, then save the evidence alongside the findings.
 - **Work with saved results.** List past runs, export reports or captured traffic, and use read-only chat to review findings and their evidence.
 
+## Skills, checks, and plugins
+
+Skills are Markdown guides that the interactive session can consult. The bundled guides cover headers and cookies, version disclosure, JavaScript review, API inventory, authorization, and session controls.
+
+The built-in executable checks are `header-security`, `js-analysis`, and `version-disclosure`. Additional checks can register through the Python `partex.checks` entry point. Run `uv run partex checks` to see installed checks and their linked skills. [Skill guides](docs/skills/README.md)
+
+The live terminal includes a built-in CLAI2 plugin for operator commands. `/scope` shows the current scope and requires operator confirmation for changes. `/report` writes a redacted Markdown report, and `/secrets` writes secret values to a private file.
+
 ## Pydantic libraries
 
 Pydantic validates inputs such as assessment settings and captured traffic. Pydantic AI connects models to the tools they can use, and its CLAI2 package provides the interactive terminal. Monty runs model-generated Python in a sandbox when the interactive session needs to work with saved evidence. [Runtime](RUNTIME.md) · [Dependencies](DEPS.md)
@@ -39,5 +47,19 @@ Live checks send HTTP requests and require authorization. The bundled local test
 - `./partex.sh --help` shows options for the interactive testing launcher.
 - `./partex.sh list` lists saved runs from the launcher's database.
 - `uv run partex --help` lists the available CLI commands.
+
+To inspect a saved run, copy its ID from `./partex.sh list` and substitute it below. The launcher uses `./partex-probe.db` by default.
+
+```sh
+uv run partex show RUN_ID --db ./partex-probe.db --format text
+./partex.sh -m openrouter:deepseek/deepseek-v4.1-flash-1017 --resume RUN_ID
+```
+
+The first command prints the saved evidence and findings. The second opens read-only chat on that run and requires an OpenRouter API key.
+
+## In review
+
+- Optional provider-native web search uses a separate model configured through `PARTEX_SEARCH_MODEL`. Search queries go to the selected provider. [PR #112](https://github.com/mdfranz/partex/pull/112)
+- A proposed batch HTTP tool groups requests under the existing scope, rate, and request limits. [PR #115](https://github.com/mdfranz/partex/pull/115)
 
 [Design](PLAN.md)
