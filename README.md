@@ -66,6 +66,12 @@ To review that run with a model, resume the latest saved run in read-only chat. 
 ./partex.sh -m openrouter:deepseek/deepseek-v4.1-flash-1017 --resume
 ```
 
+To use Z.ai's GLM-5.3 through Pydantic AI Gateway, set `PYDANTIC_AI_GATEWAY_API_KEY` and select the `doubleword` route:
+
+```sh
+./partex.sh -m zai-org/GLM-5.3 -r doubleword --resume
+```
+
 ## Commands and documentation
 
 - `./partex.sh --help` shows options for the interactive testing launcher.
