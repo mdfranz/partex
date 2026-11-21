@@ -1194,3 +1194,11 @@ def test_scope_refusal_advice_depends_on_the_rule() -> None:
     assert '/scope add <host[:port]>' in scope_refusal_advice(ScopeViolation('x', kind='host'))
     assert '/scope add <host[:port]>' in scope_refusal_advice(ScopeViolation('x', kind='port'))
     assert 'outside the engagement rules' in scope_refusal_advice(ScopeViolation('x', kind='path'))
+
+
+async def test_run_check_rule_id_names_the_owning_check(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        result = await drive(session, tmp_store, [('run_check', {'check_id': 'error-page-disclosure'})])
+        [retried] = tool_returns(result.all_messages())
+        assert retried.outcome == 'retried'
+        assert 'reported by the version-disclosure check' in str(retried.content)
