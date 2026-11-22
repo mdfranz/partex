@@ -27,11 +27,14 @@ with `format: openapi` and `revision`).
    (or `--all`). Always inspect `list_coverage` alongside `list_findings`: a zero-finding
    run is **not** clean when coverage shows `needs_follow_up` (unobserved declared routes
    or missing `2xx` captures) or `not_applicable` (`insufficient evidence`).
-2. **Live session (`partex agent`):** Invoke `run_check('api-contract-conformance')` to
-   reconcile captured exchanges against registered `format: openapi` `ConfigEvidence`,
-   then read `list_coverage`. Because `ConfigEvidence` enters via bundle manifests, a live
-   session with `HttpExchange` captures alone (even if `/openapi.json` was fetched over
-   HTTP) records `not_applicable` (`no OpenAPI contract (format: openapi) in bundle`).
+2. **Live session (`partex agent` / `partex test`):** Fetching an OpenAPI `3.0.x` / `3.1.x`
+   document (`2xx` `http_request` or `download_asset` within the bundle content and node
+   caps) automatically registers a derived `ConfigEvidence(format='openapi')` (`source`
+   citing the originating `ev_*` ID and URL; `revision` from `info.version` or body
+   `sha256`). Invoke `run_check('api-contract-conformance')` after capturing the spec and
+   any API exchanges, then inspect `list_coverage` for `needs_follow_up` operations. A live
+   session that has not yet captured an OpenAPI 3.0/3.1 spec records `not_applicable`
+   (`no OpenAPI contract (format: openapi) in bundle`).
 
 ## Scope and Evidence Model
 
@@ -55,7 +58,7 @@ with `format: openapi` and `revision`).
 | Outcome / Finding Class | Condition | Expected Disposition |
 |---|---|---|
 | Conforming operation | Observed `2xx` `HttpExchange` matches declared path template, method, and allowed response fields | No finding; `no_issue_found` in `CoverageEntry` |
-| Undocumented / shadow operation | Observed non-`404`/`405` API exchange has no matching path or method in the OpenAPI spec (`OPTIONS` preflights and non-API HTML navigations excluded) | `medium` finding (OWASP API9:2023 Improper Inventory Management) + `reported` in `CoverageEntry` |
+| Undocumented / shadow operation | Observed non-`404`/`405` API exchange has no matching path or method in the OpenAPI spec (`OPTIONS` preflights, non-API HTML navigations, and the `2xx` `GET`/`HEAD` spec fetch itself excluded) | `medium` finding (OWASP API9:2023 Improper Inventory Management) + `reported` in `CoverageEntry` |
 | Disallowed / excessive response fields | `2xx` JSON response includes undeclared or sensitive properties beyond the contract DTO schema | `medium` / `high` finding (OWASP API3:2023 Broken Object Property Level Authorization) + `reported` in `CoverageEntry` |
 | Unobserved declared operation (or non-`2xx` only) | Operation exists in `ConfigExcerpt` with zero matching captures, or no `2xx` response exercised a declared response schema | **Coverage gap** (`needs_follow_up`), never a vulnerability finding |
 | Insufficient evidence | Zero `format: openapi` `ConfigExcerpt`s in bundle, unsupported Swagger `2.0`, or unresolvable external/missing `$ref` | **Insufficient evidence** (`not_applicable` in `CoverageEntry`); distinguish from conformance or drift |

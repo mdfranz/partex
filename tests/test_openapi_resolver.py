@@ -1,12 +1,18 @@
 """Unit tests for the minimal in-package OpenAPI subset resolver (issue #24; DEPS.md §3.1)."""
 
 import json
+import socket
+import time
 
-from partex.ids import evidence_id
+import pytest
+
+from partex.bundle import MAX_CONTENT_BYTES
+from partex.ids import evidence_id, sha256_hex
 from partex.models import ConfigEvidence, ConfigExcerpt
 from partex.openapi_resolver import (
     MAX_OPENAPI_NODES,
     check_response_body,
+    derive_openapi_config_evidence,
     is_high_signal_secret_field,
     is_sensitive_field,
     load_openapi_contract,
@@ -425,3 +431,244 @@ def test_sensitive_field_classifiers() -> None:
     assert is_high_signal_secret_field('password_hash')
     assert is_high_signal_secret_field('totpSecret')
     assert not is_high_signal_secret_field('token')  # login endpoints may legitimately return token without schema
+
+
+# ── Live OpenAPI detection & ConfigEvidence derivation (issue #155) ──────────
+
+
+def test_derive_openapi_config_evidence_json_yaml_revision_and_idempotence() -> None:
+    json_spec = json.dumps(
+        {
+            'openapi': '3.1.0',
+            'info': {'title': 'Users API', 'version': '2.4.1'},
+            'paths': {'/api/users': {'get': {'responses': {'200': {'description': 'ok'}}}}},
+        }
+    )
+    ev1 = derive_openapi_config_evidence(
+        json_spec,
+        origin_id='ev_http_first',
+        url='https://user:secret@app.example.test:8443/openapi.json?token=abc#frag',
+    )
+    assert ev1 is not None
+    assert ev1.kind == 'config_excerpt'
+    assert ev1.config.format == 'openapi'
+    assert ev1.config.path == '/openapi.json'
+    assert ev1.config.revision == '2.4.1'
+    assert ev1.config.content == json_spec
+    assert ev1.source == 'derived:ev_http_first:https://app.example.test:8443/openapi.json'
+    assert 'secret' not in ev1.source and 'token=' not in ev1.source
+
+    # Re-fetching the same spec (new originating ev_ ID, different query string) yields identical evidence ID.
+    ev2 = derive_openapi_config_evidence(
+        json_spec,
+        origin_id='ev_http_second',
+        url='https://app.example.test:8443/openapi.json?cachebust=2',
+    )
+    assert ev2 is not None
+    assert ev2.id == ev1.id
+    assert ev2.source == 'derived:ev_http_second:https://app.example.test:8443/openapi.json'
+
+    # Missing or boolean info.version falls back to body sha256.
+    yaml_spec = 'openapi: 3.0.3\ninfo:\n  title: Minimal\n  version: true\npaths:\n  /ping:\n    get:\n      responses:\n        "200":\n          description: pong\n'
+    yaml_ev = derive_openapi_config_evidence(yaml_spec, origin_id='ev_art_1', url='http://127.0.0.1:8000/spec.yaml')
+    assert yaml_ev is not None
+    assert yaml_ev.config.path == '/spec.yaml'
+    assert yaml_ev.config.revision == sha256_hex(yaml_spec.encode('utf-8'))
+
+
+def test_derive_openapi_config_evidence_rejects_non_openapi_swagger2_and_oversized() -> None:
+    url = 'http://127.0.0.1:8000/openapi.json'
+    # Empty, HTML, JS, plain JSON, Swagger 2.0, unsupported OAS 4.x, missing/non-dict paths.
+    assert derive_openapi_config_evidence('', origin_id='ev_1', url=url) is None
+    assert (
+        derive_openapi_config_evidence('<html><body>openapi: 3.1.0 paths: {}</body></html>', origin_id='ev_1', url=url)
+        is None
+    )
+    assert (
+        derive_openapi_config_evidence(
+            'const cfg = {openapi: "3.1.0", paths: {}};',
+            origin_id='ev_1',
+            url=url,
+        )
+        is None
+    )
+    assert derive_openapi_config_evidence('{"status":"ok","paths":{}}', origin_id='ev_1', url=url) is None
+    assert (
+        derive_openapi_config_evidence(
+            '{"swagger":"2.0","info":{"title":"old","version":"1"},"paths":{}}',
+            origin_id='ev_1',
+            url=url,
+        )
+        is None
+    )
+    assert derive_openapi_config_evidence('{"openapi":"4.0.0","paths":{}}', origin_id='ev_1', url=url) is None
+    assert (
+        derive_openapi_config_evidence('{"openapi":"3.1.0","info":{"version":"1"}}', origin_id='ev_1', url=url) is None
+    )
+    assert derive_openapi_config_evidence('{"openapi":"3.1.0","paths":[]}', origin_id='ev_1', url=url) is None
+
+    # Oversized UTF-8 payload (> MAX_CONTENT_BYTES).
+    oversized = json.dumps(
+        {
+            'openapi': '3.1.0',
+            'info': {'title': 'big', 'version': '1.0'},
+            'paths': {'/x': {'get': {'description': 'a' * (MAX_CONTENT_BYTES + 64)}}},
+        }
+    )
+    assert len(oversized.encode('utf-8')) > MAX_CONTENT_BYTES
+    assert derive_openapi_config_evidence(oversized, origin_id='ev_big', url=url) is None
+
+    # YAML alias expansion exceeding MAX_OPENAPI_NODES.
+    bomb_lines = ['openapi: 3.1.0', 'info: {title: bomb, version: "1"}', 'x-base: &a0 [1, 2, 3, 4]']
+    for idx in range(1, 16):
+        bomb_lines.append(f'x-lvl{idx}: &a{idx} [*a{idx - 1}, *a{idx - 1}]')
+    bomb_lines.append('paths: {}')
+    assert derive_openapi_config_evidence('\n'.join(bomb_lines), origin_id='ev_bomb', url=url) is None
+    assert MAX_OPENAPI_NODES == 25_000
+
+
+# ── referencing ($id, $anchor, no-retriever, memoization, budget) (#153) ─────
+
+
+def test_oas31_dollar_id_and_dollar_anchor_refs_resolve() -> None:
+    spec = """\
+openapi: 3.1.0
+info: {title: anchors, version: "1.0"}
+paths:
+  /profiles/{id}:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "https://schemas.example.test/profile.json"
+components:
+  schemas:
+    AnchoredMeta:
+      $anchor: sharedMeta
+      type: object
+      properties:
+        version: {type: integer}
+      additionalProperties: false
+    Profile:
+      $id: "https://schemas.example.test/profile.json"
+      type: object
+      properties:
+        id: {type: integer}
+        badge:
+          $ref: "#badgeAnchor"
+        meta:
+          $ref: "urn:partex:openapi#sharedMeta"
+      additionalProperties: false
+      $defs:
+        Badge:
+          $anchor: badgeAnchor
+          type: object
+          properties:
+            label: {type: string}
+          additionalProperties: false
+"""
+    contract = load_openapi_contract(_cfg(spec))
+    assert contract.load_error is None
+    assert contract.unresolved_refs == ()
+    (op,) = contract.operations
+
+    ok = check_response_body(op, 200, json.dumps({'id': 1, 'badge': {'label': 'pro'}, 'meta': {'version': 2}}))
+    assert ok.violations == () and ok.evaluated is True
+
+    bad = check_response_body(
+        op,
+        200,
+        json.dumps({'id': 1, 'badge': {'label': 'pro', 'secret': 'x'}, 'meta': {'version': 2, 'extra': True}}),
+    )
+    assert [(v.path, v.severity) for v in bad.violations] == [
+        ('$.badge.secret', 'high'),
+        ('$.meta.extra', 'medium'),
+    ]
+
+
+def test_external_ref_never_opens_a_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _forbid_socket(*args: object, **kwargs: object) -> None:
+        raise AssertionError('external $ref resolution must never open a socket')
+
+    monkeypatch.setattr(socket, 'socket', _forbid_socket)
+    monkeypatch.setattr(socket, 'create_connection', _forbid_socket)
+
+    spec = """\
+openapi: 3.1.0
+info: {title: ext-net, version: "1.0"}
+paths:
+  /remote:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "https://external.invalid/schemas/user.json"
+"""
+    contract = load_openapi_contract(_cfg(spec))
+    assert contract.load_error is None
+    assert contract.unresolved_refs == ('https://external.invalid/schemas/user.json',)
+    (op,) = contract.operations
+    outcome = check_response_body(op, 200, '{"id": 1}')
+    assert outcome.evaluated is False
+    assert outcome.unresolved_ref == 'https://external.invalid/schemas/user.json'
+
+
+def test_doubled_ref_chain_resolves_quickly_via_memoization() -> None:
+    # A 24-level doubled $ref chain has 2^24 (~16.7M) uncached paths; memoization makes it linear.
+    levels = 24
+    schemas: dict[str, object] = {
+        f'L{levels}': {
+            'type': 'object',
+            'properties': {'leaf': {'type': 'string'}},
+            'additionalProperties': False,
+        }
+    }
+    for i in range(levels - 1, -1, -1):
+        target = f'#/components/schemas/L{i + 1}'
+        schemas[f'L{i}'] = {'allOf': [{'$ref': target}, {'$ref': target}]}
+    spec = {
+        'openapi': '3.1.0',
+        'info': {'title': 'chain', 'version': '1.0'},
+        'paths': {
+            '/chain': {
+                'get': {
+                    'responses': {
+                        '200': {
+                            'description': 'ok',
+                            'content': {'application/json': {'schema': {'$ref': '#/components/schemas/L0'}}},
+                        }
+                    }
+                }
+            }
+        },
+        'components': {'schemas': schemas},
+    }
+    start = time.monotonic()
+    contract = load_openapi_contract(_cfg(json.dumps(spec), path='chain.json'))
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0, f'doubled $ref chain took {elapsed:.2f}s (expected memoized linear resolution)'
+    assert contract.load_error is None
+    (op,) = contract.operations
+    assert check_response_body(op, 200, json.dumps({'leaf': 'ok'})).violations == ()
+    bad = check_response_body(op, 200, json.dumps({'leaf': 'ok', 'extra': 1}))
+    assert [(v.path, v.severity) for v in bad.violations] == [('$.extra', 'medium')]
+
+
+def test_resolution_budget_degrades_to_unresolved_ref() -> None:
+    doc = {
+        'components': {
+            'schemas': {
+                'A': {'type': 'object', 'properties': {'b': {'$ref': '#/components/schemas/B'}}},
+                'B': {'type': 'object', 'properties': {'c': {'type': 'string'}}},
+            }
+        }
+    }
+    schema = resolve_schema({'$ref': '#/components/schemas/A'}, doc, max_steps=2)
+    assert schema.unresolved_ref is not None
+    assert 'resolution-budget-exceeded' in schema.unresolved_ref

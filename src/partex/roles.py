@@ -86,7 +86,11 @@ def role_handles(
     its budget across the live run's handles (#27).
     """
     resolved = resolve_role_credentials(engagement, env)
-    budget = budget if budget is not None else RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps)
+    budget = (
+        budget
+        if budget is not None
+        else RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps, engagement.scope.max_write_requests)
+    )
     pins = pins if pins is not None else {}
     handles: dict[str, RoleHandle] = {}
     for role, (env_var, value) in resolved.items():

@@ -32,13 +32,14 @@ import anyio
 import anyio.to_thread
 from pydantic import ValidationError
 
-from .bundle import load_bundle
+from .bundle import MAX_CONTENT_BYTES, load_bundle
 from .checks import HeaderInput, PassiveCheck
 from .engagement import MANIFEST_NAME, check_credentials_available, load_engagement
 from .errors import BudgetExhausted, PartexError, ScopeViolation, ValidationFailed
 from .ids import finding_id
 from .models import (
     ArtifactEvidence,
+    ConfigEvidence,
     CoverageEntry,
     Engagement,
     Evidence,
@@ -50,6 +51,7 @@ from .models import (
     TlsPolicy,
     check_user_agent,
 )
+from .openapi_resolver import derive_openapi_config_evidence
 from .probes import SeedPlan, plan_seed_probes
 from .roles import RoleHandle, role_handles
 from .scope import apply_urls, check_url, extend_scope, parse_urls_file
@@ -686,6 +688,7 @@ async def run_test(
         # mid-run crash discards nothing already sent or received.
         await store.add_evidence(run_id, evidence, count_request=True)
         captured.append(evidence)
+        await _maybe_register_openapi(store, run_id, captured, evidence)
 
     # One engagement-wide budget and DNS pin table shared by the primary client and any role
     # handles (#23/#27), so N roles never multiply ``max_requests``/``max_rps``.
@@ -801,6 +804,64 @@ async def run_test(
         await client.aclose()
 
 
+def _derive_openapi_from_artifact(item: ArtifactEvidence) -> ConfigEvidence | None:
+    """Read a content-addressed ``2xx`` artifact within V4 bounds and derive ``ConfigEvidence`` if OpenAPI 3.x."""
+    if not (200 <= item.artifact.status_code < 300):
+        return None
+    if item.artifact.size_bytes <= 0 or item.artifact.size_bytes > MAX_CONTENT_BYTES:
+        return None
+    if item.file_path is None:
+        return None
+    path = Path(item.file_path)
+    digest = item.artifact.sha256
+    in_artifacts = path.parent.name.endswith('.artifacts') or (
+        path.parent.parent.name.endswith('.artifacts') and path.parent.name.startswith('run_')
+    )
+    if path.name != digest or not in_artifacts:
+        return None
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_CONTENT_BYTES:
+            return None
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if len(raw) > MAX_CONTENT_BYTES or hashlib.sha256(raw).hexdigest() != digest:
+        return None
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        return None
+    return derive_openapi_config_evidence(text, origin_id=item.id, url=item.artifact.url)
+
+
+async def _maybe_register_openapi(
+    store: RunStore,
+    run_id: str,
+    captured: list[Evidence],
+    item: HttpEvidence | ArtifactEvidence,
+) -> None:
+    """Register a derived ``ConfigEvidence(format='openapi')`` when *item* is a complete ``2xx`` OpenAPI 3.0/3.1 spec."""
+    cfg_ev: ConfigEvidence | None = None
+    if isinstance(item, HttpEvidence):
+        resp = item.http.response
+        if (
+            200 <= resp.status_code < 300
+            and resp.body is not None
+            and resp.body_note is None
+            and 'openapi' in resp.body
+            and 'paths' in resp.body
+        ):
+            cfg_ev = await anyio.to_thread.run_sync(
+                partial(derive_openapi_config_evidence, resp.body, origin_id=item.id, url=item.http.request.url)
+            )
+    elif 200 <= item.artifact.status_code < 300 and 0 < item.artifact.size_bytes <= MAX_CONTENT_BYTES:
+        cfg_ev = await anyio.to_thread.run_sync(_derive_openapi_from_artifact, item)
+    if cfg_ev is None:
+        return
+    if await store.add_evidence(run_id, cfg_ev):
+        captured.append(cfg_ev)
+
+
 # ── Live session (issue #54; PLAN §9 operator-in-the-loop) ─────────────────────
 
 
@@ -838,10 +899,12 @@ class LiveSession:
     async def _on_capture(self, evidence: HttpEvidence) -> None:
         await self._store.add_evidence(self.run_id, evidence, count_request=True)
         self.captured.append(evidence)
+        await _maybe_register_openapi(self._store, self.run_id, self.captured, evidence)
 
     async def _on_artifact(self, evidence: ArtifactEvidence) -> None:
         await self._store.add_evidence(self.run_id, evidence, count_request=True)
         self.captured.append(evidence)
+        await _maybe_register_openapi(self._store, self.run_id, self.captured, evidence)
 
     async def _on_failed_send(self) -> None:
         await self._store.add_requests_spent(self.run_id, 1)

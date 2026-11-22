@@ -7,7 +7,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-11-19T13:31:42.640251773Z"
+exclude-newer = "2026-11-19T23:05:08.968058866Z"
 exclude-newer-span = "P2D"
 
 [options.exclude-newer-package]
@@ -1256,6 +1256,7 @@ dependencies = [
     { name = "pydantic-ai-slim", extra = ["google"] },
     { name = "pydantic-clai2" },
     { name = "pyyaml" },
+    { name = "referencing" },
     { name = "tree-sitter" },
     { name = "tree-sitter-javascript" },
 ]
@@ -1277,6 +1278,7 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["google"], specifier = ">=2.68" },
     { name = "pydantic-clai2", specifier = ">=0.68" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "referencing", specifier = ">=0.37.0" },
     { name = "tree-sitter", specifier = ">=0.26.1" },
     { name = "tree-sitter-javascript", specifier = ">=0.25.0" },
 ]

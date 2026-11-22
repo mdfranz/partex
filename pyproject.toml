@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-ai-harness[repair-tool-arguments]>=0.68",
     "pydantic-clai2>=0.68",
     "pyyaml>=6",  # registry.py skill frontmatter (already locked transitively)
+    "referencing>=0.37.0",  # openapi_resolver.py $ref resolution (already locked via mcp)
     "tree-sitter>=0.26.1",
     "tree-sitter-javascript>=0.25.0",
 ]
@@ -25,6 +26,7 @@ api-contract-conformance = "partex.checks.api_inventory:api_contract_conformance
 authz-boundary = "partex.checks.authorization:authz_boundary_check"
 header-security = "partex.checks.header_security:header_security_check"
 js-analysis = "partex.checks.js_analysis:js_analysis_check"
+openapi-spec-review = "partex.checks.openapi_spec_review:openapi_spec_review_check"
 server-error = "partex.checks.server_error:server_error_check"
 version-disclosure = "partex.checks.version_disclosure:version_disclosure_check"
 

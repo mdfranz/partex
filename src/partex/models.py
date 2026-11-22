@@ -287,6 +287,13 @@ class ReviewSummary(BaseModel):
 # ── Scope and engagement ──────────────────────────────────────────────────────
 
 
+SAFE_METHODS_ORDERED = ('GET', 'HEAD', 'OPTIONS')
+"""Methods that never change target state: sent without approval or write budget (§4.2)."""
+SAFE_METHODS = frozenset(SAFE_METHODS_ORDERED)
+WRITE_METHODS = frozenset({'POST', 'PUT', 'PATCH', 'DELETE'})
+"""Non-safe methods an engagement may authorize; ``CONNECT`` and ``TRACE`` never can (E3)."""
+
+
 class Scope(BaseModel):
     """Engagement scope — defines the attack surface boundary (§4.2)."""
 
@@ -300,6 +307,14 @@ class Scope(BaseModel):
     ports: Annotated[list[int], Field(default_factory=list)]
     max_rps: Annotated[int, Field(gt=0)] = 5
     max_requests: Annotated[int, Field(gt=0)] = 2000
+    allowed_methods: list[str] = Field(
+        default_factory=lambda: list(SAFE_METHODS_ORDERED),
+        exclude_if=lambda methods: methods == list(SAFE_METHODS_ORDERED),
+    )
+    """HTTP methods this engagement authorizes (#119, #65). Non-safe ones also need ``max_write_requests > 0``
+    and operator approval per action. Left out of dumps at the safe-only default."""
+    max_write_requests: Annotated[int, Field(ge=0, exclude_if=lambda value: value == 0)] = 0
+    """Separate budget for state-changing sends, on top of ``max_requests``; 0 means none (#119, #65)."""
 
 
 class EngagementTarget(BaseModel):

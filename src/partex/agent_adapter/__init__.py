@@ -29,6 +29,7 @@ from ..bundle import LoadedBundle, load_bundle
 from ..models_config import SearchModelConfig
 from ..probes import plan_seed_probes, plan_summary, seed_lines
 from ..storage import RunReader, RunStore, run_artifact_dir
+from .approval import WriteGate
 from .reviewer import BRIEFING_PROMPT, build_reviewer_agent
 from .scope_plugin import SCOPE_PLUGIN_FACTORY, SCOPE_PLUGIN_ID, ScopeControl, current_control
 from .search import WebSearcher, build_search_agent
@@ -189,6 +190,7 @@ async def run_agent(
             async def audit(tool: str, args: dict[str, object], result: dict[str, object]) -> None:
                 await store.record_tool_call(session.run_id, tool, args, result)
 
+            write_gate = WriteGate()
             deps = TesterDeps(
                 run_id=session.run_id,
                 reader=store,
@@ -198,6 +200,7 @@ async def run_agent(
                 store=store,
                 seed_surface=seed_lines(seed_plan) if seed_plan is not None else (),
                 searcher=searcher,
+                write_gate=write_gate,
             )
             summary = await brief(recorded, deps, console) if briefing else None
             await _pause_on(summary, console)
@@ -214,7 +217,7 @@ async def run_agent(
             # private, empty settings store keeps the operator's saved and drop-in CLAI2 plugins out, and
             # only the partex plugin is declared, so the session loads nothing else (#64).
             with tempfile.TemporaryDirectory(prefix='partex-clai2-') as config_dir:
-                token = current_control.set(ScopeControl(session))
+                token = current_control.set(ScopeControl(session, write_gate=write_gate))
                 try:
                     await chat(
                         agent,

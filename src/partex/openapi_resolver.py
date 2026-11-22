@@ -1,30 +1,40 @@
 """Minimal in-package OpenAPI 3.0 / 3.1 subset resolver — DEPS.md §3.1, PLAN §12.
 
 Loads ``ConfigEvidence`` items with ``config.format == 'openapi'`` (JSON or YAML via ``pyyaml``),
-resolves local ``$ref`` pointers (including OAS 3.1 ``$ref`` siblings and cycle guards) plus
-``allOf`` / ``oneOf`` / ``anyOf`` compositions, matches concrete captured request paths against
-declared path templates using OAS §4.8.9 specificity rules, and checks ``2xx`` JSON responses for
-undeclared or sensitive fields without external dependencies, filesystem I/O, or network access.
+resolves ``$ref`` / ``$id`` / ``$anchor`` / ``$dynamicRef`` pointers via ``referencing`` (with no
+retriever, so external refs never open sockets and degrade to ``not_applicable``), handles OAS 3.1
+``$ref`` siblings, cycles, memoization, and ``allOf`` / ``oneOf`` / ``anyOf`` compositions, matches
+concrete captured request paths against declared path templates using OAS §4.8.9 specificity rules,
+and checks ``2xx`` JSON responses for undeclared or sensitive fields without filesystem I/O or
+network access.
 """
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
+from referencing import Registry, Resource, Specification
+from referencing._core import Resolver
+from referencing.exceptions import Unresolvable
+from referencing.jsonschema import DRAFT202012
 
-from .ids import normalized_operation_key
-from .models import ConfigEvidence, Severity
+from .bundle import MAX_CONTENT_BYTES
+from .ids import evidence_id, normalized_operation_key, sha256_hex
+from .models import ConfigEvidence, ConfigExcerpt, Severity
 
 HTTP_METHODS = frozenset({'get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'})
 
 MAX_OPENAPI_NODES = 25_000
 MAX_SCHEMA_DEPTH = 64
+MAX_SCHEMA_RESOLUTION_STEPS = 5_000
+_ROOT_URI = 'urn:partex:openapi'
 
 _OAS_VERSION_RE = re.compile(r'^3\.(?:0|1)(?:\.\d+.*)?$')
+_YAML_OPENAPI_KEY_RE = re.compile(r'(?m)^["\']?openapi["\']?\s*:')
 _TEMPLATE_TOKEN_RE = re.compile(r'\{([^{}/]+)\}')
 _PERCENT_PAIR_RE = re.compile(r'%([0-9A-Fa-f]{2})')
 _UNRESERVED_CHARS = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~')
@@ -291,56 +301,136 @@ def _parse_document(content: str) -> tuple[dict[str, Any] | None, str | None]:
     return cast(dict[str, Any], parsed), None
 
 
-# ── JSON Pointer & $ref / allOf resolution ───────────────────────────────────
+# ── referencing-backed $ref / $id / $anchor / allOf resolution ───────────────
 
 
-def _unescape_pointer_token(token: str) -> str:
-    # RFC 6901 §4: decode percent-encoding in URI fragment, then '~1' -> '/', then '~0' -> '~'.
-    return unquote(token).replace('~1', '/').replace('~0', '~')
+def _schema_contents_in_oa_object(obj: Any) -> Iterable[Any]:
+    """Yield embedded JSON Schema objects inside an OpenAPI PathItem/Operation/Response/Parameter mapping."""
+    if not isinstance(obj, Mapping):
+        return
+    mapping = cast(Mapping[str, Any], obj)
+    if 'schema' in mapping and isinstance(mapping['schema'], (Mapping, bool)):
+        yield mapping['schema']
+    for key in ('content', 'responses', 'headers'):
+        section = mapping.get(key)
+        if isinstance(section, Mapping):
+            for child in cast(Mapping[str, Any], section).values():
+                yield from _schema_contents_in_oa_object(child)
+    for key in ('requestBody', *HTTP_METHODS):
+        child = mapping.get(key)
+        if isinstance(child, Mapping):
+            yield from _schema_contents_in_oa_object(child)
+    params = mapping.get('parameters')
+    if isinstance(params, list):
+        for param in cast(list[Any], params):
+            yield from _schema_contents_in_oa_object(param)
+
+
+def _openapi_subresources_of(contents: Any) -> Iterable[Any]:
+    """Yield JSON Schema subresources inside an OpenAPI 3.0 / 3.1 document or schema."""
+    if not isinstance(contents, Mapping):
+        return
+    mapping = cast(Mapping[str, Any], contents)
+    yield from DRAFT202012.subresources_of(cast(Any, mapping))
+    components = mapping.get('components')
+    if isinstance(components, Mapping):
+        comp = cast(Mapping[str, Any], components)
+        schemas = comp.get('schemas')
+        if isinstance(schemas, Mapping):
+            for schema in cast(Mapping[str, Any], schemas).values():
+                if isinstance(schema, (Mapping, bool)):
+                    yield schema
+        for section_name in ('responses', 'requestBodies', 'parameters', 'headers'):
+            section = comp.get(section_name)
+            if isinstance(section, Mapping):
+                for item in cast(Mapping[str, Any], section).values():
+                    yield from _schema_contents_in_oa_object(item)
+    paths = mapping.get('paths')
+    if isinstance(paths, Mapping):
+        for path_item in cast(Mapping[str, Any], paths).values():
+            yield from _schema_contents_in_oa_object(path_item)
+
+
+def _openapi_id_of(contents: Any) -> str | None:
+    if not isinstance(contents, Mapping):
+        return None
+    raw_id = cast(Mapping[str, Any], contents).get('$id')
+    return raw_id if isinstance(raw_id, str) else None
+
+
+def _maybe_in_subresource(
+    segments: Sequence[int | str],
+    resolver: Resolver[Any],
+    subresource: Resource[Any],
+) -> Resolver[Any]:
+    if subresource.id() is not None:
+        return resolver.in_subresource(subresource)
+    return DRAFT202012.maybe_in_subresource(segments=segments, resolver=resolver, subresource=subresource)
+
+
+_OPENAPI_SPEC: Specification[Any] = Specification(
+    name='partex-openapi',
+    id_of=_openapi_id_of,
+    subresources_of=_openapi_subresources_of,
+    anchors_in=lambda _spec, contents: DRAFT202012.anchors_in(contents),
+    maybe_in_subresource=_maybe_in_subresource,
+)
+
+
+@dataclass
+class _ResolutionState:
+    """Shared per-contract ``referencing`` resolver, memoized schema cache, and step budget."""
+
+    resolver: Resolver[Any]
+    cache: dict[int, ResolvedSchema] = field(default_factory=dict[int, ResolvedSchema])
+    steps: int = 0
+    max_steps: int = MAX_SCHEMA_RESOLUTION_STEPS
+
+
+def _build_resolver(doc: Mapping[str, Any]) -> Resolver[Any]:
+    """Build a ``referencing`` resolver over *doc* with no external retriever (zero network)."""
+    root_resource: Resource[Any] = Resource(contents=doc, specification=_OPENAPI_SPEC)
+    empty: Registry[Any] = Registry()  # pyright: ignore[reportUnknownVariableType]
+    registry = empty.with_resource(_ROOT_URI, root_resource)
+    try:
+        registry = registry.crawl()
+    except Unresolvable, ValueError, TypeError:
+        pass
+    return registry.resolver(_ROOT_URI)
 
 
 def resolve_local_pointer(doc: Mapping[str, Any], ref: str) -> tuple[Any, str | None]:
-    """Resolve a JSON Pointer ``#/...`` inside *doc*, or return ``(None, ref)`` when external/missing."""
-    if not ref.startswith('#'):
+    """Resolve a reference inside *doc* via ``referencing`` (no retriever), or return ``(None, ref)``."""
+    try:
+        return _build_resolver(doc).lookup(ref).contents, None
+    except Unresolvable, ValueError:
         return None, ref
-    if ref == '#':
-        return doc, None
-    if not ref.startswith('#/'):
-        return None, ref
-    current: Any = doc
-    for raw_token in ref[2:].split('/'):
-        token = _unescape_pointer_token(raw_token)
-        if isinstance(current, Mapping) and token in current:
-            current = cast(Mapping[str, Any], current)[token]
-        elif isinstance(current, list):
-            items = cast(list[Any], current)
-            if not token.isdigit():
-                return None, ref
-            idx = int(token)
-            if idx < 0 or idx >= len(items):
-                return None, ref
-            current = items[idx]
-        else:
-            return None, ref
-    return current, None
 
 
 def _deref_object(
-    raw: Any, doc: Mapping[str, Any], active_refs: frozenset[str] = frozenset()
+    raw: Any,
+    resolver: Resolver[Any],
+    active_ids: frozenset[int] = frozenset(),
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Dereference non-schema OpenAPI objects (PathItem, Parameter, Response) following local ``$ref``s."""
+    """Dereference non-schema OpenAPI objects (PathItem, Parameter, Response) following in-doc ``$ref``s."""
     if not isinstance(raw, dict):
         return None, None
     obj = cast(dict[str, Any], raw)
     ref = obj.get('$ref')
     if not isinstance(ref, str):
         return obj, None
-    if ref in active_refs:
+    try:
+        resolved = resolver.lookup(ref)
+    except Unresolvable, ValueError:
+        return None, ref
+    target = resolved.contents
+    if not isinstance(target, dict):
+        return None, ref
+    target_dict = cast(dict[str, Any], target)
+    target_id = id(target_dict)
+    if target_id in active_ids:
         return {k: v for k, v in obj.items() if k != '$ref'}, None
-    target, err = resolve_local_pointer(doc, ref)
-    if err is not None or not isinstance(target, dict):
-        return None, err or ref
-    resolved_target, inner_err = _deref_object(target, doc, active_refs | {ref})
+    resolved_target, inner_err = _deref_object(target_dict, resolved.resolver, active_ids | {target_id})
     if inner_err is not None or resolved_target is None:
         return None, inner_err or ref
     siblings = {k: v for k, v in obj.items() if k != '$ref'}
@@ -419,14 +509,17 @@ def _merge_schemas(schemas: Sequence[ResolvedSchema]) -> ResolvedSchema:
     )
 
 
-def resolve_schema(
+def _resolve_schema(
     raw: Any,
-    doc: Mapping[str, Any],
+    resolver: Resolver[Any],
+    state: _ResolutionState,
     *,
-    active_refs: frozenset[str] = frozenset(),
+    active_ids: frozenset[int] = frozenset(),
     depth: int = 0,
 ) -> ResolvedSchema:
-    """Resolve an OpenAPI 3.0 / 3.1 schema (boolean or mapping) into a :class:`ResolvedSchema`."""
+    state.steps += 1
+    if state.steps > state.max_steps:
+        return ResolvedSchema(unresolved_ref=f'resolution-budget-exceeded:{state.max_steps}')
     if depth > MAX_SCHEMA_DEPTH:
         return ResolvedSchema(cyclic=True)
     if isinstance(raw, bool):
@@ -435,20 +528,43 @@ def resolve_schema(
         return _OPEN_SCHEMA
 
     schema_dict = cast(dict[str, Any], raw)
+    if _openapi_id_of(schema_dict) is not None:
+        resolver = resolver.in_subresource(Resource(contents=schema_dict, specification=_OPENAPI_SPEC))
 
-    # 1. Handle $ref (plus OAS 3.1 sibling keywords when present).
-    ref = schema_dict.get('$ref')
+    # 1. Handle $ref / $dynamicRef (plus OAS 3.1 sibling keywords when present).
+    ref_key = '$ref' if isinstance(schema_dict.get('$ref'), str) else '$dynamicRef'
+    ref = schema_dict.get(ref_key)
     if isinstance(ref, str):
-        if ref in active_refs:
-            return ResolvedSchema(cyclic=True)
-        target, err = resolve_local_pointer(doc, ref)
-        if err is not None or not isinstance(target, (dict, bool)):
-            return ResolvedSchema(unresolved_ref=err or ref)
-        ref_resolved = resolve_schema(target, doc, active_refs=active_refs | {ref}, depth=depth + 1)
-        siblings = {k: v for k, v in schema_dict.items() if k != '$ref'}
+        try:
+            resolved = resolver.lookup(ref)
+        except Unresolvable, ValueError:
+            return ResolvedSchema(unresolved_ref=ref)
+        target = resolved.contents
+        if isinstance(target, bool):
+            ref_resolved = ResolvedSchema(allows_arbitrary_props=True) if target else ResolvedSchema(closed=True)
+        elif isinstance(target, dict):
+            target_dict = cast(dict[str, Any], target)
+            target_id = id(target_dict)
+            if target_id in active_ids:
+                ref_resolved = ResolvedSchema(cyclic=True)
+            elif target_id in state.cache:
+                ref_resolved = state.cache[target_id]
+            else:
+                ref_resolved = _resolve_schema(
+                    target_dict,
+                    resolved.resolver,
+                    state,
+                    active_ids=active_ids | {target_id},
+                    depth=depth + 1,
+                )
+                if not ref_resolved.cyclic:
+                    state.cache[target_id] = ref_resolved
+        else:
+            return ResolvedSchema(unresolved_ref=ref)
+        siblings = {k: v for k, v in schema_dict.items() if k != ref_key}
         if not siblings:
             return ref_resolved
-        sibling_resolved = resolve_schema(siblings, doc, active_refs=active_refs, depth=depth + 1)
+        sibling_resolved = _resolve_schema(siblings, resolver, state, active_ids=active_ids, depth=depth + 1)
         return _merge_schemas([ref_resolved, sibling_resolved])
 
     # 2. Extract direct schema facets.
@@ -459,7 +575,7 @@ def resolve_schema(
     if isinstance(raw_props, dict):
         for key, prop_raw in cast(dict[Any, Any], raw_props).items():
             if isinstance(key, str):
-                properties[key] = resolve_schema(prop_raw, doc, active_refs=active_refs, depth=depth + 1)
+                properties[key] = _resolve_schema(prop_raw, resolver, state, active_ids=active_ids, depth=depth + 1)
 
     pattern_props: list[re.Pattern[str]] = []
     raw_pattern_props = schema_dict.get('patternProperties')
@@ -481,12 +597,12 @@ def resolve_schema(
             allows_arbitrary = True
         elif isinstance(addl, dict):
             allows_arbitrary = True
-            addl_schema = resolve_schema(addl, doc, active_refs=active_refs, depth=depth + 1)
+            addl_schema = _resolve_schema(addl, resolver, state, active_ids=active_ids, depth=depth + 1)
 
     items_schema: ResolvedSchema | None = None
     raw_items = schema_dict.get('items')
     if isinstance(raw_items, (dict, bool)):
-        items_schema = resolve_schema(raw_items, doc, active_refs=active_refs, depth=depth + 1)
+        items_schema = _resolve_schema(raw_items, resolver, state, active_ids=active_ids, depth=depth + 1)
 
     unresolved_ref: str | None = None
     for child in (*properties.values(), *(s for s in (addl_schema, items_schema) if s is not None)):
@@ -511,7 +627,7 @@ def resolve_schema(
     raw_all_of = schema_dict.get('allOf')
     if isinstance(raw_all_of, list):
         for sub in cast(list[Any], raw_all_of):
-            parts.append(resolve_schema(sub, doc, active_refs=active_refs, depth=depth + 1))
+            parts.append(_resolve_schema(sub, resolver, state, active_ids=active_ids, depth=depth + 1))
     composed = _merge_schemas(parts)
 
     # 4. Handle oneOf / anyOf (including OAS 3.1 nullable unions).
@@ -527,7 +643,7 @@ def resolve_schema(
     union_nullable = composed.nullable
     union_unresolved = composed.unresolved_ref
     for branch_raw in union_raw:
-        branch = resolve_schema(branch_raw, doc, active_refs=active_refs, depth=depth + 1)
+        branch = _resolve_schema(branch_raw, resolver, state, active_ids=active_ids, depth=depth + 1)
         if branch.unresolved_ref is not None and union_unresolved is None:
             union_unresolved = branch.unresolved_ref
         if branch.types == frozenset({'null'}) and not branch.properties and branch.items is None:
@@ -571,6 +687,17 @@ def resolve_schema(
         unresolved_ref=union_unresolved,
         cyclic=composed.cyclic,
     )
+
+
+def resolve_schema(
+    raw: Any,
+    doc: Mapping[str, Any],
+    *,
+    max_steps: int = MAX_SCHEMA_RESOLUTION_STEPS,
+) -> ResolvedSchema:
+    """Resolve an OpenAPI 3.0 / 3.1 schema (boolean or mapping) into a :class:`ResolvedSchema`."""
+    state = _ResolutionState(resolver=_build_resolver(doc), max_steps=max_steps)
+    return _resolve_schema(raw, state.resolver, state)
 
 
 # ── Server prefixes and operation extraction ─────────────────────────────────
@@ -620,12 +747,12 @@ def _join_prefix_and_template(prefix: str, template: str) -> str:
 
 
 def _extract_parameters(
-    raw_params: Sequence[Any], doc: Mapping[str, Any]
+    raw_params: Sequence[Any], state: _ResolutionState
 ) -> tuple[dict[tuple[str, str], str], list[str]]:
     params: dict[tuple[str, str], str] = {}
     unresolved: list[str] = []
     for entry in raw_params:
-        param_obj, err = _deref_object(entry, doc)
+        param_obj, err = _deref_object(entry, state.resolver)
         if err is not None:
             unresolved.append(err)
             continue
@@ -649,7 +776,7 @@ def _select_json_media(content_map: Mapping[str, Any]) -> tuple[bool, Any]:
     return False, None
 
 
-def _extract_responses(raw_responses: Any, doc: Mapping[str, Any]) -> tuple[dict[str, ResolvedResponse], list[str]]:
+def _extract_responses(raw_responses: Any, state: _ResolutionState) -> tuple[dict[str, ResolvedResponse], list[str]]:
     resolved: dict[str, ResolvedResponse] = {}
     unresolved: list[str] = []
     if not isinstance(raw_responses, dict):
@@ -659,7 +786,7 @@ def _extract_responses(raw_responses: Any, doc: Mapping[str, Any]) -> tuple[dict
         if not (code == 'DEFAULT' or code == '2XX' or (len(code) == 3 and code.isdigit() and code.startswith('2'))):
             continue
         status_key = 'default' if code == 'DEFAULT' else code
-        resp_obj, err = _deref_object(raw_resp, doc)
+        resp_obj, err = _deref_object(raw_resp, state.resolver)
         if err is not None:
             resolved[status_key] = ResolvedResponse(status_key=status_key, has_json_media=True, unresolved_ref=err)
             unresolved.append(err)
@@ -678,7 +805,7 @@ def _extract_responses(raw_responses: Any, doc: Mapping[str, Any]) -> tuple[dict
         if 'schema' not in media_dict:
             resolved[status_key] = ResolvedResponse(status_key=status_key, has_json_media=True, schema=None)
             continue
-        schema = resolve_schema(media_dict['schema'], doc)
+        schema = _resolve_schema(media_dict['schema'], state.resolver, state)
         if schema.unresolved_ref is not None:
             unresolved.append(schema.unresolved_ref)
         resolved[status_key] = ResolvedResponse(
@@ -715,12 +842,7 @@ def load_openapi_contract(evidence: ConfigEvidence) -> LoadedContract:
             load_error=f'unsupported OpenAPI specification version ({found}; expected 3.0.x or 3.1.x)',
         )
 
-    info = doc.get('info')
-    info_version: str | None = None
-    if isinstance(info, dict):
-        raw_info_ver = cast(dict[str, Any], info).get('version')
-        if isinstance(raw_info_ver, (str, int, float)) and str(raw_info_ver).strip():
-            info_version = str(raw_info_ver).strip()
+    info_version = _extract_info_version(doc)
     effective_revision = cfg.revision if cfg.revision is not None else info_version
 
     raw_paths = doc.get('paths')
@@ -734,13 +856,14 @@ def load_openapi_contract(evidence: ConfigEvidence) -> LoadedContract:
         )
 
     root_prefixes = _extract_server_prefixes(doc.get('servers'))
+    state = _ResolutionState(resolver=_build_resolver(doc))
     operations_by_key: dict[str, DeclaredOperation] = {}
     all_unresolved: list[str] = []
 
     for raw_tpl, raw_item in sorted(cast(dict[Any, Any], raw_paths).items(), key=lambda kv: str(kv[0])):
         if not isinstance(raw_tpl, str) or not raw_tpl.startswith('/'):
             continue
-        path_item, path_err = _deref_object(raw_item, doc)
+        path_item, path_err = _deref_object(raw_item, state.resolver)
         if path_err is not None:
             all_unresolved.append(path_err)
             continue
@@ -751,7 +874,7 @@ def load_openapi_contract(evidence: ConfigEvidence) -> LoadedContract:
         raw_item_params = path_item.get('parameters')
         item_params, item_unres = _extract_parameters(
             cast(list[Any], raw_item_params) if isinstance(raw_item_params, list) else (),
-            doc,
+            state,
         )
         all_unresolved.extend(item_unres)
 
@@ -765,10 +888,10 @@ def load_openapi_contract(evidence: ConfigEvidence) -> LoadedContract:
             raw_op_params = op_dict.get('parameters')
             op_params, op_unres = _extract_parameters(
                 cast(list[Any], raw_op_params) if isinstance(raw_op_params, list) else (),
-                doc,
+                state,
             )
             merged_params = {**item_params, **op_params}
-            responses, resp_unres = _extract_responses(op_dict.get('responses'), doc)
+            responses, resp_unres = _extract_responses(op_dict.get('responses'), state)
             op_unresolved_list = [*item_unres, *op_unres, *resp_unres]
             all_unresolved.extend(op_unres)
             all_unresolved.extend(resp_unres)
@@ -813,6 +936,78 @@ def load_openapi_contract(evidence: ConfigEvidence) -> LoadedContract:
         server_prefixes=root_prefixes,
         unresolved_refs=tuple(dict.fromkeys(all_unresolved)),
     )
+
+
+def _extract_info_version(doc: Mapping[str, Any]) -> str | None:
+    info = doc.get('info')
+    if not isinstance(info, dict):
+        return None
+    raw_info_ver = cast(dict[str, Any], info).get('version')
+    if not isinstance(raw_info_ver, bool) and isinstance(raw_info_ver, (str, int, float)):
+        version = str(raw_info_ver).strip()
+        if version:
+            return version
+    return None
+
+
+def _clean_spec_url(url: str) -> str:
+    """Strip userinfo, query string, and fragment from *url* so URL secrets never enter ``source``."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url.split('?', 1)[0].split('#', 1)[0]
+    netloc = parts.netloc.rsplit('@', 1)[-1]
+    return urlunsplit((parts.scheme, netloc, parts.path, '', ''))
+
+
+def derive_openapi_config_evidence(
+    content: str,
+    *,
+    origin_id: str,
+    url: str,
+) -> ConfigEvidence | None:
+    """Derive a ``format='openapi'`` :class:`~partex.models.ConfigEvidence` when *content* is an OpenAPI 3.0/3.1 spec.
+
+    Pure, deterministic, and idempotent:
+    - Rejects empty strings, payloads exceeding :data:`~partex.bundle.MAX_CONTENT_BYTES`, non-OpenAPI JSON/YAML,
+      Swagger ``2.0``, documents without a ``paths`` mapping, and documents exceeding :data:`MAX_OPENAPI_NODES`
+      or :data:`MAX_SCHEMA_DEPTH`.
+    - ``source`` records the originating ``ev_`` ID and sanitized URL (excluded from ``evidence_id``).
+    - ``revision`` is ``info.version`` when non-empty, else the UTF-8 body's ``sha256`` hex digest.
+    """
+    if not content or 'openapi' not in content or 'paths' not in content:
+        return None
+    stripped = content.lstrip('\ufeff \t\r\n')
+    if not stripped or stripped.startswith(('<', '[')):
+        return None
+    if not stripped.startswith(('{', '---')) and _YAML_OPENAPI_KEY_RE.search(content) is None:
+        return None
+    raw_bytes = content.encode('utf-8')
+    if len(raw_bytes) > MAX_CONTENT_BYTES:
+        return None
+    doc, parse_err = _parse_document(content)
+    if doc is None or parse_err is not None:
+        return None
+    raw_version = doc.get('openapi')
+    if not isinstance(raw_version, str) or not _OAS_VERSION_RE.match(raw_version.strip()):
+        return None
+    if not isinstance(doc.get('paths'), dict):
+        return None
+
+    revision = _extract_info_version(doc) or sha256_hex(raw_bytes)
+    path = normalize_request_path(url)
+    clean_url = _clean_spec_url(url)
+    ev = ConfigEvidence(
+        id='',
+        source=f'derived:{origin_id}:{clean_url}',
+        config=ConfigExcerpt(
+            path=path,
+            format='openapi',
+            content=content,
+            revision=revision,
+        ),
+    )
+    return ev.model_copy(update={'id': evidence_id(ev)})
 
 
 def load_openapi_contracts(evidence: Sequence[Any]) -> list[LoadedContract]:

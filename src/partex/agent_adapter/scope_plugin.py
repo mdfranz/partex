@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from pydantic_clai2.commands import Command  # pyright: ignore[reportMissingTypeStubs]
 from pydantic_clai2.plugins import NoSettings, Plugin  # pyright: ignore[reportMissingTypeStubs]
@@ -19,6 +20,7 @@ from ..errors import PartexError
 from ..models import Scope
 from ..operator_export import exports_dir, write_report, write_secrets
 from ..scope import extend_scope
+from .approval import WriteGate, terminal_asker
 
 SCOPE_PLUGIN_ID = 'partex_scope'
 SCOPE_PLUGIN_FACTORY = 'partex.agent_adapter.scope_plugin:ScopePlugin'
@@ -37,6 +39,8 @@ class ScopeControl:
 
     session: LiveSession
     pending: str | None = field(default=None)
+    write_gate: WriteGate | None = field(default=None)
+    """The session's write-approval gate (#65); the plugin binds the terminal picker to it."""
 
     def show(self) -> str:
         text = f'Current scope:\n{describe(self.session.engagement.scope)}'
@@ -137,7 +141,15 @@ current_control: ContextVar[ScopeControl | None] = ContextVar('partex_scope_cont
 
 class ScopePlugin(Plugin[NoSettings]):
     """Registers the operator-only ``/scope``, ``/report`` and ``/secrets`` commands for the live session; with no
-    session bound it contributes nothing."""
+    session bound it contributes nothing. It also binds the terminal picker that answers write approvals (#65)."""
+
+    def get_capabilities(self) -> Sequence[Any]:
+        control = current_control.get()
+        # Bind only with a real terminal: an operator's keystrokes answer, never the model. Without one, the gate
+        # stays unbound and every state-changing request is denied.
+        if control is not None and control.write_gate is not None and self.host.console.is_terminal:
+            control.write_gate.ask = terminal_asker(self.host)
+        return ()
 
     def get_commands(self) -> Sequence[Command]:
         control = current_control.get()

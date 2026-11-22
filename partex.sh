@@ -33,6 +33,7 @@
 #   -h, --help
 # Required for the chat step: PYDANTIC_AI_GATEWAY_API_KEY when the model goes through the Gateway (a bare model
 # name, or gateway/...); a direct provider string such as openai:... needs that provider's own key (OPENAI_API_KEY).
+# Request spans are written to the local trace log by default. Set PARTEX_LOGFIRE=1 to opt into remote export.
 #
 # Traffic: the session opens with 3 GETs (TARGET_URL, /robots.txt, /partex-nonexistent-probe-0); after that
 # only what you ask for in the chat (GET/HEAD/OPTIONS). 2 req/s, budget 50 per session (--max-rps /
