@@ -31,6 +31,7 @@ This example reviews bundled HTTP traffic offline. It prints sample findings and
 ## What you can do
 
 - **Run authorized live checks.** Capture responses within a defined target scope and request budget, then save the evidence alongside the findings.
+- **Authorize targets from a URL list or a scan.** Restrict a session to an exact URL list (`-u urls.txt`), or import authorized targets from `nmap -oX` scan output (`-N scan.xml`): each open HTTP(S) port becomes a `scheme://host:port/*` entry, and ports running other services are reported and skipped.
 - **Work with saved results.** List past runs, export reports or captured traffic, and use read-only chat to review findings and their evidence.
 - **Review captured traffic.** Import a browser's HTTP archive (HAR) and check saved responses for issues such as missing security headers or insecure cookie settings. Offline checks run without a model.
 
@@ -63,7 +64,7 @@ Each skill's research notes in [`docs/skills/`](docs/skills/README.md) record th
 
 `--search-model` takes `anthropic:<model>` (`ANTHROPIC_API_KEY`), `google:<model>` (`GOOGLE_API_KEY` or `GEMINI_API_KEY`), `google-cloud:<model>` (Application Default Credentials and `GOOGLE_CLOUD_PROJECT`), or `openai:<model>` (`OPENAI_API_KEY`, Responses API). OpenAI search has no per-query search limit and costs more per query than the others, so prefer a small model. `google-cloud:` uses the `global` location by default, since newer Gemini models are only served there; set `GOOGLE_CLOUD_LOCATION` to override it.
 
-The live terminal includes a built-in CLAI2 plugin for operator commands. `/scope` shows the current scope and requires operator confirmation for changes; with `-k` (`--insecure`), hosts it adds are not certificate-verified either, and the confirmation says so. `/report` writes a redacted Markdown report, and `/secrets` writes secret values to a private file.
+The live terminal includes a built-in CLAI2 plugin for operator commands. `/scope` shows the current scope and requires operator confirmation for changes; with `-k` (`--insecure`), hosts it adds are not certificate-verified either, and the confirmation says so. `/scope nmap scan.xml` stages an nmap import for `/scope confirm`, which applies the whole batch as one recorded scope change that names the scan file and its hash. `/report` writes a redacted Markdown report, and `/secrets` writes secret values to a private file.
 
 Use `partex reports RUN_ID` to list reports saved by `save_report` and `partex reports RUN_ID NAME` to print one as Markdown. Both forms accept `--db PATH` and `--json`.
 
@@ -110,6 +111,8 @@ To run a live session using Gemini directly for both the main model (`-m`) and n
 
 - `./partex.sh --help` shows options for the interactive testing launcher.
 - `./partex.sh -u urls.txt <target-url>` restricts the session to the URLs in `urls.txt` (one per line, `#` comments, a trailing `/*` allows a path prefix). The target URL is optional with `-u`: the first listed URL is used (an explicit one must be listed). A URL without a port covers both 80 and 443; add `:port` to pin one. Anything unlisted is refused by the scope gate. Add `--recursive` to treat every listed URL as a path prefix, so a file containing `http://foo/` allows everything under `foo`.
+- `./partex.sh -N scan.xml <target-url>` imports authorized targets from `nmap -oX` scan output. Each open HTTP(S) port on an up host becomes a `scheme://host:port/*` entry in the session's URL list, so only scanned host:port targets can be requested. Ports running other services (SSH, databases, TLS-wrapped non-HTTP) are reported and skipped, never guessed. The target URL is optional with `-N`: the first imported entry is used (an explicit one must be listed). Combine with `-u` to merge a hand-written list. Set `PARTEX_NMAP_FILE` to pass the scan without the flag.
+- `uv run partex nmap scan.xml [--use-hostnames] [--out targets.txt]` converts a scan without opening a session: it prints the entries and the skip report, or writes them to a `--urls-file` with `# source:` lines recording each scan file and its hash, so you can review and edit the list before it becomes scope. With `--use-hostnames`, entries use the scan's PTR hostnames instead of the scanned IPs (reverse DNS can be stale, so IPs are the default). Several scan files merge, such as a plain sweep plus a `-sV` version pass.
 - `./partex.sh list` lists saved runs from the default database.
 - `uv run partex --help` lists the available CLI commands.
 
