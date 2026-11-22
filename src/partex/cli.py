@@ -56,6 +56,13 @@ INSECURE_HELP = (
 )
 USER_AGENT_HELP = 'User-Agent for this run, overriding the engagement http.user_agent (default partex/<version>)'
 
+ALLOW_METHOD_HELP = (
+    'also authorize this state-changing method (POST, PUT, PATCH or DELETE) for this run; repeatable, needs '
+    '--max-writes (or the engagement max_write_requests). Each write still waits for operator approval; headless '
+    'runs deny them'
+)
+MAX_WRITES_HELP = 'budget of state-changing requests for this run (ceiling 1000); overrides max_write_requests'
+
 EXIT_OK = 0
 EXIT_FATAL = 1
 EXIT_USAGE = 2
@@ -200,6 +207,8 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument('--user-agent', default=None, help=USER_AGENT_HELP)
     test.add_argument('--urls-file', default=None, help=URLS_FILE_HELP)
     test.add_argument('--recursive', action='store_true', help=RECURSIVE_HELP)
+    test.add_argument('--allow-method', action='append', default=[], metavar='METHOD', help=ALLOW_METHOD_HELP)
+    test.add_argument('--max-writes', type=int, default=None, metavar='N', help=MAX_WRITES_HELP)
     test_selection = test.add_mutually_exclusive_group()
     test_selection.add_argument(
         '--checks',
@@ -319,6 +328,8 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument('--user-agent', default=None, help=USER_AGENT_HELP)
     agent.add_argument('--urls-file', default=None, help=URLS_FILE_HELP)
     agent.add_argument('--recursive', action='store_true', help=RECURSIVE_HELP)
+    agent.add_argument('--allow-method', action='append', default=[], metavar='METHOD', help=ALLOW_METHOD_HELP)
+    agent.add_argument('--max-writes', type=int, default=None, metavar='N', help=MAX_WRITES_HELP)
     agent.add_argument(
         '--model', required=True, help='as for chat: a model string, or a bare name with --gateway-route'
     )
@@ -441,6 +452,8 @@ def _cmd_test(args: argparse.Namespace) -> int:
                 urls_file=args.urls_file,
                 recursive=bool(args.recursive),
                 user_agent=args.user_agent,
+                allow_methods=args.allow_method,
+                max_writes=args.max_writes,
                 seed_bundle=args.bundle,
                 max_seed=args.max_seed,
             )
@@ -804,6 +817,8 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             urls_file=Path(args.urls_file) if args.urls_file is not None else None,
             recursive=bool(args.recursive),
             user_agent=args.user_agent,
+            allow_methods=args.allow_method,
+            max_writes=args.max_writes,
             checks=checks,
             from_run=args.from_run,
             bundle=bundle,

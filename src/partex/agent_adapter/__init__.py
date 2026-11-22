@@ -128,6 +128,8 @@ async def run_agent(
     urls_file: Path | None = None,
     recursive: bool = False,
     user_agent: str | None = None,
+    allow_methods: Sequence[str] = (),
+    max_writes: int | None = None,
     checks: tuple[str, ...] = ('version-disclosure',),
     from_run: str | None = None,
     bundle: Path | None = None,
@@ -158,6 +160,8 @@ async def run_agent(
             urls_file=urls_file,
             recursive=recursive,
             user_agent=user_agent,
+            allow_methods=allow_methods,
+            max_writes=max_writes,
             checks=checks,
         ) as session:
             seed_plan = None
