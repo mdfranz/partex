@@ -29,6 +29,12 @@
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
 #   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000]
 #   -R, --max-rps N          requests per second [PARTEX_MAX_RPS, default 2; ceiling 64]
+#   -M, --method MODE        what the session may send [PARTEX_METHOD, default read]: read = GET/HEAD/OPTIONS only;
+#                            write = also POST, PUT, PATCH; delete = write plus DELETE. write/delete need a budget:
+#                            --max-writes, default 10 here. Each write still waits for your approval; --no-tui denies them
+#   -w, --allow-method M     also authorize one state-changing method (POST, PUT, PATCH, DELETE); repeatable
+#                            [PARTEX_ALLOW_METHODS, space-separated]. Needs --max-writes (or --method)
+#   -W, --max-writes N       budget of state-changing requests [PARTEX_MAX_WRITES, ceiling 1000]
 #       --no-tui             run `partex test` + show only [NO_TUI=1]
 #   -h, --help
 # Required for the chat step: PYDANTIC_AI_GATEWAY_API_KEY when the model goes through the Gateway (a bare model
@@ -58,6 +64,9 @@ RESUME=${CHAT_ONLY:+1}
 NO_TUI=${NO_TUI:-}
 MAX_REQUESTS=${PARTEX_MAX_REQUESTS:-50}
 MAX_RPS=${PARTEX_MAX_RPS:-2}
+ALLOW_METHODS=(${PARTEX_ALLOW_METHODS:-})
+MAX_WRITES=${PARTEX_MAX_WRITES:-}
+METHOD=${PARTEX_METHOD:-read}
 RUN_ID=${RUN_ID:-}   # with --resume: the run to open; otherwise the run to read (--from)
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -74,6 +83,9 @@ while [[ $# -gt 0 ]]; do
     -l|--list) LIST=1; shift ;;
     -n|--max-requests) MAX_REQUESTS=${2?$1 needs a value}; shift 2 ;;
     -R|--max-rps) MAX_RPS=${2?$1 needs a value}; shift 2 ;;
+    -M|--method) METHOD=${2?$1 needs a value}; shift 2 ;;
+    -w|--allow-method) ALLOW_METHODS+=("${2?$1 needs a value}"); shift 2 ;;
+    -W|--max-writes) MAX_WRITES=${2?$1 needs a value}; shift 2 ;;
     --no-tui) NO_TUI=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
@@ -86,6 +98,17 @@ done
 for _n in MAX_REQUESTS MAX_RPS; do
   [[ ${!_n} =~ ^[1-9][0-9]*$ ]] || { echo "$_n must be a positive integer, got: ${!_n}" >&2; exit 2; }
 done
+case $METHOD in
+  read) ;;
+  write) ALLOW_METHODS+=(POST PUT PATCH) ;;
+  delete) ALLOW_METHODS+=(POST PUT PATCH DELETE) ;;
+  *) echo "--method must be read, write or delete, got: $METHOD" >&2; exit 2 ;;
+esac
+[[ $METHOD == read || -n $MAX_WRITES ]] || MAX_WRITES=10
+[[ -z $MAX_WRITES || $MAX_WRITES =~ ^[1-9][0-9]*$ ]] || { echo "MAX_WRITES must be a positive integer, got: $MAX_WRITES" >&2; exit 2; }
+[[ ${#ALLOW_METHODS[@]} -eq 0 || -n $MAX_WRITES ]] || { echo "--allow-method needs --max-writes" >&2; exit 2; }
+WRITE_ARGS=(); for _m in ${ALLOW_METHODS[@]+"${ALLOW_METHODS[@]}"}; do WRITE_ARGS+=(--allow-method "$_m"); done
+[[ -z $MAX_WRITES ]] || WRITE_ARGS+=(--max-writes "$MAX_WRITES")
 [[ -n $ROUTE_SET || $MODEL != *:* ]] || ROUTE=  # a full model string is not routed through a Gateway route
 case ${PARTEX_STATE_DIR:-} in
   ''|/*) ;;
@@ -194,4 +217,4 @@ if [[ -n $ROUTE || $MODEL == gateway/* || $MODEL != *:* ]] && [[ -z ${PYDANTIC_A
 fi
 echo "opening a partex agent session on $TARGET_URL (db: $DB)"
 uv run --quiet partex agent "$eng" --authorized --db "$DB" --model "$MODEL" ${ROUTE:+--gateway-route "$ROUTE"} \
-  ${SEARCH_MODEL:+--search-model "$SEARCH_MODEL"} ${URLS_FILE:+--urls-file "$URLS_FILE"} ${RECURSIVE:+--recursive} --checks version-disclosure ${RUN_ID:+--from "$RUN_ID"}
+  ${SEARCH_MODEL:+--search-model "$SEARCH_MODEL"} ${URLS_FILE:+--urls-file "$URLS_FILE"} ${RECURSIVE:+--recursive} ${WRITE_ARGS[@]+"${WRITE_ARGS[@]}"} --checks version-disclosure ${RUN_ID:+--from "$RUN_ID"}
