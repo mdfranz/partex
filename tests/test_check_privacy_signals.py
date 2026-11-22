@@ -50,12 +50,19 @@ def test_real_loaders_and_hosts_are_reported_one_finding_per_vendor() -> None:
 
 def test_findings_never_copy_matched_text_such_as_keys_or_ids() -> None:
     key = 'phc_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4'
-    ev = _http(f"window.config = {{ posthogApiKey: '{key}' }}", url='https://app.test/config.js')
+    ga_id = 'G-ABCDEFGH12'
+    dsn = 'https://secretkey@o1.ingest.sentry.io/2'
+    ev = _http(
+        f"window.config = {{ posthogApiKey: '{key}', dsn: '{dsn}' }}; gtag('config', '{ga_id}')",
+        url='https://user:urlsecret@app.test/config.js?token=querysecret',
+    )
     drafts = check.review([ev])
-    assert any(d.subject == 'tracker:posthog' for d in drafts)
+    subjects = {d.subject for d in drafts}
+    assert {'tracker:posthog', 'tracker:sentry', 'tracker:google-tag-analytics-gtag-js'} <= subjects
     for draft in drafts:
-        assert key not in draft.description and key not in draft.title
-        assert 'G-ABCDEFGH12' not in draft.description
+        text = f'{draft.title}\n{draft.description}\n{draft.remediation}'
+        for secret in (key, ga_id, dsn, 'urlsecret', 'querysecret'):
+            assert secret not in text
 
 
 def test_vendor_words_that_are_not_trackers_do_not_fire() -> None:
@@ -105,6 +112,7 @@ def test_essential_only_trackers_do_not_trigger_the_consent_note() -> None:
             _http('<script src="https://www.google.com/recaptcha/api.js"></script>', content_type='text/html'),
         ]
     )
+    assert {'tracker:sentry', 'tracker:google-recaptcha'} <= set(subjects)
     assert 'consent:no-cmp-signal' not in subjects
 
 

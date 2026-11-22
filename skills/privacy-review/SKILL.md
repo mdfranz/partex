@@ -17,9 +17,9 @@ metadata:
 
 Record which third-party tracking SDKs the application references and whether any consent
 mechanism shows up next to them. Passive: the check reads evidence already captured and sends no
-requests. Run it after `js-analysis` has downloaded the application's bundles (partex does this
-automatically when assets arrive), because most trackers are loaded from scripts, not from the
-HTML.
+requests. Run it after discovering and downloading the application's JavaScript bundles
+(`discover_js_assets` and `download_asset`), because most trackers are loaded from scripts, not
+from the HTML.
 
 ## Signals, not verdicts
 
@@ -58,8 +58,7 @@ The signature table, with the markers and the false positives each rule avoids, 
 
 ## Agent guidance
 
-1. Make sure scripts were downloaded (`discover_js_assets`, then `download_asset`). The discovery
-   pass runs by itself on the next request.
+1. Make sure scripts were downloaded (`discover_js_assets`, then `download_asset`).
 2. Run `run_check('privacy-signals')`, then read the findings with `list_findings`.
 3. For each tracker, say which sources reference it and offer the operator the browser confirmation
    step; do not speculate about data flows.
