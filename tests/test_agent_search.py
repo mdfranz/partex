@@ -457,6 +457,7 @@ async def test_search_agent_has_only_native_web_search_tool() -> None:
     _, o_params = fake_openai.calls[0]
     assert o_params.function_tools == []
     assert [type(tool) for tool in o_params.native_tools] == [WebSearchTool]
+    assert isinstance(o_params.native_tools[0], WebSearchTool)
     assert o_params.native_tools[0].max_uses is None  # the Responses web_search tool takes no max_uses
     o_settings = fake_openai.seen_settings[0] or {}
     assert o_settings.get('openai_include_web_search_sources') is True
@@ -470,12 +471,16 @@ def test_tester_without_search_model_has_no_web_search_tool() -> None:
     agent = build_tester_agent('test', web_search_enabled=False)
     tool_names = set(agent._function_toolset.tools.keys())  # pyright: ignore[reportPrivateUsage]
     assert 'web_search' not in tool_names
-    assert WEB_SEARCH_UNAVAILABLE_LINE in agent._instructions[0].instruction  # pyright: ignore[reportPrivateUsage]
+    unavailable = agent._instructions[0].instruction  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(unavailable, str)  # built from literal text
+    assert WEB_SEARCH_UNAVAILABLE_LINE in unavailable
 
     enabled = build_tester_agent('test', web_search_enabled=True)
     enabled_tools = set(enabled._function_toolset.tools.keys())  # pyright: ignore[reportPrivateUsage]
     assert 'web_search' in enabled_tools
-    assert WEB_SEARCH_UNAVAILABLE_LINE not in enabled._instructions[0].instruction  # pyright: ignore[reportPrivateUsage]
+    enabled_instruction = enabled._instructions[0].instruction  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(enabled_instruction, str)  # built from literal text
+    assert WEB_SEARCH_UNAVAILABLE_LINE not in enabled_instruction
 
 
 async def test_web_search_end_to_end_audit_usage_span_truncation_and_refusals(

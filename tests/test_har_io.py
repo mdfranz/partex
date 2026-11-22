@@ -18,7 +18,7 @@ import pytest
 
 from partex import cli, engine
 from partex.bundle import MANIFEST_NAME, load_bundle
-from partex.engine import run_review, run_test
+from partex.engine import ReviewResult, run_review, run_test
 from partex.errors import PartexError, ValidationFailed
 from partex.export import IncludeSecretsWarning
 from partex.har_io import export_bundle, import_har
@@ -101,8 +101,8 @@ def bundle_files(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob('*')) if path.is_file()}
 
 
-def finding_rows(result: object) -> list[tuple[Any, ...]]:
-    return [tuple(getattr(finding, field) for field in FINDING_FIELDS) for finding in result.findings]  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+def finding_rows(result: ReviewResult) -> list[tuple[Any, ...]]:
+    return [tuple(getattr(finding, field) for field in FINDING_FIELDS) for finding in result.findings]
 
 
 def make_evidence(
@@ -151,7 +151,9 @@ def test_import_fixture_har_produces_the_valid_bundle_evidence(tmp_path: Path) -
     assert len(loaded.evidence) == 5
     assert not loaded.warnings  # the cdn entry was already dropped at import, not deduped later
     valid = load_bundle(VALID_BUNDLE)
+    assert all(isinstance(item, HttpEvidence) for item in loaded.evidence)
     imported_ids = {item.id for item in loaded.evidence if isinstance(item, HttpEvidence)}
+    assert imported_ids
     valid_ids = {item.id for item in valid.evidence if isinstance(item, HttpEvidence)}
     assert imported_ids == valid_ids
 
@@ -180,7 +182,10 @@ def test_explicit_target_overrides_the_inferred_one(tmp_path: Path) -> None:
     assert result.dropped_out_of_scope == 1
     assert result.dropped_hosts == {'app.example.test': 1}
     loaded = load_bundle(out)
-    assert [item.http.request.url for item in loaded.evidence] == ['https://cdn.example.test/lib.js']  # pyright: ignore[reportUnknownMemberType]
+    assert all(isinstance(item, HttpEvidence) for item in loaded.evidence)
+    assert [item.http.request.url for item in loaded.evidence if isinstance(item, HttpEvidence)] == [
+        'https://cdn.example.test/lib.js'
+    ]
 
 
 def test_import_errors(tmp_path: Path) -> None:
@@ -237,13 +242,13 @@ def test_import_body_and_cap_handling(tmp_path: Path) -> None:
     assert result.evidence_count == 4  # plain, b64, binary, truncated
     assert result.dropped_oversize == 2  # long_url, many_headers
     loaded = load_bundle(tmp_path / 'bundle')
-    by_url = {item.http.request.url: item for item in loaded.evidence}  # pyright: ignore[reportUnknownMemberType]
-    assert by_url['https://app.example.test/a'].http.response.body == 'hello'  # pyright: ignore[reportUnknownMemberType]
-    assert by_url['https://app.example.test/b64'].http.response.body == 'grüß'  # pyright: ignore[reportUnknownMemberType]
-    assert by_url['https://app.example.test/bin'].http.response.body is None  # pyright: ignore[reportUnknownMemberType]
-    assert by_url['https://app.example.test/bin'].http.response.body_note == 'refused'  # pyright: ignore[reportUnknownMemberType]
-    assert by_url['https://app.example.test/big'].http.response.body_note == 'truncated'  # pyright: ignore[reportUnknownMemberType]
-    assert len(by_url['https://app.example.test/big'].http.response.body.encode()) == 256 * 1024  # pyright: ignore[reportUnknownMemberType, reportOptionalMemberAccess]
+    by_url = {item.http.request.url: item for item in loaded.evidence if isinstance(item, HttpEvidence)}
+    assert by_url['https://app.example.test/a'].http.response.body == 'hello'
+    assert by_url['https://app.example.test/b64'].http.response.body == 'grüß'
+    assert by_url['https://app.example.test/bin'].http.response.body is None
+    assert by_url['https://app.example.test/bin'].http.response.body_note == 'refused'
+    assert by_url['https://app.example.test/big'].http.response.body_note == 'truncated'
+    assert len(by_url['https://app.example.test/big'].http.response.body.encode()) == 256 * 1024  # pyright: ignore[reportOptionalMemberAccess]
 
 
 def test_import_marks_credential_headers_secret(tmp_path: Path) -> None:
@@ -296,7 +301,7 @@ async def test_export_redacts_by_default_and_optin_warns(tmp_store: RunStore, tm
         input_sha256='',
         engine_version=engine.engine_version(),
         selected_checks=('header-security',),
-        scope_snapshot=Scope(hosts=['app.example.test']),
+        scope_snapshot=Scope(hosts=['app.example.test'], ports=[]),
     )
     await tmp_store.add_evidence(run_id, make_evidence(secret_headers=True))
     await tmp_store.set_state(run_id, 'checks_complete')
@@ -323,7 +328,7 @@ async def test_export_derives_target_and_is_deterministic(tmp_store: RunStore, t
         input_sha256='',
         engine_version=engine.engine_version(),
         selected_checks=('header-security',),
-        scope_snapshot=Scope(hosts=['app.example.test']),
+        scope_snapshot=Scope(hosts=['app.example.test'], ports=[]),
     )
     await tmp_store.add_evidence(run_id, make_evidence('https://app.example.test/deep/path'))
     await tmp_store.set_state(run_id, 'checks_complete')
@@ -379,8 +384,8 @@ async def test_export_errors(tmp_store: RunStore, tmp_path: Path) -> None:
 
 async def test_live_run_exports_to_a_reviewable_bundle(target_app: object, tmp_store: RunStore, tmp_path: Path) -> None:
     """Live test on the fixture app → export-bundle → passive review over the captures."""
-    base_url = target_app.base_url  # pyright: ignore[reportUnknownMemberType]
-    port = target_app.port  # pyright: ignore[reportUnknownMemberType]
+    base_url = target_app.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    port = target_app.port  # pyright: ignore[reportAttributeAccessIssue]
     engagement = tmp_path / 'engagement'
     engagement.mkdir()
     (engagement / 'engagement.json').write_text(
@@ -445,7 +450,7 @@ def test_cli_export_bundle(capsys: pytest.CaptureFixture[str], db: Path, tmp_pat
                 input_sha256='',
                 engine_version=engine.engine_version(),
                 selected_checks=(),
-                scope_snapshot=Scope(hosts=['app.example.test']),
+                scope_snapshot=Scope(hosts=['app.example.test'], ports=[]),
             )
             await store.add_evidence(run_id, make_evidence())
             await store.set_state(run_id, 'checks_complete')

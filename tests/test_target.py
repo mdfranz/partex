@@ -190,7 +190,7 @@ async def test_follow_redirect_out_of_scope_refused(target_server: object) -> No
         redirect = await client.request('GET', f'{base_url}/redirect?to=http://evil.test/api')
         with pytest.raises(ScopeViolation, match='not in scope hosts'):
             await client.follow_redirect(redirect)
-    assert len(target_server.requests) == before + 1  # only the first request was sent
+    assert len(target_server.requests) == before + 1  # only the first request was sent  # pyright: ignore[reportAttributeAccessIssue]
 
 
 async def test_follow_redirect_to_excluded_path_refused(target_server: object) -> None:

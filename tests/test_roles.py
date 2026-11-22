@@ -10,8 +10,8 @@ import pytest
 
 from partex.engagement import Engagement
 from partex.errors import BudgetExhausted, ScopeViolation, ValidationFailed
-from partex.models import redact
-from partex.roles import resolve_role_credentials, role_handles
+from partex.models import HttpEvidence, redact
+from partex.roles import RoleHandle, resolve_role_credentials, role_handles
 from partex.target import DEFAULT_SOURCE
 
 pytest_plugins = ['plugins.target_server']
@@ -42,9 +42,9 @@ def roles_engagement(target_server: object, **scope: object) -> Engagement:
     )
 
 
-async def close_all(handles: dict[str, object]) -> None:
+async def close_all(handles: dict[str, RoleHandle]) -> None:
     for handle in handles.values():
-        await handle.client.aclose()  # pyright: ignore[reportAttributeAccessIssue]
+        await handle.client.aclose()
 
 
 # ── Handle creation ──────────────────────────────────────────────────────────
@@ -195,10 +195,14 @@ async def test_role_credentials_marked_secret_and_redacted(target_server: object
         # wire order; redaction replaces the bearer value, not its position.
         assert len(owner.secret_fields) == 1
         assert len(guest.secret_fields) == 1
-        assert all('owner-secret-token' not in value for _, value in redact(owner).http.request.headers)
-        assert all('guest-secret-token' not in value for _, value in redact(guest).http.request.headers)
-        assert any(value == '<redacted>' for _, value in redact(owner).http.request.headers)
-        assert any(value == '<redacted>' for _, value in redact(guest).http.request.headers)
+        owner_redacted = redact(owner)
+        guest_redacted = redact(guest)
+        assert isinstance(owner_redacted, HttpEvidence)  # capture-redaction preserves the evidence kind
+        assert isinstance(guest_redacted, HttpEvidence)
+        assert all('owner-secret-token' not in value for _, value in owner_redacted.http.request.headers)
+        assert all('guest-secret-token' not in value for _, value in guest_redacted.http.request.headers)
+        assert any(value == '<redacted>' for _, value in owner_redacted.http.request.headers)
+        assert any(value == '<redacted>' for _, value in guest_redacted.http.request.headers)
     finally:
         await close_all(handles)
 
