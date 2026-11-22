@@ -1,6 +1,10 @@
 """Unit tests for the minimal in-package OpenAPI subset resolver (issue #24; DEPS.md §3.1)."""
 
 import json
+import socket
+import time
+
+import pytest
 
 from partex.bundle import MAX_CONTENT_BYTES
 from partex.ids import evidence_id, sha256_hex
@@ -521,3 +525,150 @@ def test_derive_openapi_config_evidence_rejects_non_openapi_swagger2_and_oversiz
     bomb_lines.append('paths: {}')
     assert derive_openapi_config_evidence('\n'.join(bomb_lines), origin_id='ev_bomb', url=url) is None
     assert MAX_OPENAPI_NODES == 25_000
+
+
+# ── referencing ($id, $anchor, no-retriever, memoization, budget) (#153) ─────
+
+
+def test_oas31_dollar_id_and_dollar_anchor_refs_resolve() -> None:
+    spec = """\
+openapi: 3.1.0
+info: {title: anchors, version: "1.0"}
+paths:
+  /profiles/{id}:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "https://schemas.example.test/profile.json"
+components:
+  schemas:
+    AnchoredMeta:
+      $anchor: sharedMeta
+      type: object
+      properties:
+        version: {type: integer}
+      additionalProperties: false
+    Profile:
+      $id: "https://schemas.example.test/profile.json"
+      type: object
+      properties:
+        id: {type: integer}
+        badge:
+          $ref: "#badgeAnchor"
+        meta:
+          $ref: "urn:partex:openapi#sharedMeta"
+      additionalProperties: false
+      $defs:
+        Badge:
+          $anchor: badgeAnchor
+          type: object
+          properties:
+            label: {type: string}
+          additionalProperties: false
+"""
+    contract = load_openapi_contract(_cfg(spec))
+    assert contract.load_error is None
+    assert contract.unresolved_refs == ()
+    (op,) = contract.operations
+
+    ok = check_response_body(op, 200, json.dumps({'id': 1, 'badge': {'label': 'pro'}, 'meta': {'version': 2}}))
+    assert ok.violations == () and ok.evaluated is True
+
+    bad = check_response_body(
+        op,
+        200,
+        json.dumps({'id': 1, 'badge': {'label': 'pro', 'secret': 'x'}, 'meta': {'version': 2, 'extra': True}}),
+    )
+    assert [(v.path, v.severity) for v in bad.violations] == [
+        ('$.badge.secret', 'high'),
+        ('$.meta.extra', 'medium'),
+    ]
+
+
+def test_external_ref_never_opens_a_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _forbid_socket(*args: object, **kwargs: object) -> None:
+        raise AssertionError('external $ref resolution must never open a socket')
+
+    monkeypatch.setattr(socket, 'socket', _forbid_socket)
+    monkeypatch.setattr(socket, 'create_connection', _forbid_socket)
+
+    spec = """\
+openapi: 3.1.0
+info: {title: ext-net, version: "1.0"}
+paths:
+  /remote:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "https://external.invalid/schemas/user.json"
+"""
+    contract = load_openapi_contract(_cfg(spec))
+    assert contract.load_error is None
+    assert contract.unresolved_refs == ('https://external.invalid/schemas/user.json',)
+    (op,) = contract.operations
+    outcome = check_response_body(op, 200, '{"id": 1}')
+    assert outcome.evaluated is False
+    assert outcome.unresolved_ref == 'https://external.invalid/schemas/user.json'
+
+
+def test_doubled_ref_chain_resolves_quickly_via_memoization() -> None:
+    # A 24-level doubled $ref chain has 2^24 (~16.7M) uncached paths; memoization makes it linear.
+    levels = 24
+    schemas: dict[str, object] = {
+        f'L{levels}': {
+            'type': 'object',
+            'properties': {'leaf': {'type': 'string'}},
+            'additionalProperties': False,
+        }
+    }
+    for i in range(levels - 1, -1, -1):
+        target = f'#/components/schemas/L{i + 1}'
+        schemas[f'L{i}'] = {'allOf': [{'$ref': target}, {'$ref': target}]}
+    spec = {
+        'openapi': '3.1.0',
+        'info': {'title': 'chain', 'version': '1.0'},
+        'paths': {
+            '/chain': {
+                'get': {
+                    'responses': {
+                        '200': {
+                            'description': 'ok',
+                            'content': {'application/json': {'schema': {'$ref': '#/components/schemas/L0'}}},
+                        }
+                    }
+                }
+            }
+        },
+        'components': {'schemas': schemas},
+    }
+    start = time.monotonic()
+    contract = load_openapi_contract(_cfg(json.dumps(spec), path='chain.json'))
+    elapsed = time.monotonic() - start
+    assert elapsed < 1.0, f'doubled $ref chain took {elapsed:.2f}s (expected memoized linear resolution)'
+    assert contract.load_error is None
+    (op,) = contract.operations
+    assert check_response_body(op, 200, json.dumps({'leaf': 'ok'})).violations == ()
+    bad = check_response_body(op, 200, json.dumps({'leaf': 'ok', 'extra': 1}))
+    assert [(v.path, v.severity) for v in bad.violations] == [('$.extra', 'medium')]
+
+
+def test_resolution_budget_degrades_to_unresolved_ref() -> None:
+    doc = {
+        'components': {
+            'schemas': {
+                'A': {'type': 'object', 'properties': {'b': {'$ref': '#/components/schemas/B'}}},
+                'B': {'type': 'object', 'properties': {'c': {'type': 'string'}}},
+            }
+        }
+    }
+    schema = resolve_schema({'$ref': '#/components/schemas/A'}, doc, max_steps=2)
+    assert schema.unresolved_ref is not None
+    assert 'resolution-budget-exceeded' in schema.unresolved_ref
