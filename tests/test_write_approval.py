@@ -5,6 +5,7 @@ request it receives, so "nothing was sent" is asserted at the socket), and appro
 standing in for the operator's terminal picker.
 """
 
+import inspect
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -169,7 +170,8 @@ async def test_a_denied_write_sends_nothing_and_tells_the_model_why(
         (failed,) = await _drive(session, tmp_store, WriteGate(ask=operator), [POST_ORDER])
         run_id = session.run_id
     assert failed.outcome == 'failed'
-    assert 'nothing was sent' in str(failed.content) and 'not on production data' in str(failed.content)
+    assert 'nothing was sent' in str(failed.content)
+    assert "The operator's reason: not on production data" in str(failed.content)
     assert _writes(target_server) == []
     (approval,) = await _calls(tmp_store, run_id, 'write_approval')
     assert approval.result == {'decision': 'deny', 'source': 'operator', 'reason': 'not on production data'}
@@ -184,6 +186,8 @@ async def test_with_no_operator_to_ask_every_write_is_denied(
         (failed,) = await _drive(session, tmp_store, WriteGate(), [POST_ORDER])
         run_id = session.run_id
     assert failed.outcome == 'failed' and 'nothing was sent' in str(failed.content)
+    # No operator said anything, so the model is not told "the operator's reason".
+    assert f'Reason: {UNATTENDED}' in str(failed.content) and "operator's reason" not in str(failed.content)
     assert _writes(target_server) == []
     (approval,) = await _calls(tmp_store, run_id, 'write_approval')
     assert approval.result == {'decision': 'deny', 'source': 'unattended', 'reason': UNATTENDED}
@@ -311,6 +315,21 @@ def test_the_operator_sees_the_action_with_credentials_scrubbed_and_the_body_cut
 )
 def test_only_an_explicit_approve_option_approves(response: AskUserResponse, expected: Decision) -> None:
     assert decision_from(response) == expected
+
+
+# ── the terminal picker leans on CLAI2's TerminalAnswerer: a bump must not break it silently ──
+
+
+def test_terminal_asker_matches_the_pinned_clai2_answerer_api() -> None:
+    """``terminal_asker`` subclasses ``TerminalAnswerer`` and calls its private ``_ask``; check both still exist."""
+    from pydantic_clai2.builtin_plugins.ask_user_menu import (  # pyright: ignore[reportMissingTypeStubs]
+        TerminalAnswerer,
+    )
+
+    ask = vars(TerminalAnswerer).get('_ask')
+    assert ask is not None, 'TerminalAnswerer._ask is gone; terminal_asker needs a new way to show a held write'
+    assert {'request', 'held'} <= set(inspect.signature(ask).parameters)
+    assert {'full_screen', 'console'} <= set(inspect.signature(TerminalAnswerer.__init__).parameters)
 
 
 # ── the /scope plugin binds the terminal picker only when there is a terminal ──

@@ -151,7 +151,12 @@ def decision_from(response: AskUserResponse) -> Decision:
 
 
 def terminal_asker(host: Any) -> Asker:
-    """Ask in CLAI2's inline terminal picker on *host* (a ``PluginHost``), printing the full action first."""
+    """Ask in CLAI2's inline terminal picker on *host* (a ``PluginHost``), printing the full action first.
+
+    This subclasses CLAI2's ``TerminalAnswerer`` and calls its private ``_ask`` so a write approval reuses the same
+    inline picker and terminal hand-off as ``ask_user``. ``pydantic-clai2`` is locked in ``uv.lock``;
+    ``tests/test_write_approval.py`` fails loudly if a bump changes the API this relies on.
+    """
     from pydantic_clai2.builtin_plugins.ask_user_menu import TerminalAnswerer  # pyright: ignore[reportMissingTypeStubs]
 
     class _WriteAnswerer(TerminalAnswerer):  # pyright: ignore[reportUntypedBaseClass]

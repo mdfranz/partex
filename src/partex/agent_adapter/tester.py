@@ -212,7 +212,9 @@ async def _approve_write(
     )
     if not decision.approved:
         await _audit(ctx, 'http_request', args, {'refused': 'denied'})
-        reason = f' Their reason: {decision.reason}' if decision.reason else ''
+        # Only a typed answer is the operator's own words; an unattended denial is the system's, not theirs.
+        who = "The operator's reason" if decision.source == 'operator' else 'Reason'
+        reason = f' {who}: {decision.reason}' if decision.reason else ''
         raise ToolFailed(f'{verb} {url} was not approved, so nothing was sent.{reason}')
 
 
