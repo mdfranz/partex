@@ -41,6 +41,9 @@ from partex.target import MAX_BODY_BYTES, ScopedHttpClient
 pytest_plugins = ['plugins.target_server']
 
 FIXTURE_JS = Path(__file__).parent.parent / 'fixtures' / 'js' / 'sample.js'
+MAP_FIXTURE = Path(__file__).parent.parent / 'fixtures' / 'js' / 'app.js.map'
+SOURCEMAP_APP = Path(__file__).parent.parent / 'fixtures' / 'js' / 'sourcemap-app.js'
+HIGH_ENTROPY_TOKEN = 'x9Kd3mQ7vR2zT8wL5nB6fG1hJ3dE4uS0pY6aN8cI2o'
 
 
 def _engagement(port: int, *, max_requests: int = 50) -> Engagement:
@@ -420,6 +423,104 @@ async def test_agent_download_asset_and_js_analysis_e2e(tmp_store: RunStore, tmp
         thread.join(timeout=5)
 
 
+def _stored_map_artifact(tmp_path: Path) -> ArtifactEvidence:
+    """The same ``_stored_artifact`` helper, but for the map fixture URL and JSON content type."""
+    digest = hashlib.sha256(MAP_FIXTURE.read_bytes()).hexdigest()
+    directory = tmp_path / 'run.db.artifacts'
+    directory.mkdir(exist_ok=True)
+    (directory / digest).write_bytes(MAP_FIXTURE.read_bytes())
+    map_artifact = ArtifactEvidence(
+        id='',
+        source='capture:test',
+        artifact=ArtifactAsset(
+            url='https://app.example.test/static/app.js.map',
+            status_code=200,
+            headers=[('Content-Type', 'application/json')],
+            content_type='application/json',
+            sha256=digest,
+            size_bytes=MAP_FIXTURE.stat().st_size,
+        ),
+        file_path=str(directory / digest),
+    )
+    return map_artifact.model_copy(update={'id': evidence_id(map_artifact)})
+
+
+# ── source-map pipeline (#193) ────────────────────────────────────────────────
+
+
+def test_referenced_map_without_artifact_keeps_the_low_finding(tmp_path: Path) -> None:
+    bundle = _stored_artifact(
+        tmp_path, SOURCEMAP_APP.read_bytes(), url='https://app.example.test/static/sourcemap-app.js'
+    )
+    drafts = list(js_analysis_check.review([bundle]))
+    sourcemap = [d for d in drafts if d.subject == 'js:sourcemap']
+    assert sourcemap and sourcemap[0].severity == 'low'
+    assert 'not fetched or parsed' in sourcemap[0].description
+    assert not any(d.subject == 'js:sourcemap-parsed' for d in drafts)
+
+
+def test_parsed_map_upgrades_and_redacts_original_source(tmp_path: Path) -> None:
+    bundle = _stored_artifact(
+        tmp_path, SOURCEMAP_APP.read_bytes(), url='https://app.example.test/static/sourcemap-app.js'
+    )
+    map_artifact = _stored_map_artifact(tmp_path)
+
+    assert js_analysis_check.applies_to([map_artifact]) is True
+    drafts = list(js_analysis_check.review([bundle, map_artifact]))
+    subjects = {d.subject: d for d in drafts}
+
+    assert 'js:sourcemap-parsed' in subjects
+    parsed = subjects['js:sourcemap-parsed']
+    assert parsed.severity == 'medium'  # sourcesContent present → stronger
+    assert parsed.evidence_ids == [map_artifact.id]
+    assert 'webpack:///src/pages/Profile.js' in parsed.description
+
+    # The referenced bundle no longer emits the bare low finding (superseded).
+    assert 'js:sourcemap' not in subjects
+
+    # sourcesContent is analyzed for endpoints / secrets / sinks, but its body and values never leak.
+    assert '/api/v1/profile' in subjects['js:endpoints'].description
+    assert '/api/v1/admin' in subjects['js:endpoints'].description
+    assert 'js:secret:apiKey' in subjects
+    assert 'js:sink:innerHTML' in subjects
+    for d in drafts:
+        assert 'sk-map-secret-abcdef123456' not in d.title
+        assert 'sk-map-secret-abcdef123456' not in d.description
+        assert 'SENSITIVE-SOURCE-BODY-193' not in d.title + d.description + d.remediation
+
+
+def test_unfetchable_map_artifact_keeps_the_low_finding(tmp_path: Path) -> None:
+    """A map artifact with a non-success status is not parsed (out of scope or 404)."""
+    bundle = _stored_artifact(
+        tmp_path, SOURCEMAP_APP.read_bytes(), url='https://app.example.test/static/sourcemap-app.js'
+    )
+    map_artifact = _stored_map_artifact(tmp_path)
+    map_artifact.artifact.status_code = 404
+    drafts = list(js_analysis_check.review([bundle, map_artifact]))
+    assert any(d.subject == 'js:sourcemap' and d.severity == 'low' for d in drafts)
+    assert not any(d.subject == 'js:sourcemap-parsed' for d in drafts)
+
+
+# ── secret-detection hardening (#193) ─────────────────────────────────────────
+
+
+def test_high_entropy_token_on_innocuous_identifier_is_caught(tmp_path: Path) -> None:
+    js = f'const innocuous = {HIGH_ENTROPY_TOKEN!r};\n'.encode()
+    artifact = _stored_artifact(tmp_path, js)
+    drafts = list(js_analysis_check.review([artifact]))
+    secrets = [d for d in drafts if d.subject.startswith('js:secret:')]
+    assert secrets and any('high-entropy-value' in d.subject for d in secrets)
+    # The value itself is always redacted.
+    for d in secrets:
+        assert HIGH_ENTROPY_TOKEN not in d.title + d.description + d.remediation
+
+
+def test_short_low_entropy_and_placeholder_values_are_not_secrets(tmp_path: Path) -> None:
+    js = b"const a = 'short'; const b = 'changeme'; const c = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6';"
+    result = analyze_js_bytes(js)
+    assert result.secrets == ()  # the 40-char value is a pure hex SHA, not a secret
+
+
 # ── review fixes (PR #75) ─────────────────────────────────────────────────────
 
 
@@ -450,6 +551,15 @@ def test_endpoints_never_carry_query_strings_or_userinfo() -> None:
 
 def test_window_open_is_not_an_endpoint() -> None:
     assert analyze_js_bytes(b"window.open('/help', '_blank');").endpoints == ()  # neither arg is an endpoint
+
+
+def test_router_paths_and_webpack_chunk_urls_are_endpoints() -> None:
+    js = SOURCEMAP_APP.read_bytes()
+    endpoints = analyze_js_bytes(js).endpoints
+    assert '/account/profile' in endpoints
+    assert '/admin/panel' in endpoints
+    assert '/static/js/admin.chunk.js' in endpoints
+    assert '/static/js/checkout.chunk.js' in endpoints
 
 
 def test_artifact_must_be_the_content_addressed_file(tmp_path: Path) -> None:

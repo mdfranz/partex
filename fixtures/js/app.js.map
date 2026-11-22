@@ -1,0 +1,15 @@
+{
+  "version": 3,
+  "file": "app.js",
+  "sources": [
+    "webpack:///src/pages/Profile.js",
+    "webpack:///src/pages/Admin.js",
+    "webpack:///src/config.js"
+  ],
+  "sourcesContent": [
+    "// SENSITIVE-SOURCE-BODY-193\nconst apiKey = 'sk-map-secret-abcdef123456';\nfetch('/api/v1/profile');",
+    "fetch('/api/v1/admin');",
+    "el.innerHTML = data;"
+  ],
+  "names": []
+}
