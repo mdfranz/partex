@@ -179,7 +179,10 @@ async def test_dns_pins_are_shared_across_roles(target_server: object) -> None:
 
 
 async def test_role_credentials_marked_secret_and_redacted(target_server: object) -> None:
-    handles = role_handles(roles_engagement(target_server), env=ROLE_ENV)
+    engagement = roles_engagement(
+        target_server, allowed_methods=['GET', 'HEAD', 'OPTIONS', 'POST'], max_write_requests=5
+    )
+    handles = role_handles(engagement, env=ROLE_ENV)
     try:
         base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
         owner = await handles['owner'].client.request(

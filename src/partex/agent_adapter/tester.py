@@ -1,7 +1,8 @@
 """``partex_tester_agent`` — operator-directed iterative probing behind ``partex agent`` (PLAN §9, #54).
 
-First slice: ``http_request`` sends only GET, HEAD, and OPTIONS (state-changing methods need operator
-approval, which lands in a follow-up), ``run_check`` runs registered checks through the engine, and
+``http_request`` sends GET, HEAD and OPTIONS directly; POST, PUT, PATCH and DELETE only when the engagement
+authorizes them and the operator approves each one in the terminal (#65, :mod:`.approval`); ``run_check`` runs
+registered checks through the engine, and
 the read tools from ``chat`` cover this session's run and, with ``--from``, the run it continues.
 
 Every request goes through the session's engagement-scoped client: scope, rate, and budget are
@@ -12,7 +13,7 @@ Each ``http_request`` / ``run_check`` call is recorded in ``tool_calls`` without
 
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -32,13 +33,15 @@ from ..checks.js_analysis import discover_js_urls
 from ..checks.version_disclosure import ERROR_PAGE_RISK
 from ..engine import CheckFailed, CheckSelectionError, LiveSession
 from ..errors import BudgetExhausted, PartexError, ScopeViolation
-from ..models import REDACTED, ArtifactEvidence, Finding, HttpEvidence, redact
+from ..models import REDACTED, SAFE_METHODS, WRITE_METHODS, ArtifactEvidence, Finding, HttpEvidence, redact
+from ..scope import check_url
 from ..storage import RunStore, run_reports_dir, write_report
+from .approval import WriteAction, WriteGate
 from .search import WebSearcher
 from .tools import BRIEFING_TAG, REVIEWER_TOOLS, ReviewDeps, frame_untrusted
 
-SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS'})
-"""Methods the agent may send without operator approval (the only ones in this slice)."""
+MAX_REQUEST_BODY_CHARS = 64 * 1024
+"""Largest request body ``http_request`` sends (#65)."""
 
 RULE_OWNERS = {ERROR_PAGE_RISK: 'version-disclosure'}
 """Rule/risk IDs the model mistakes for check IDs, mapped to the check that reports them (#125)."""
@@ -75,6 +78,9 @@ class TesterDeps(ReviewDeps):
     agent directs its own probes at them through the normal scope gate, nothing is auto-sent."""
     searcher: WebSearcher | None = None
     """Optional dedicated web-search runner (#111); ``None`` unless ``--search-model`` is configured."""
+    write_gate: WriteGate = field(default_factory=WriteGate)
+    """Operator approval for state-changing requests (#65). Unbound (every write denied) unless the ``/scope``
+    plugin binds the terminal picker; shared with :class:`ScopeControl` so both see the same session."""
 
 
 async def _audit(ctx: RunContext[TesterDeps], tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
@@ -107,7 +113,11 @@ def _finding_row(finding: Finding) -> dict[str, Any]:
 
 
 async def http_request(
-    ctx: RunContext[TesterDeps], method: str, path: str, headers: dict[str, str] | None = None
+    ctx: RunContext[TesterDeps],
+    method: str,
+    path: str,
+    headers: dict[str, str] | None = None,
+    body: str | None = None,
 ) -> str:
     """Send one request to the target and return the captured exchange (secrets redacted).
 
@@ -115,24 +125,31 @@ async def http_request(
     out-of-scope or excluded URL fails without reaching the network. Every request is stored as
     evidence of this run.
 
+    GET, HEAD and OPTIONS are sent directly. POST, PUT, PATCH and DELETE are available only when the
+    engagement authorizes that method and has write budget left, and each one waits for the operator
+    to approve it in the terminal; if they deny it (or nobody can be asked), nothing is sent. Explain
+    why you need a write before asking for one, and prefer read-only requests.
+
     Args:
-        method: GET, HEAD, or OPTIONS. Other methods are not available in this version.
+        method: GET, HEAD, OPTIONS, or (operator-approved) POST, PUT, PATCH, DELETE.
         path: A path from the target's base URL (``/robots.txt``; ``/`` starts at the site root) or an
             absolute in-scope URL.
-        headers: Optional extra request headers.
+        headers: Optional extra request headers (set ``Content-Type`` when sending a body).
+        body: Optional request body text, at most 64 KiB.
     """
     verb = method.strip().upper()
     session = ctx.deps.session
     url = path if '://' in path else urljoin(session.engagement.target.base_url, path)
-    args = {'method': verb, 'url': url, 'header_names': sorted(headers or {})}
+    args: dict[str, Any] = {'method': verb, 'url': url, 'header_names': sorted(headers or {})}
+    if body is not None:
+        args['body_chars'] = len(body)
+        if len(body) > MAX_REQUEST_BODY_CHARS:
+            await _audit(ctx, 'http_request', args, {'refused': 'body-size'})
+            raise ToolFailed(f'the request body is over the {MAX_REQUEST_BODY_CHARS}-character limit; nothing was sent')
     if verb not in SAFE_METHODS:
-        await _audit(ctx, 'http_request', args, {'refused': 'method'})
-        raise ToolFailed(
-            f'{verb} is not available: this version sends only GET, HEAD, and OPTIONS '
-            '(state-changing requests need operator approval, not yet supported).'
-        )
+        await _approve_write(ctx, verb, url, headers, body, args)
     try:
-        evidence = await session.request(verb, url, headers=headers)
+        evidence = await session.request(verb, url, headers=headers, body=body)
     except ScopeViolation as exc:
         await _audit(ctx, 'http_request', args, {'refused': 'scope', 'reason': str(exc)})
         raise ToolFailed(
@@ -146,6 +163,57 @@ async def http_request(
         raise ToolFailed(f'request failed: {exc}') from exc
     await _audit(ctx, 'http_request', args, {'evidence_id': evidence.id, 'status': evidence.http.response.status_code})
     return frame_untrusted('http_exchange', _exchange_for_model(evidence))
+
+
+async def _approve_write(
+    ctx: RunContext[TesterDeps],
+    verb: str,
+    url: str,
+    headers: dict[str, str] | None,
+    body: str | None,
+    args: dict[str, Any],
+) -> None:
+    """The §4.2 gate for one state-changing request: engagement, scope and budgets first, then the operator.
+
+    Raises ``ToolFailed`` (nothing sent) on any refusal or denial; returns only when the operator approved.
+    Approval never bypasses the send-time checks in ``target.py``, which run again when the request is sent.
+    """
+    session = ctx.deps.session
+    scope = session.engagement.scope
+    if verb not in WRITE_METHODS:
+        await _audit(ctx, 'http_request', args, {'refused': 'method'})
+        raise ToolFailed(f'{verb} is never sent (supported: GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE).')
+    if verb not in scope.allowed_methods:
+        await _audit(ctx, 'http_request', args, {'refused': 'method-not-authorized'})
+        raise ToolFailed(
+            f'the engagement does not authorize {verb} (allowed_methods: {", ".join(scope.allowed_methods)}); '
+            'nothing was sent. Operator approval cannot unlock it: only the engagement file can.'
+        )
+    try:
+        check_url(scope, url)
+    except ScopeViolation as exc:
+        await _audit(ctx, 'http_request', args, {'refused': 'scope', 'reason': str(exc)})
+        raise ToolFailed(
+            f'refused by the engagement scope (nothing was sent): {exc}. {scope_refusal_advice(exc)}'
+        ) from exc
+    budget = session.client.budget
+    if budget.requests_remaining <= 0 or budget.writes_remaining <= 0:
+        which = 'max_requests' if budget.requests_remaining <= 0 else 'max_write_requests'
+        await _audit(ctx, 'http_request', args, {'refused': 'budget', 'budget': which})
+        raise ToolFailed(f'the engagement {which} budget is spent; nothing was sent')
+
+    action = WriteAction.build(verb, url, sorted(headers or {}), body, _session_secrets(session))
+    decision = await ctx.deps.write_gate.decide(action)
+    await _audit(
+        ctx,
+        'write_approval',
+        action.audit_args(),
+        {'decision': decision.choice, 'source': decision.source, 'reason': decision.reason},
+    )
+    if not decision.approved:
+        await _audit(ctx, 'http_request', args, {'refused': 'denied'})
+        reason = f' Their reason: {decision.reason}' if decision.reason else ''
+        raise ToolFailed(f'{verb} {url} was not approved, so nothing was sent.{reason}')
 
 
 def _batch_url(session: LiveSession, item: BatchRequestItem) -> str:
@@ -173,7 +241,7 @@ async def _run_batch_item(session: LiveSession, item: BatchRequestItem) -> dict[
         return {
             'path': item.path,
             'refused': 'method',
-            'reason': f'{verb} is not available: only GET, HEAD, and OPTIONS are allowed',
+            'reason': f'{verb} is not available in a batch: send state-changing requests one at a time with http_request',
         }
     try:
         evidence = await session.request(verb, _batch_url(session, item), headers=item.headers)
@@ -471,7 +539,7 @@ You help a security operator test one target interactively, under a written auth
 operator directs; you send the requests they ask for, run checks, and explain what the evidence
 shows. Do not probe beyond what the operator asked without saying what you intend first.
 
-Tools: http_request (GET, HEAD, OPTIONS only), http_request_batch (send up to 50 safe-method requests
+Tools: http_request (GET, HEAD, OPTIONS; POST, PUT, PATCH, DELETE only if the engagement allows them and the operator approves each one), http_request_batch (send up to 50 safe-method requests
 in one call and get {path, status, evidence_id} or {path, refused/error, reason} per item; use
 lookup_evidence for bodies), download_asset (GET-only full-body download for
 large assets such as JS bundles, returning metadata + ev_ ID without the body), discover_js_assets

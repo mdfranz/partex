@@ -80,7 +80,7 @@ def role_handles(
     role's credential value, and captures cite the role via ``source``.
     """
     resolved = resolve_role_credentials(engagement, env)
-    budget = RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps)
+    budget = RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps, engagement.scope.max_write_requests)
     pins: dict[str, str] = {}
     handles: dict[str, RoleHandle] = {}
     for role, (env_var, value) in resolved.items():

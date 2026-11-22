@@ -51,6 +51,7 @@ from partex.engagement import Engagement
 from partex.errors import BudgetExhausted, PartexError, ScopeViolation
 from partex.ids import evidence_id
 from partex.models import (
+    SAFE_METHODS,
     ArtifactAsset,
     ArtifactEvidence,
     Headers,
@@ -178,9 +179,11 @@ class RequestBudget:
     response lands.
     """
 
-    def __init__(self, max_requests: int, max_rps: int) -> None:
+    def __init__(self, max_requests: int, max_rps: int, max_write_requests: int = 0) -> None:
         self.max_requests = max_requests
+        self.max_write_requests = max_write_requests
         self._remaining = max_requests
+        self._writes_remaining = max_write_requests
         self._sent = 0
         self._lock = anyio.Lock()
         self._bucket = TokenBucket(float(max_rps))
@@ -190,18 +193,35 @@ class RequestBudget:
         """Requests successfully sent under this budget."""
         return self._sent
 
+    @property
+    def requests_remaining(self) -> int:
+        """Request slots not yet reserved."""
+        return self._remaining
+
+    @property
+    def writes_remaining(self) -> int:
+        """State-changing request slots not yet reserved (``max_write_requests``, #65)."""
+        return self._writes_remaining
+
     def record_send(self) -> None:
         """Record one completed send (called by the client after the response lands)."""
         self._sent += 1
 
-    async def acquire(self) -> None:
-        """Reserve one request slot and pace it, or raise :class:`BudgetExhausted`."""
+    async def acquire(self, *, write: bool = False) -> None:
+        """Reserve one request slot (and, for a *write*, one write slot) and pace it, or raise :class:`BudgetExhausted`.
+
+        Both counters are checked and taken under one lock, so concurrent calls cannot overrun either budget.
+        """
         async with self._lock:
             if self._remaining <= 0:
                 raise BudgetExhausted(
                     f'max_requests budget ({self.max_requests}) exhausted; {self._sent} requests were sent'
                 )
+            if write and self._writes_remaining <= 0:
+                raise BudgetExhausted(f'max_write_requests budget ({self.max_write_requests}) exhausted')
             self._remaining -= 1
+            if write:
+                self._writes_remaining -= 1
         await self._bucket.acquire()
 
 
@@ -316,7 +336,11 @@ class ScopedHttpClient:
         # passing a shared RequestBudget is what makes role clients pool their
         # request/rate allowance instead of each getting a fresh one.
         self._budget = (
-            budget if budget is not None else RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps)
+            budget
+            if budget is not None
+            else RequestBudget(
+                engagement.scope.max_requests, engagement.scope.max_rps, engagement.scope.max_write_requests
+            )
         )
         # A client-level default, so every send path inherits it (request, download_asset, redirects, seeded
         # probes, agent tools, verify replay); a request's own User-Agent header still wins (#135).
@@ -326,6 +350,11 @@ class ScopedHttpClient:
             timeout=timeout,
             headers={'User-Agent': engagement.http.user_agent or default_user_agent()},
         )
+
+    @property
+    def budget(self) -> RequestBudget:
+        """The engagement budget this client draws on (read its remaining counts; it cannot be bypassed)."""
+        return self._budget
 
     @property
     def requests_spent(self) -> int:
@@ -349,6 +378,8 @@ class ScopedHttpClient:
             or current.path_prefixes != scope.path_prefixes
             or current.exclusions != scope.exclusions
             or (scope.max_rps, scope.max_requests) != (current.max_rps, current.max_requests)
+            or (scope.allowed_methods, scope.max_write_requests)
+            != (current.allowed_methods, current.max_write_requests)
         )
         if shrinks or validate_scope(scope):
             raise ScopeViolation('scope may only be extended with hosts or ports', rule_code='scope-invalid')
@@ -374,11 +405,21 @@ class ScopedHttpClient:
     ) -> HttpEvidence:
         """Send one request through the scope gate and return captured evidence.
 
-        Raises :class:`ScopeViolation` (before any bytes or DNS), and
-        :class:`BudgetExhausted` when the engagement budget is spent.
+        Raises :class:`ScopeViolation` (before any bytes or DNS), including for a method the engagement's
+        ``allowed_methods`` does not list, and :class:`BudgetExhausted` when the engagement budget (or, for a
+        state-changing method, ``max_write_requests``) is spent. Operator approval of a write happens before
+        this call and never bypasses it (#65).
         """
+        verb = method.upper()
         check_url(self._engagement.scope, url)  # rules 1–3, before resolution
-        await self._budget.acquire()  # rule 5
+        if verb not in self._engagement.scope.allowed_methods:
+            raise ScopeViolation(
+                f'method {verb} is not in the engagement allowed_methods '
+                f'({", ".join(self._engagement.scope.allowed_methods)})',
+                rule_code='scope-invalid',
+                kind='method',
+            )
+        await self._budget.acquire(write=verb not in SAFE_METHODS)  # rule 5, plus the write budget
         await self._pin_host(url)  # rule 2: resolve once per run
         header_list = list(headers.items()) if isinstance(headers, Mapping) else list(headers or ())
         # build_request (not a bare httpx2.Request) so the client cookie jar and

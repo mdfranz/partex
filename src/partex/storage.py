@@ -41,19 +41,21 @@ from pydantic import TypeAdapter, ValidationError
 from .errors import PartexError
 from .ids import canonical_json, engagement_id, sha256_hex
 from .models import (
+    SAFE_METHODS,
     CoverageEntry,
     Engagement,
     Evidence,
     EvidenceAdapter,
     Finding,
+    HttpEvidence,
     ReviewSummary,
     Scope,
     Verification,
 )
 from .paths import mkdir_private
 
-SCHEMA_VERSION = 3  # 2: findings.subject (#39); 3: web_research (#113)
-READABLE_VERSIONS = frozenset({2, 3})
+SCHEMA_VERSION = 4  # 2: findings.subject (#39); 3: web_research (#113); 4: runs.write_requests_spent (#65)
+READABLE_VERSIONS = frozenset({2, 3, 4})
 """Versions a ``mode=ro`` reader accepts: the current one, and older ones the writer can migrate additively."""
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 
@@ -95,6 +97,7 @@ CREATE TABLE runs (
   authorized_flag INTEGER NOT NULL DEFAULT 0,
   model TEXT,
   requests_spent INTEGER NOT NULL DEFAULT 0,
+  write_requests_spent INTEGER NOT NULL DEFAULT 0,
   scope_snapshot TEXT,
   error TEXT,
   summary_error TEXT
@@ -223,6 +226,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
   PRIMARY KEY (run_id, research_id)
 )""",
     ),
+    3: ('ALTER TABLE runs ADD COLUMN write_requests_spent INTEGER NOT NULL DEFAULT 0',),
 }
 
 _string_list = TypeAdapter(list[str])
@@ -264,6 +268,8 @@ class RunRecord:
     error: str | None
     summary_error: str | None
     findings_count: int
+    write_requests_spent: int = 0
+    """State-changing sends this run made (``max_write_requests``, #65); 0 on stores older than v4."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -554,7 +560,7 @@ class _Reads:
     async def list_runs(self) -> list[RunRecord]:
         """All runs, oldest first."""
         return await self._db.run(
-            lambda conn: [_run_from_row(r) for r in conn.execute(_RUN_SELECT + ' ORDER BY r.created_at, r.id')]
+            lambda conn: [_run_from_row(r) for r in conn.execute(_run_select(conn) + ' ORDER BY r.created_at, r.id')]
         )
 
     async def get_run(self, run_id: str) -> RunRecord:
@@ -719,8 +725,16 @@ class _Reads:
 _RUN_SELECT = (
     'SELECT r.id, r.created_at, r.state, r.input_kind, r.input_ref, r.input_sha256, r.engine_version, '
     'r.selected_checks, r.authorized_flag, r.model, r.requests_spent, r.scope_snapshot, r.error, r.summary_error, '
-    '(SELECT COUNT(*) FROM findings f WHERE f.run_id = r.id) FROM runs r'
+    '(SELECT COUNT(*) FROM findings f WHERE f.run_id = r.id), {writes} FROM runs r'
 )
+
+
+def _run_select(conn: sqlite3.Connection) -> str:
+    """The runs query for this store: a read-only v2/v3 store has no ``write_requests_spent`` column, so it reads 0."""
+    (version,) = conn.execute('PRAGMA user_version').fetchone()
+    return _RUN_SELECT.format(writes='r.write_requests_spent' if version >= 4 else '0')
+
+
 _FINDING_SELECT = (
     'SELECT finding_id, check_id, check_version, severity, subject, title, description, evidence_ids, remediation, status, '
     'verification_id FROM findings'
@@ -755,7 +769,7 @@ def _load[T](validate: Callable[[Any], T], raw: Any) -> T:
 
 
 def _get_run(conn: sqlite3.Connection, run_id: str) -> RunRecord:
-    row = conn.execute(_RUN_SELECT + ' WHERE r.id = ?', (run_id,)).fetchone()
+    row = conn.execute(_run_select(conn) + ' WHERE r.id = ?', (run_id,)).fetchone()
     if row is None:
         raise StoreError(f'run {run_id!r} not found', rule_code='run-not-found')
     return _run_from_row(row)
@@ -778,6 +792,7 @@ def _run_from_row(row: tuple[Any, ...]) -> RunRecord:
         error,
         summary_error,
         count,
+        writes,
     ) = row
     return RunRecord(
         id=rid,
@@ -795,6 +810,7 @@ def _run_from_row(row: tuple[Any, ...]) -> RunRecord:
         error=error,
         summary_error=summary_error,
         findings_count=count,
+        write_requests_spent=writes,
     )
 
 
@@ -1014,7 +1030,13 @@ class RunStore(_Reads):
         def write(conn: sqlite3.Connection) -> bool:
             inserted = _insert_evidence(conn, run_id, item)
             if count_request:
-                conn.execute('UPDATE runs SET requests_spent = requests_spent + 1 WHERE id = ?', (run_id,))
+                # A state-changing exchange also counts against max_write_requests (#65), in the same transaction.
+                writes = int(isinstance(item, HttpEvidence) and item.http.request.method.upper() not in SAFE_METHODS)
+                conn.execute(
+                    'UPDATE runs SET requests_spent = requests_spent + 1, write_requests_spent = write_requests_spent + ? '
+                    'WHERE id = ?',
+                    (writes, run_id),
+                )
             return inserted
 
         return await self._db.run(lambda conn: _transaction(conn, write))

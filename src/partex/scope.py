@@ -29,12 +29,13 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urlsplit
 
 from .errors import ScopeViolation
-from .models import Scope
+from .models import SAFE_METHODS, WRITE_METHODS, Scope
 
 # E3 hard ceilings (PLAN §4.1): positive values with a hard upper bound so a
 # mistyped engagement cannot grant runaway budgets.
 MAX_RPS_CEILING = 64
 MAX_REQUESTS_CEILING = 100_000
+MAX_WRITE_REQUESTS_CEILING = 1_000
 
 _HTTP_SCHEMES = frozenset({'http', 'https'})
 _DEFAULT_PORTS: dict[str, int] = {'http': 80, 'https': 443}
@@ -362,6 +363,28 @@ def validate_scope(scope: Scope) -> list[str]:
         problems.append(f'max_rps {scope.max_rps} exceeds ceiling {MAX_RPS_CEILING}')
     if scope.max_requests > MAX_REQUESTS_CEILING:
         problems.append(f'max_requests {scope.max_requests} exceeds ceiling {MAX_REQUESTS_CEILING}')
+    problems.extend(_method_problems(scope))
+    return problems
+
+
+def _method_problems(scope: Scope) -> list[str]:
+    """E3 for ``allowed_methods`` / ``max_write_requests`` (#119): writes need both, or neither."""
+    problems: list[str] = []
+    known = SAFE_METHODS | WRITE_METHODS
+    for method in scope.allowed_methods:
+        if method not in known:
+            problems.append(f'allowed_methods entry {method!r} is not one of {", ".join(sorted(known))}')
+    if 'GET' not in scope.allowed_methods:
+        problems.append('allowed_methods must include GET')
+    if len(set(scope.allowed_methods)) != len(scope.allowed_methods):
+        problems.append('allowed_methods lists a method more than once')
+    if scope.max_write_requests > MAX_WRITE_REQUESTS_CEILING:
+        problems.append(f'max_write_requests {scope.max_write_requests} exceeds ceiling {MAX_WRITE_REQUESTS_CEILING}')
+    writes = [method for method in scope.allowed_methods if method in WRITE_METHODS]
+    if writes and scope.max_write_requests == 0:
+        problems.append(f'allowed_methods lists {", ".join(writes)} but max_write_requests is 0')
+    if not writes and scope.max_write_requests > 0:
+        problems.append('max_write_requests is set but allowed_methods lists no state-changing method')
     return problems
 
 

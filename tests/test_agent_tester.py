@@ -200,8 +200,8 @@ async def test_get_is_captured_and_returned_redacted(tmp_store: RunStore, tmp_pa
 @pytest.mark.parametrize(
     ('args', 'message'),
     [
-        ({'method': 'POST', 'path': '/'}, 'not available'),
-        ({'method': 'DELETE', 'path': '/'}, 'not available'),
+        ({'method': 'POST', 'path': '/'}, 'does not authorize POST'),
+        ({'method': 'DELETE', 'path': '/'}, 'does not authorize DELETE'),
         ({'method': 'GET', 'path': '/admin/shutdown'}, 'engagement scope'),
         ({'method': 'GET', 'path': '/admin//shutdown'}, 'engagement scope'),  # #36 boundary rules apply
         ({'method': 'GET', 'path': 'http://evil.test/'}, 'engagement scope'),
