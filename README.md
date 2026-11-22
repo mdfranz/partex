@@ -5,6 +5,18 @@
 
 The project grew out of a review of ARTEX and other open-source security testing projects. Their workflows inspired how `partex` organizes assessments, keeps evidence with findings, and packages testing guidance. The engine is a standalone Python implementation.  See [project lineage and evolution](LINEAGE.md) and [sources and tools analyzed](docs/lineage/SOURCES.md) and [design](PLAN.md)
 
+## Pydantic Components
+
+[Pydantic](https://github.com/pydantic/pydantic) validates inputs such as assessment settings and captured traffic. [Pydantic AI](https://pydantic.dev/docs/ai/overview/) connects models to the tools they can use, and its [CLAI2](https://pypi.org/project/pydantic-clai2/) package provides the interactive terminal. [Monty](https://pydantic.dev/docs/monty/get-started/) runs model-generated Python in a sandbox when the interactive session needs to work with saved evidence.
+
+- **Pydantic** (`pydantic`): Evidence and engagement records are `BaseModel`s with `extra='forbid'`, so unknown fields are rejected. Evidence is a discriminated union on `kind` (HTTP, config, and artifact), and `TypeAdapter` round-trips it through bundle import, SQLite storage, and export. Engagement validation errors are mapped onto the E-rule failure modes.
+- **Pydantic AI** (`pydantic-ai-slim`): `Agent` and `RunContext` back the read-only reviewer and the live tester. `Capability` defers each skill playbook until the model calls `load_capability`. `WebSearch(local=None)` runs provider-native search in a separate agent with no function tools. `framing.wrap` and `register_tag` mark tool results as untrusted target data. A `WrapperModel` records token usage for each request in `llm_usage`.
+- **Pydantic AI Harness** (`pydantic-ai-harness`): Supplies `CodeMode`, which connects Monty to the agent, and the `ask_user` request type that write approvals use.
+- **CLAI2** (`pydantic-clai2`): `chat()` runs the terminal loop. The reviewer runs with `load_plugins=False`. The `/scope` command is a CLAI2 `Plugin` with a `Command`. Write approvals reuse CLAI2's `TerminalAnswerer` picker, and chat history and settings are stored in `partex.db.clai2/`.
+- **Monty** (`pydantic-monty`): The live tester's `run_code` tool runs with `eager=True`, `max_tool_calls=50`, a 10-second limit, and 256 MiB of memory. `/artifacts` is a read-only `MountDir` holding the run's downloads. `os_access` is `None`, so the sandbox has no environment, clock, network, or shell. `partex sandboxes` reports the installed Monty version.
+
+[Runtime](RUNTIME.md) · [Dependencies](DEPS.md)
+
 ## Quick start
 
 From the repository root, use Python 3.14 or newer and `uv`:
@@ -43,18 +55,6 @@ The built-in executable checks are `header-security`, `js-analysis`, and `versio
 The live terminal includes a built-in CLAI2 plugin for operator commands. `/scope` shows the current scope and requires operator confirmation for changes; with `-k` (`--insecure`), hosts it adds are not certificate-verified either, and the confirmation says so. `/report` writes a redacted Markdown report, and `/secrets` writes secret values to a private file.
 
 Use `partex reports RUN_ID` to list reports saved by `save_report` and `partex reports RUN_ID NAME` to print one as Markdown. Both forms accept `--db PATH` and `--json`.
-
-## Pydantic Components
-
-[Pydantic](https://github.com/pydantic/pydantic) validates inputs such as assessment settings and captured traffic. [Pydantic AI](https://pydantic.dev/docs/ai/overview/) connects models to the tools they can use, and its [CLAI2](https://pypi.org/project/pydantic-clai2/) package provides the interactive terminal. [Monty](https://pydantic.dev/docs/monty/get-started/) runs model-generated Python in a sandbox when the interactive session needs to work with saved evidence.
-
-- **Pydantic** (`pydantic`): Evidence and engagement records are `BaseModel`s with `extra='forbid'`, so unknown fields are rejected. Evidence is a discriminated union on `kind` (HTTP, config, and artifact), and `TypeAdapter` round-trips it through bundle import, SQLite storage, and export. Engagement validation errors are mapped onto the E-rule failure modes.
-- **Pydantic AI** (`pydantic-ai-slim`): `Agent` and `RunContext` back the read-only reviewer and the live tester. `Capability` defers each skill playbook until the model calls `load_capability`. `WebSearch(local=None)` runs provider-native search in a separate agent with no function tools. `framing.wrap` and `register_tag` mark tool results as untrusted target data. A `WrapperModel` records token usage for each request in `llm_usage`.
-- **Pydantic AI Harness** (`pydantic-ai-harness`): Supplies `CodeMode`, which connects Monty to the agent, and the `ask_user` request type that write approvals use.
-- **CLAI2** (`pydantic-clai2`): `chat()` runs the terminal loop. The reviewer runs with `load_plugins=False`. The `/scope` command is a CLAI2 `Plugin` with a `Command`. Write approvals reuse CLAI2's `TerminalAnswerer` picker, and chat history and settings are stored in `partex.db.clai2/`.
-- **Monty** (`pydantic-monty`): The live tester's `run_code` tool runs with `eager=True`, `max_tool_calls=50`, a 10-second limit, and 256 MiB of memory. `/artifacts` is a read-only `MountDir` holding the run's downloads. `os_access` is `None`, so the sandbox has no environment, clock, network, or shell. `partex sandboxes` reports the installed Monty version.
-
-[Runtime](RUNTIME.md) · [Dependencies](DEPS.md)
 
 ## Active probe examples
 
