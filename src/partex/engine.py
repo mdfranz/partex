@@ -38,6 +38,7 @@ from .engagement import MANIFEST_NAME, check_credentials_available, load_engagem
 from .errors import BudgetExhausted, PartexError, ScopeViolation, ValidationFailed
 from .ids import finding_id
 from .models import (
+    WRITE_METHODS,
     ArtifactEvidence,
     ConfigEvidence,
     CoverageEntry,
@@ -54,7 +55,7 @@ from .models import (
 from .openapi_resolver import derive_openapi_config_evidence
 from .probes import SeedPlan, plan_seed_probes
 from .roles import RoleHandle, role_handles
-from .scope import apply_urls, check_url, extend_scope, parse_urls_file
+from .scope import apply_urls, check_url, extend_scope, parse_urls_file, validate_scope
 from .storage import RunState, RunStore, SurfaceKind, SurfaceRel, run_artifact_dir, surface_node_id
 from .target import DEFAULT_MAX_ASSET_BYTES, RequestBudget, ScopedHttpClient, tls_unverified
 
@@ -547,6 +548,33 @@ def _apply_user_agent(engagement: Engagement, user_agent: str | None) -> Engagem
     return engagement.model_copy(update={'http': HttpPolicy(user_agent=user_agent)})
 
 
+def _apply_write_flags(engagement: Engagement, allow_methods: Sequence[str], max_writes: int | None) -> Engagement:
+    """``--allow-method`` / ``--max-writes`` extend the engagement's write authority for this run (#65, #119).
+
+    Same E3 rules as the file: a write method needs a budget and a budget needs a write method. Never widens past
+    the ceilings, and approval of each write still happens per action (§4.2).
+    """
+    if not allow_methods and max_writes is None:
+        return engagement
+    methods = list(engagement.scope.allowed_methods)
+    for method in allow_methods:
+        verb = method.strip().upper()
+        if verb not in WRITE_METHODS:
+            raise _GateRefused(
+                f'--allow-method {method!r}: choose from {", ".join(sorted(WRITE_METHODS))}', rule_code='scope-invalid'
+            )
+        if verb not in methods:
+            methods.append(verb)
+    budget = engagement.scope.max_write_requests if max_writes is None else max_writes
+    if max_writes is not None and max_writes < 0:
+        raise _GateRefused('--max-writes must be 0 or more', rule_code='scope-invalid')
+    scope = engagement.scope.model_copy(update={'allowed_methods': methods, 'max_write_requests': budget})
+    problems = validate_scope(scope)
+    if problems:
+        raise _GateRefused('write flags: ' + '; '.join(problems), rule_code='scope-invalid')
+    return engagement.model_copy(update={'scope': scope})
+
+
 def _apply_insecure(engagement: Engagement, insecure: bool) -> Engagement:
     """``--insecure`` turns verification off for this run, keeping any ``insecure_hosts`` the file lists."""
     if not insecure or not engagement.tls.verify:
@@ -590,6 +618,8 @@ async def _check_live_gates(
     urls_file: str | Path | None = None,
     recursive: bool = False,
     user_agent: str | None = None,
+    allow_methods: Sequence[str] = (),
+    max_writes: int | None = None,
 ) -> Engagement:
     """The live gates, all before any socket: ``--authorized`` (E2 CLI half), E1–E7, credentials present."""
     if not authorized:
@@ -605,6 +635,7 @@ async def _check_live_gates(
         engagement = await anyio.to_thread.run_sync(
             partial(_apply_urls_file, engagement, urls_file, recursive=recursive)
         )
+    engagement = _apply_write_flags(engagement, allow_methods, max_writes)
     return _apply_user_agent(_apply_insecure(engagement, insecure), user_agent)
 
 
@@ -618,6 +649,8 @@ async def run_test(
     urls_file: str | Path | None = None,
     recursive: bool = False,
     user_agent: str | None = None,
+    allow_methods: Sequence[str] = (),
+    max_writes: int | None = None,
     registry: Mapping[str, Any] | None = None,
     seed_bundle: str | Path | None = None,
     max_seed: int | None = None,
@@ -658,6 +691,8 @@ async def run_test(
             urls_file=urls_file,
             recursive=recursive,
             user_agent=user_agent,
+            allow_methods=allow_methods,
+            max_writes=max_writes,
         )
     except _GateRefused as exc:
         return await invalid(exc.rule_code or 'engagement-invalid', str(exc))
@@ -1089,6 +1124,8 @@ async def live_session(
     urls_file: str | Path | None = None,
     recursive: bool = False,
     user_agent: str | None = None,
+    allow_methods: Sequence[str] = (),
+    max_writes: int | None = None,
     checks: Sequence[str] = (),
     registry: Mapping[str, Any] | None = None,
 ) -> AsyncGenerator[LiveSession]:
@@ -1110,6 +1147,8 @@ async def live_session(
             urls_file=urls_file,
             recursive=recursive,
             user_agent=user_agent,
+            allow_methods=allow_methods,
+            max_writes=max_writes,
         )
     except _GateRefused as exc:
         run_id = await store.create_run(

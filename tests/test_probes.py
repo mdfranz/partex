@@ -347,6 +347,7 @@ async def test_agent_bundle_exposes_the_surface_read_only(
 
     async def fake_chat(agent: Agent[TesterDeps, str], **kwargs: Any) -> None:
         seen['deps'] = kwargs['deps']
+        seen['usage_limits'] = kwargs['usage_limits']
 
     monkeypatch.setattr(partex.agent_adapter, 'chat', fake_chat)
     db = tmp_path / 'agent.db'
@@ -358,8 +359,10 @@ async def test_agent_bundle_exposes_the_surface_read_only(
         checks=('version-disclosure',),
         bundle=seed_bundle,
         briefing=False,
+        request_limit=120,
     )
 
+    assert seen['usage_limits'].request_limit == 120
     deps = seen['deps']
     assert deps.seed_surface == (f'GET {seeded_path}',)
     async with await RunStore.open(db) as store:
