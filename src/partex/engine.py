@@ -54,7 +54,7 @@ from .models import (
 from .openapi_resolver import derive_openapi_config_evidence
 from .probes import SeedPlan, plan_seed_probes
 from .roles import RoleHandle, role_handles
-from .scope import apply_urls, check_url, extend_scope, parse_urls_file
+from .scope import apply_urls, check_url, extend_scope, parse_urls_file, validate_scope
 from .storage import RunState, RunStore, SurfaceKind, SurfaceRel, run_artifact_dir, surface_node_id
 from .target import DEFAULT_MAX_ASSET_BYTES, RequestBudget, ScopedHttpClient, tls_unverified
 
@@ -961,6 +961,55 @@ class LiveSession:
                     'hosts_after': after.hosts,
                     'ports_before': before.ports,
                     'ports_after': after.ports,
+                    'tls_verified': {host: not self.host_tls_unverified(host) for host in added_hosts},
+                },
+            )
+        except Exception as exc:
+            raise PartexError(
+                f'could not record the scope change, so the scope is unchanged: {exc}', rule_code='scope-persist'
+            ) from exc
+        self.client.set_scope(after)
+        self.engagement = self.engagement.model_copy(update={'scope': after})
+        return before, after
+
+    async def import_urls(
+        self, entries: Sequence[str], *, source: str, source_sha256: str | None, confirmed_by: str
+    ) -> tuple[Scope, Scope]:
+        """Add URL-list *entries* to this session's scope as one atomic amendment; ``(before, after)``.
+
+        Only an operator-confirmed call may reach this (``/scope nmap``; never a model tool).
+        The entries are #121 allowlist entries — host and port pinned per entry — so an import
+        never widens scope to a host:port pair the scan did not show. Activating or extending a
+        list narrows rule 3 for *every* request, so the caller keeps the engagement's
+        ``base_url`` covered (:func:`partex.nmap.ensure_base_url_entry`). The amendment is audited
+        as one ``scope_amend`` tool call recording the scan *source* and its sha256 (#215); the
+        snapshot and the audit row commit together before the scope takes effect (the same
+        ordering guarantee as :meth:`extend_scope`).
+        """
+        before = self.engagement.scope
+        after = apply_urls(before, [*before.urls, *entries])
+        problems = validate_scope(after)
+        if problems:
+            raise PartexError(f'imported scope is invalid: {"; ".join(problems)}', rule_code='scope-invalid')
+        added_hosts = [host for host in after.hosts if host not in before.hosts]
+        try:
+            await self._store.amend_scope(
+                self.run_id,
+                after,
+                args={
+                    'action': 'import',
+                    'specs': list(entries),
+                    'source': source,
+                    'source_sha256': source_sha256,
+                    'confirmed_by': confirmed_by,
+                },
+                result={
+                    'hosts_before': before.hosts,
+                    'hosts_after': after.hosts,
+                    'ports_before': before.ports,
+                    'ports_after': after.ports,
+                    'urls_before': len(before.urls),
+                    'urls_after': len(after.urls),
                     'tls_verified': {host: not self.host_tls_unverified(host) for host in added_hosts},
                 },
             )
