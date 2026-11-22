@@ -31,9 +31,11 @@ The built-in executable checks are `header-security`, `js-analysis`, and `versio
 | Tools | What they do |
 | --- | --- |
 | `list_runs`, `list_findings`, `get_finding`, `list_evidence`, `lookup_evidence`, `list_coverage` | Inspect saved runs, findings, evidence, and check coverage. |
-| `http_request`, `download_asset`, `discover_js_assets`, `run_check` | Make scoped requests, save assets, find JavaScript files, and run installed checks during a live session. `POST`, `PUT`, `PATCH` and `DELETE` are off unless the engagement's `scope.allowed_methods` and `scope.max_write_requests` allow them, and then each one waits for you to approve it in the terminal; with no terminal they are denied. |
+| `http_request`, `http_request_batch`, `download_asset`, `discover_js_assets`, `run_check` | Make scoped requests (one at a time or as a concurrent batch with per-item audit), save assets, find JavaScript files, and run installed checks during a live session. `POST`, `PUT`, `PATCH` and `DELETE` are off unless the engagement's `scope.allowed_methods` and `scope.max_write_requests` allow them, and then each one waits for you to approve it in the terminal; with no terminal they are denied. |
 | `run_code`, `save_report` | Analyze evidence and downloaded artifacts in the Monty sandbox, or save a report from the live session. |
+| `list_research`, `lookup_research` | Inspect web research saved by `web_search` for the current run or a chosen run, including its sources. |
 | `list_reports`, `read_report` | Retrieve Markdown saved by `save_report` for the current run or the live session’s `--from` run. |
+| `load_capability` | Load a skill playbook from the catalog into the session when the model needs its guidance. |
 | `web_search` | Optional. Look up public references through a separate `anthropic:`, `google:`, `google-cloud:`, or `openai:` model's native web search (`--search-model`, or `-S` in `partex.sh`). Queries leave this machine. |
 
 `--search-model` takes `anthropic:<model>` (`ANTHROPIC_API_KEY`), `google:<model>` (`GOOGLE_API_KEY` or `GEMINI_API_KEY`), `google-cloud:<model>` (Application Default Credentials and `GOOGLE_CLOUD_PROJECT`), or `openai:<model>` (`OPENAI_API_KEY`, Responses API). OpenAI search has no per-query search limit and costs more per query than the others, so prefer a small model. `google-cloud:` uses the `global` location by default, since newer Gemini models are only served there; set `GOOGLE_CLOUD_LOCATION` to override it.
