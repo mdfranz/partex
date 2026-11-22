@@ -61,13 +61,14 @@ def usable_skills(skills: Mapping[str, Skill], checks: Mapping[str, Any]) -> lis
 
 
 def skill_capabilities(skills: list[Skill]) -> list[Capability[Any]]:
-    """One deferred capability per skill; the catalog shows ``description``, ``load_capability`` loads the text."""
+    """One deferred capability per skill; the catalog shows ``[modes] description``, ``load_capability`` loads the text."""
     capabilities: list[Capability[Any]] = []
     for skill in skills:
         text = skill_text(skill)
         if not text:
             continue
-        capabilities.append(
-            Capability(id=skill.name, description=skill.description, instructions=text, defer_loading=True)
+        description = (
+            f'[{", ".join(sorted(set(skill.modes)))}] {skill.description}' if skill.modes else skill.description
         )
+        capabilities.append(Capability(id=skill.name, description=description, instructions=text, defer_loading=True))
     return capabilities
