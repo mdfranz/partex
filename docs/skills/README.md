@@ -28,7 +28,7 @@ and gateway policy verification.
 | **P1.2 (S2)** | [authorization-testing.md](authorization-testing.md) | `skills/authorization-testing/` | `authz-boundary` | `active` + `passive` (`verify_recipe`) | OWASP API1:2023, API3:2023, API5:2023, WSTG-ATHZ-01..04 |
 | **P1.3 (S3)** | [auth-session-controls.md](auth-session-controls.md) | `skills/auth-session-controls/` | `session-cookie-config`, `token-weakness` | `passive` + `active` (`verify_recipe`) | RFC 8725 (JWT BCP), RFC 7515–7519, RFC 6265bis, OWASP API2:2023, WSTG-SESS/ATHN |
 | **P2.2 (S5) + M7** | [gateway-and-spa-recon.md](gateway-and-spa-recon.md) | `gateway-policy` (planned) + M7 `browser.py` | `gateway-policy` (planned) | `passive` + `active` + browser harness | OWASP API4:2023, RFC 8594 (`Sunset`), RFC 9745 (`Deprecation`), IETF `RateLimit` |
-| **Data-only (follow-up check)** | [graphql.md](graphql.md) | `skills/graphql/` (shipped, #192) | — (`checks: []`; deterministic check follow-up) | `passive` + `active` | GraphQL spec introspection, OWASP API1/API3/API4:2023, WSTG-CONFIG, Apollo APQ |
+| **Data-only (follow-up check)** | [graphql.md](graphql.md) | `skills/graphql/` (shipped, #192) | — (`checks: []`; deterministic check follow-up) | `passive` + `active` | GraphQL & GraphQL-over-HTTP specs, OWASP WSTG-APIT-01, API1/API3/API4/API5:2023, Apollo CSRF/Federation |
 
 ---
 
