@@ -466,6 +466,7 @@ def test_checks_json(capsys: pytest.CaptureFixture[str]) -> None:
     kinds = {row['check_id']: row['kind'] for row in json.loads(out)}
     assert kinds == {
         'api-contract-conformance': 'passive',
+        'authz-boundary': 'active',
         'header-security': 'passive',
         'js-analysis': 'passive',
         'openapi-spec-review': 'passive',
@@ -855,8 +856,16 @@ def test_chat_offers_installed_check_skills_and_extra_skill_dirs(
     )
     (names,) = offered
     # Playbooks for installed checks are offered; drafts whose checks are not installed are not.
-    assert {'api-inventory', 'header-review', 'version-disclosure', 'js-analysis', 'my-playbook'} <= set(names)
-    assert not {'authorization-testing', 'auth-session-controls'} & set(names)
+    assert {
+        'api-inventory',
+        'authorization-testing',
+        'header-review',
+        'version-disclosure',
+        'js-analysis',
+        'my-playbook',
+    } <= set(names)
+    # auth-session-controls is still a staged draft: its checks (session-cookie-config, token-weakness) are not installed.
+    assert 'auth-session-controls' not in set(names)
 
 
 HOSTILE_REPORT = '# Report\n\x1b[2Jcleared \x1b]8;;https://evil.test\x07link\x1b]8;;\x07 \x1b]0;title\x07\x9b31m\tok\n'

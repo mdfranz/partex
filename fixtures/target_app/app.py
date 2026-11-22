@@ -18,6 +18,7 @@ for operator use; tests call :func:`make_server` for an ephemeral port.
 """
 
 import http.server
+import json
 import threading
 from urllib.parse import urlparse
 
@@ -51,6 +52,8 @@ class _FixtureApp(http.server.BaseHTTPRequestHandler):
             self._send(200, 'text/html', INDEX_HTML)
         elif path == '/robots.txt':
             self._send(200, 'text/plain', 'User-agent: *\nDisallow: /admin/\n')
+        elif path.startswith('/api/'):
+            self._handle_api(path)
         elif server.catch_all:
             self._send(200, 'text/html', INDEX_HTML)  # SPA-style catch-all: no error handler is ever reached
         else:
@@ -59,6 +62,55 @@ class _FixtureApp(http.server.BaseHTTPRequestHandler):
             # hardened variant serves clean errors instead (verify tests, #22).
             body = 'Not Found' if server.hardened else STACK_TRACE_BODY
             self._send(404, 'text/plain', body)
+
+    def _role(self) -> str | None:
+        """The authenticated role for this request, by the bearer token (matches the #23 test
+        convention: ``owner-secret-token`` / ``guest-secret-token``)."""
+        authorization = self.headers.get('Authorization', '')
+        if authorization == 'Bearer owner-secret-token':
+            return 'owner'
+        if authorization == 'Bearer guest-secret-token':
+            return 'guest'
+        return None
+
+    def _handle_api(self, path: str) -> None:
+        segments = path.strip('/').split('/')  # e.g. ['api', 'orders', '42']
+        role = self._role()
+        if len(segments) >= 3 and segments[1] == 'docs' and segments[-1]:
+            # Correctly enforced object-level authorization: only the owner may read a document (#27).
+            object_id = segments[2]
+            if role == 'owner':
+                self._send_json(200, {'id': object_id, 'owner': 'owner', 'title': f'doc-{object_id}'})
+            else:
+                self._send_json(403, {'error': 'forbidden'})
+            return
+        if len(segments) >= 3 and segments[1] == 'orders' and segments[-1]:
+            # Deliberately broken BOLA: any authenticated role reads the owner's order (#27).
+            object_id = segments[2]
+            if role in ('owner', 'guest'):
+                self._send_json(200, {'id': object_id, 'owner': 'owner', 'amount': 42})
+            else:
+                self._send_json(403, {'error': 'forbidden'})
+            return
+        if len(segments) == 3 and segments[1] == 'admin':
+            if segments[2] == 'audit':
+                # Deliberately broken BFLA: the audit feed is readable by the guest role (#27).
+                if role in ('owner', 'guest'):
+                    self._send_json(200, {'audit': 'recent-events'})
+                else:
+                    self._send_json(403, {'error': 'forbidden'})
+                return
+            if segments[2] == 'reports':
+                # Correctly enforced function-level authorization: owner-only reports (#27).
+                if role == 'owner':
+                    self._send_json(200, {'reports': 'confidential'})
+                else:
+                    self._send_json(403, {'error': 'forbidden'})
+                return
+        self._send_json(404, {'error': 'not found'})
+
+    def _send_json(self, code: int, payload: dict[str, str]) -> None:
+        self._send(code, 'application/json', json.dumps(payload))
 
     def _send(self, code: int, content_type: str, body: str) -> None:
         payload = body.encode()

@@ -163,8 +163,11 @@ def test_checks_reports_skills_and_warnings(capsys: pytest.CaptureFixture[str]) 
     by_check = {r['check_id']: r['skills'] for r in json.loads(out)}
     assert by_check['header-security'] == ['header-review']
     assert by_check['api-contract-conformance'] == ['api-inventory']
+    assert by_check['authz-boundary'] == ['authorization-testing']
     assert 'warning: api-inventory:' not in err
-    assert 'warning: authorization-testing: unknown-check' in err
+    assert 'warning: authorization-testing:' not in err  # its check is now installed (#27)
+    assert "auth-session-controls: unknown-check: check 'session-cookie-config' is not registered" in err
+    assert "auth-session-controls: unknown-check: check 'token-weakness' is not registered" in err
 
 
 def test_checks_lint_errors_exit_1(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:

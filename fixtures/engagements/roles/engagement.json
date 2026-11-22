@@ -17,5 +17,5 @@
     "owner": "PARTEX_CRED_OWNER",
     "guest": "PARTEX_CRED_GUEST"
   },
-  "suggested_checks": ["version-disclosure"]
+  "suggested_checks": ["authz-boundary", "version-disclosure"]
 }
