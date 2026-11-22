@@ -1,8 +1,21 @@
 # partex
 
+
 `partex` checks web and API traffic for security issues and links findings to the evidence behind them. Review saved traffic offline or run checks against systems you have permission to test.
 
-The project grew out of a review of ARTEX and other open-source security testing projects. Their workflows inspired how `partex` organizes assessments, keeps evidence with findings, and packages testing guidance. The engine is a standalone Python implementation. [Project background](docs/lineage/SOURCES.md)
+The project grew out of a review of ARTEX and other open-source security testing projects. Their workflows inspired how `partex` organizes assessments, keeps evidence with findings, and packages testing guidance. The engine is a standalone Python implementation.  See [project lineage and evolution](LINEAGE.md) and [sources and tools analyzed](docs/lineage/SOURCES.md) and [design](PLAN.md)
+
+## Pydantic Components
+
+[Pydantic](https://github.com/pydantic/pydantic) validates inputs such as assessment settings and captured traffic. [Pydantic AI](https://pydantic.dev/docs/ai/overview/) connects models to the tools they can use, and its [CLAI2](https://pypi.org/project/pydantic-clai2/) package provides the interactive terminal. [Monty](https://pydantic.dev/docs/monty/get-started/) runs model-generated Python in a sandbox when the interactive session needs to work with saved evidence.
+
+- **Pydantic** (`pydantic`): Evidence and engagement records are `BaseModel`s with `extra='forbid'`, so unknown fields are rejected. Evidence is a discriminated union on `kind` (HTTP, config, and artifact), and `TypeAdapter` round-trips it through bundle import, SQLite storage, and export. Engagement validation errors are mapped onto the E-rule failure modes.
+- **Pydantic AI** (`pydantic-ai-slim`): `Agent` and `RunContext` back the read-only reviewer and the live tester. `Capability` defers each skill playbook until the model calls `load_capability`. `WebSearch(local=None)` runs provider-native search in a separate agent with no function tools. `framing.wrap` and `register_tag` mark tool results as untrusted target data. A `WrapperModel` records token usage for each request in `llm_usage`.
+- **Pydantic AI Harness** (`pydantic-ai-harness`): Supplies `CodeMode`, which connects Monty to the agent, and the `ask_user` request type that write approvals use.
+- **CLAI2** (`pydantic-clai2`): `chat()` runs the terminal loop. The reviewer runs with `load_plugins=False`. The `/scope` command is a CLAI2 `Plugin` with a `Command`. Write approvals reuse CLAI2's `TerminalAnswerer` picker, and chat history and settings are stored in `partex.db.clai2/`.
+- **Monty** (`pydantic-monty`): The live tester's `run_code` tool runs with `eager=True`, `max_tool_calls=50`, a 10-second limit, and 256 MiB of memory. `/artifacts` is a read-only `MountDir` holding the run's downloads. `os_access` is `None`, so the sandbox has no environment, clock, network, or shell. `partex sandboxes` reports the installed Monty version.
+
+[Runtime](RUNTIME.md) · [Dependencies](DEPS.md)
 
 ## Quick start
 
@@ -17,22 +30,35 @@ This example reviews bundled HTTP traffic offline. It prints sample findings and
 
 ## What you can do
 
-- **Review captured traffic.** Import a browser's HTTP archive (HAR) and check saved responses for issues such as missing security headers or insecure cookie settings. Offline checks run without a model.
 - **Run authorized live checks.** Capture responses within a defined target scope and request budget, then save the evidence alongside the findings.
 - **Work with saved results.** List past runs, export reports or captured traffic, and use read-only chat to review findings and their evidence.
+- **Review captured traffic.** Import a browser's HTTP archive (HAR) and check saved responses for issues such as missing security headers or insecure cookie settings. Offline checks run without a model.
 
 ## Skills, checks, and plugins
 
-Skills are Markdown guides that the interactive session can consult. The bundled guides cover headers and cookies, version disclosure, JavaScript review, API inventory, authorization, and session controls.
+Skills are Markdown playbooks in [`skills/`](skills/) that the interactive session loads on demand with `load_capability`. Each skill names the check it runs with. The checks are Python code registered through the `partex.checks` entry point and run by the engine; the skill only tells the model when to use them. Run `uv run partex checks` to see the installed checks and their linked skills.
 
-The built-in executable checks are `header-security`, `js-analysis`, and `version-disclosure`. Additional checks can register through the Python `partex.checks` entry point. Run `uv run partex checks` to see installed checks and their linked skills. [Skill guides](docs/skills/README.md)
+| Skill | Mode | Check | What it covers | Playbook and references |
+| --- | --- | --- | --- | --- |
+| [`header-review`](skills/header-review/SKILL.md) | passive | [`header-security`](src/partex/checks/header_security.py) | Missing or weak security headers (HSTS, CSP, framing, `X-Content-Type-Options`), cookie attributes, and permissive CORS, applied by response type | [response policies](skills/header-review/reference/response-policies.md), [research notes](docs/skills/header-review.md) |
+| [`version-disclosure`](skills/version-disclosure/SKILL.md) | active | [`version-disclosure`](src/partex/checks/version_disclosure.py) | Server and framework version banners and stack traces, confirmed by replaying a single request | [verification criteria](skills/version-disclosure/reference/verification-criteria.md), [research notes](docs/skills/version-disclosure.md) |
+| [`js-analysis`](skills/js-analysis/SKILL.md) | passive | [`js-analysis`](src/partex/checks/js_analysis.py) | Full JavaScript bundles downloaded in scope and parsed offline with `tree-sitter` for endpoints, embedded config, source map references, and risky DOM sinks | [analysis rules](skills/js-analysis/reference/analysis-rules.md) |
+| [`api-inventory`](skills/api-inventory/SKILL.md) | passive | [`api-contract-conformance`](src/partex/checks/api_inventory.py) | A normalized inventory of observed API operations, reconciled against declared OpenAPI contracts (shadow routes, unobserved operations, schema gaps) | [contract matching](skills/api-inventory/reference/contract-matching.md), [research notes](docs/skills/api-inventory.md) |
+| [`openapi-spec-review`](skills/openapi-spec-review/SKILL.md) | passive | [`openapi-spec-review`](src/partex/checks/openapi_spec_review.py) | Spec-level gaps in OpenAPI 3.0 and 3.1 documents: missing authentication, weak security schemes, internal server URLs, credential query parameters, and sensitive response properties | none |
+| [`server-error`](skills/server-error/SKILL.md) | passive | [`server-error`](src/partex/checks/server_error.py) | Unhandled HTTP 5xx responses and debug-page disclosure already present in captured evidence | none |
+| [`authorization-testing`](skills/authorization-testing/SKILL.md) | active and passive | [`authz-boundary`](src/partex/checks/authorization.py) | Broken object-level and function-level authorization (BOLA, IDOR, BFLA) by replaying operations across two engagement roles | [role-pair probing](skills/authorization-testing/reference/role-pair-probing.md), [research notes](docs/skills/authorization-testing.md) |
+| [`auth-session-controls`](skills/auth-session-controls/SKILL.md) | passive and active | Not yet registered | Session cookie configuration and token lifecycle weaknesses. Its checks (`session-cookie-config`, `token-weakness`) are not installed, so the skill is left out of the catalog until they are | [session and token checks](skills/auth-session-controls/reference/session-and-token-checks.md), [research notes](docs/skills/auth-session-controls.md) |
+
+Each skill's research notes in [`docs/skills/`](docs/skills/README.md) record the standards and false-positive guardrails behind it. Additional checks can register through the same `partex.checks` entry point.
 
 | Tools | What they do |
 | --- | --- |
 | `list_runs`, `list_findings`, `get_finding`, `list_evidence`, `lookup_evidence`, `list_coverage` | Inspect saved runs, findings, evidence, and check coverage. |
-| `http_request`, `download_asset`, `discover_js_assets`, `run_check` | Make scoped requests, save assets, find JavaScript files, and run installed checks during a live session. `POST`, `PUT`, `PATCH` and `DELETE` are off unless the engagement's `scope.allowed_methods` and `scope.max_write_requests` allow them, and then each one waits for you to approve it in the terminal; with no terminal they are denied. |
+| `http_request`, `http_request_batch`, `download_asset`, `discover_js_assets`, `run_check` | Make scoped requests (one at a time or as a concurrent batch with per-item audit), save assets, find JavaScript files, and run installed checks during a live session. `POST`, `PUT`, `PATCH` and `DELETE` are off unless the engagement's `scope.allowed_methods` and `scope.max_write_requests` allow them, and then each one waits for you to approve it in the terminal; with no terminal they are denied. |
 | `run_code`, `save_report` | Analyze evidence and downloaded artifacts in the Monty sandbox, or save a report from the live session. |
+| `list_research`, `lookup_research` | Inspect web research saved by `web_search` for the current run or a chosen run. |
 | `list_reports`, `read_report` | Retrieve Markdown saved by `save_report` for the current run or the live session’s `--from` run. |
+| `load_capability` | Load a skill playbook from the catalog into the session when the model needs its guidance. |
 | `web_search` | Optional. Look up public references through a separate `anthropic:`, `google:`, `google-cloud:`, or `openai:` model's native web search (`--search-model`, or `-S` in `partex.sh`). Queries leave this machine. |
 
 `--search-model` takes `anthropic:<model>` (`ANTHROPIC_API_KEY`), `google:<model>` (`GOOGLE_API_KEY` or `GEMINI_API_KEY`), `google-cloud:<model>` (Application Default Credentials and `GOOGLE_CLOUD_PROJECT`), or `openai:<model>` (`OPENAI_API_KEY`, Responses API). OpenAI search has no per-query search limit and costs more per query than the others, so prefer a small model. `google-cloud:` uses the `global` location by default, since newer Gemini models are only served there; set `GOOGLE_CLOUD_LOCATION` to override it.
@@ -40,10 +66,6 @@ The built-in executable checks are `header-security`, `js-analysis`, and `versio
 The live terminal includes a built-in CLAI2 plugin for operator commands. `/scope` shows the current scope and requires operator confirmation for changes; with `-k` (`--insecure`), hosts it adds are not certificate-verified either, and the confirmation says so. `/report` writes a redacted Markdown report, and `/secrets` writes secret values to a private file.
 
 Use `partex reports RUN_ID` to list reports saved by `save_report` and `partex reports RUN_ID NAME` to print one as Markdown. Both forms accept `--db PATH` and `--json`.
-
-## Pydantic libraries
-
-[Pydantic](https://github.com/pydantic/pydantic) validates inputs such as assessment settings and captured traffic. [Pydantic AI](https://pydantic.dev/docs/ai/overview/) connects models to the tools they can use, and its [CLAI2](https://pypi.org/project/pydantic-clai2/) package provides the interactive terminal. [Monty](https://pydantic.dev/docs/monty/get-started/) runs model-generated Python in a sandbox when the interactive session needs to work with saved evidence. [Runtime](RUNTIME.md) · [Dependencies](DEPS.md)
 
 ## Active probe examples
 
@@ -117,4 +139,3 @@ Use `--db PATH` or `PARTEX_DB` to select a different database. Its artifacts, re
 
 Existing data stays where it is. To open previous runs, point `--db` at the original database, such as `./partex-probe.db` for the launcher or `${XDG_DATA_HOME:-$HOME/.local/share}/partex/partex.db` for the CLI.
 
-[Design](PLAN.md)
