@@ -100,6 +100,12 @@ To use Z.ai's GLM-5.3 through Pydantic AI Gateway, set `PYDANTIC_AI_GATEWAY_API_
 ./partex.sh -m zai-org/GLM-5.3 -r doubleword --resume
 ```
 
+To run a live session using Gemini directly for both the main model (`-m`) and native `web_search` (`-S`), set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and use the `google:` provider prefix. No Gateway key is needed when using a direct `google:` model string; omit `-S` to leave web search off (or pass `--resume` without `-S` for read-only chat).
+
+```sh
+./partex.sh -m google:gemini-3.8-flash -S google:gemini-3.8-flash http://127.0.0.1:8765/
+```
+
 ## Commands and documentation
 
 - `./partex.sh --help` shows options for the interactive testing launcher.
