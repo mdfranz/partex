@@ -18,7 +18,21 @@
 - Generic non-API string literals (e.g., `'/'`, `'text/html'`) are not reported as API
   endpoints.
 
-## 3. Partial / Truncated Input
+## 3. GraphQL Query Literal Harvesting
+
+- Queries ship as string literals in clients (`gql` tagged templates, `"query …"` /
+  `"mutation …"` strings, `__APOLLO_STATE__` hydration payloads, persisted-query (APQ)
+  manifests). Harvest them as **coverage leads** for the
+  [`skills/graphql/`](../../graphql/SKILL.md) playbook: a literal names a query the
+  client sends; it is not itself a finding and never becomes a synthetic operation key.
+- **Minified-bundle false positives:** template fragments (`${…}` interpolations inside
+  `gql` tagged templates) yield partial queries — record the fragment, do not fabricate
+  the interpolated names. String literals that merely *mention* GraphQL (SDK names,
+  `graphql-tag` imports, `application/graphql` content types) are not queries. A
+  literal shorter than `query {` / `mutation {` / `subscription {` with no selection
+  set is not harvested.
+
+## 4. Partial / Truncated Input
 
 - If an inline `HttpEvidence` JS response was truncated at the 256 KB capture cap
   (`body_note == 'truncated'`), or if `tree-sitter` reports syntax errors on a malformed
