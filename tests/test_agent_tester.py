@@ -30,7 +30,7 @@ from partex.agent_adapter.tester import (
 from partex.agent_adapter.tools import REVIEWER_TOOLS
 from partex.engine import LiveSession, LiveSessionRefused, live_session
 from partex.errors import PartexError, ScopeViolation
-from partex.models import REDACTED
+from partex.models import REDACTED, Scope
 from partex.storage import MAX_REPORT_BYTES, RunStore, artifact_dir, run_reports_dir
 
 _TARGET_APP = Path(__file__).parent.parent / 'fixtures' / 'target_app' / 'app.py'
@@ -856,6 +856,100 @@ async def test_run_code_reads_artifacts_and_calls_read_tools(
     )
     assert '/api/v1/users' in out[0]
     assert 'findings' in out[1] or 'partex_untrusted_data' in out[1]
+
+
+async def test_run_code_reads_saved_research_and_isolates_other_runs(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    """Sandboxed research reads (#179): the selected run's saved ``web_search`` answers read back framed
+    as untrusted data, an unrelated run's research never resolves — by ID or by explicit ``run`` — and
+    every read lands an audit row (#113, #83).
+    """
+    # A run against a different target, with its own saved research: never visible from this session.
+    unrelated_run = await tmp_store.create_run(
+        input_kind='engagement',
+        input_ref='engagement.json',
+        input_sha256='',
+        engine_version='t',
+        selected_checks=(),
+        scope_snapshot=Scope(hosts=['unrelated.example.test'], ports=[65534]),
+    )
+    unrelated_id = await tmp_store.add_web_research(
+        unrelated_run,
+        query='unrelated target',
+        provider='google-cloud',
+        model='google-cloud:gemini-test',
+        auth_mode='adc',
+        answer='An answer about another target.',
+        sources=[{'url': 'https://unrelated.example.test/x', 'title': None}],
+        truncated=False,
+        audit_args={'query': 'unrelated target'},
+    )
+
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        # The session's own run saved one research entry (as a real web_search would, #113).
+        research_id = await tmp_store.add_web_research(
+            session.run_id,
+            query='nginx 1.24.0 cve',
+            provider='google-cloud',
+            model='google-cloud:gemini-test',
+            auth_mode='adc',
+            answer='Nginx 1.24.0 has CVE-2024-7347.',
+            sources=[{'url': 'https://nvd.nist.gov/vuln/detail/CVE-2024-7347', 'title': 'NVD'}],
+            truncated=False,
+            audit_args={'query': 'nginx 1.24.0 cve'},
+        )
+
+        async def audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+            await tmp_store.record_tool_call(session.run_id, tool, args, result)
+
+        # Monty surfaces a nested call's ToolFailed to the snippet as a plain Exception carrying
+        # the message, so the refusals are caught and printed rather than ending the snippet.
+        refusal_snippet = (
+            'try:\n'
+            f'    print(await lookup_research(research_id={unrelated_id!r}))\n'
+            'except Exception as exc:\n'
+            '    print(str(exc))\n'
+            'try:\n'
+            f'    print(await lookup_research(research_id={unrelated_id!r}, run={unrelated_run!r}))\n'
+            'except Exception as exc:\n'
+            '    print(str(exc))'
+        )
+        listing, full, refused = await drive_code(
+            session,
+            tmp_store,
+            [
+                'print(await list_research())',
+                f'print(await lookup_research(research_id={research_id!r}))',
+                refusal_snippet,
+            ],
+            audit=audit,
+        )
+
+        # The selected run's research reads back framed as untrusted web_search data (the sandbox
+        # wraps snippet stdout as {'output': ...}, so assert the frame by containment, not prefix).
+        prefix = '<partex_untrusted_data kind="web_search">'
+        assert prefix in listing and research_id in listing
+        assert '"query": "nginx 1.24.0 cve"' in listing
+        assert '"sources": 1' in listing
+        assert prefix in full
+        assert 'CVE-2024-7347.' in full and 'nvd.nist.gov' in full
+        # Run isolation: the unrelated run's research is invisible — by ID in this run…
+        assert unrelated_id not in listing and 'unrelated target' not in listing
+        assert 'no web research' in refused and 'not a run against this target' in refused
+
+        # Every read landed an audit row, in call order: the seed's web_search row first (metadata only —
+        # never the answer), then the reads; the gate refusal raised before its audit, so no fourth row.
+        calls = await tmp_store.tool_calls(session.run_id)
+        assert [call.tool for call in calls] == ['web_search', 'list_research', 'lookup_research', 'lookup_research']
+        seed_audit = json.dumps(calls[0].result)
+        assert 'Nginx 1.24.0 has CVE-2024-7347' not in seed_audit  # the seed audit never holds the answer
+        assert 'nvd.nist.gov' in seed_audit  # source URLs are metadata, and are audit-visible
+        assert calls[1].args == {'run': 'current'} and calls[1].result == {'count': 1}
+        assert calls[2].args == {'research_id': research_id, 'run': 'current'}
+        assert calls[2].result == {'found': True}
+        assert calls[3].args == {'research_id': unrelated_id, 'run': 'current'}
+        assert calls[3].result == {'found': False}  # audited as absent, never exposed
 
 
 async def test_save_report_writes_a_private_audited_file(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
