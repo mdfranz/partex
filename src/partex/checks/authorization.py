@@ -336,12 +336,11 @@ class AuthzBoundaryCheck:
         """The minimal re-verification: both cited exchanges, each re-sent with its own role credential.
 
         The draft cites evidence baseline-first (probe order), so the last cited exchange is a
-        cross-role capture; the rotation leads with it so the verify runner's first-replay
-        matcher re-tests the boundary crossing, not the authorized baseline.  (With more than
-        two granted roles the verdict still rests on that one lead replay — the runner only
-        matches the first; handing every replay to the matcher is the #176 follow-up.)
-        Returns ``None`` (reported-only) when a cited exchange lacks its ``Authorization``
-        header to replay.
+        cross-role capture; the rotation leads with it so the runner's single-replay fallback
+        re-tests the boundary crossing, not the authorized baseline. The verdict itself counts
+        crossings across every replay (``verify_match_all``, #176), so the lead order no longer
+        decides it. Returns ``None`` (reported-only) when a cited exchange lacks its
+        ``Authorization`` header to replay.
         """
         exchanges = [item for item in evidence if isinstance(item, HttpEvidence)]
         if len(exchanges) < 2:
@@ -364,6 +363,15 @@ class AuthzBoundaryCheck:
             description=f'Replay {finding.subject} across roles and re-test the authorization boundary.',
             requests=requests,
         )
+
+    def verify_match_all(self, finding: Finding, original: HttpEvidence, replays: Sequence[HttpEvidence]) -> bool:
+        """Confirmed iff at least two role replays still cross the authorization boundary.
+
+        The finding claims ≥2 roles are granted on the operation, so a partial fix that denies
+        a single role must not confirm (#176): the verdict counts crossings across every replay,
+        never only the exchange the recipe happens to lead with.
+        """
+        return sum(1 for replay in replays if self.verify_match(finding, original, replay)) >= 2
 
     def verify_match(self, finding: Finding, original: HttpEvidence, replay: HttpEvidence) -> bool:
         """Confirmed iff the cross-role replay still returns the object (BOLA) or 2xx (BFLA)."""
