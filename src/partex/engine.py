@@ -51,9 +51,10 @@ from .models import (
     check_user_agent,
 )
 from .probes import SeedPlan, plan_seed_probes
+from .roles import role_handles
 from .scope import apply_urls, check_url, extend_scope, parse_urls_file
 from .storage import RunState, RunStore, SurfaceKind, SurfaceRel, run_artifact_dir, surface_node_id
-from .target import DEFAULT_MAX_ASSET_BYTES, ScopedHttpClient, tls_unverified
+from .target import DEFAULT_MAX_ASSET_BYTES, RequestBudget, ScopedHttpClient, tls_unverified
 
 ENTRY_POINT_GROUP = 'partex.checks'
 MAX_DRAFTS_PER_CHECK = 1000
@@ -686,7 +687,16 @@ async def run_test(
         await store.add_evidence(run_id, evidence, count_request=True)
         captured.append(evidence)
 
-    client = ScopedHttpClient(engagement, source=f'capture:{run_id}', on_capture=on_capture)
+    # One engagement-wide budget and DNS pin table shared by the primary client and any role
+    # handles (#23/#27), so N roles never multiply ``max_requests``/``max_rps``.
+    budget = RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps)
+    pins: dict[str, str] = {}
+    client = ScopedHttpClient(engagement, source=f'capture:{run_id}', on_capture=on_capture, budget=budget, pins=pins)
+    role_client_handles: dict[str, Any] = {}
+    if engagement.roles and any(getattr(check, 'role_aware', False) for check in active):
+        role_client_handles = role_handles(
+            engagement, on_capture=on_capture, source=f'capture:{run_id}', budget=budget, pins=pins
+        )
     seeded = 0
     seed_skipped = 0
     try:
@@ -712,7 +722,10 @@ async def run_test(
                     done.add(check.check_id)
                     continue
                 try:
-                    drafts = await check.probe(captured, client)
+                    if getattr(check, 'role_aware', False):
+                        drafts = await check.probe(captured, client, roles=role_client_handles)
+                    else:
+                        drafts = await check.probe(captured, client)
                 except BudgetExhausted:
                     # Rule 5: exhaustion ends active work cleanly, not as failure.
                     budget_exhausted = True
@@ -783,6 +796,8 @@ async def run_test(
             seed_skipped=seed_skipped,
         )
     finally:
+        for handle in role_client_handles.values():
+            await handle.client.aclose()
         await client.aclose()
 
 

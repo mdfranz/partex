@@ -66,6 +66,13 @@ class ActiveCheck(Protocol):
     ``probe`` is async because the client is (anyio); the engine awaits it.
     Active checks produce findings that may carry a ``verify_recipe`` for later
     replayable verification.
+
+    A check may set ``role_aware = True`` (class attribute).  The engine then
+    binds ``engagement.roles`` to per-role :class:`~partex.target.ScopedHttpClient`
+    handles (sharing the primary client's budget and DNS pins) and passes them as
+    ``probe(evidence, client, roles=<name → partex.roles.RoleHandle>)`` so the
+    check can compare scoped identities (#27).  Checks that don't set the flag
+    keep the two-argument signature.
     """
 
     check_id: str

@@ -71,6 +71,8 @@ def role_handles(
     on_capture: CaptureCallback | None = None,
     resolver: Resolver | None = None,
     source: str = DEFAULT_SOURCE,
+    budget: RequestBudget | None = None,
+    pins: dict[str, str] | None = None,
 ) -> dict[str, RoleHandle]:
     """Bind every engagement role to its own client handle through the same gate.
 
@@ -78,10 +80,14 @@ def role_handles(
     ``max_requests`` / ``max_rps`` are engagement-wide, not per-role) and one DNS
     pin table.  Each client's ``secret_fields`` machinery is pre-loaded with the
     role's credential value, and captures cite the role via ``source``.
+
+    ``budget`` and ``pins`` let the engine share the *primary* client's allowance
+    and resolver table with the role handles, so one engagement never multiplies
+    its budget across the live run's handles (#27).
     """
     resolved = resolve_role_credentials(engagement, env)
-    budget = RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps)
-    pins: dict[str, str] = {}
+    budget = budget if budget is not None else RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps)
+    pins = pins if pins is not None else {}
     handles: dict[str, RoleHandle] = {}
     for role, (env_var, value) in resolved.items():
         client = ScopedHttpClient(

@@ -22,6 +22,7 @@ partex = "partex.__main__:main"
 
 [project.entry-points."partex.checks"]
 api-contract-conformance = "partex.checks.api_inventory:api_contract_conformance_check"
+authz-boundary = "partex.checks.authorization:authz_boundary_check"
 header-security = "partex.checks.header_security:header_security_check"
 js-analysis = "partex.checks.js_analysis:js_analysis_check"
 server-error = "partex.checks.server_error:server_error_check"
