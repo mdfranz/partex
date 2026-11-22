@@ -1,5 +1,7 @@
 # partex
 
+[Project lineage and evolution](LINEAGE.md)
+
 `partex` checks web and API traffic for security issues and links findings to the evidence behind them. Review saved traffic offline or run checks against systems you have permission to test.
 
 The project grew out of a review of ARTEX and other open-source security testing projects. Their workflows inspired how `partex` organizes assessments, keeps evidence with findings, and packages testing guidance. The engine is a standalone Python implementation. [Project background](docs/lineage/SOURCES.md)
