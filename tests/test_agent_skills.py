@@ -78,8 +78,8 @@ async def test_catalog_lists_descriptions_and_loading_discloses_the_playbook(
     assert result.output == 'ok'
     first, after_load = seen[0], seen[1]
     # The catalog is compact: descriptions only, no playbook text, and the load tool is offered.
-    assert 'demo-playbook: Use when reviewing demo findings' in first[0]
-    assert 'second-playbook: Use for the second thing' in first[0]
+    assert 'demo-playbook: [active, passive] Use when reviewing demo findings' in first[0]
+    assert 'second-playbook: [active, passive] Use for the second thing' in first[0]
     assert 'STEP-ONE' not in first[0] and 'SECOND-BODY' not in first[0] and 'load_capability' in first[1]
     # After loading, only the chosen playbook (with its reference) is in context.
     context = after_load[2]  # the loaded playbook arrives as a framed context message
@@ -97,6 +97,20 @@ def test_playbook_content_is_data_never_executed(tmp_path: Path) -> None:
     # The fenced python above raises SystemExit if anything ever evaluated it; loading must not.
     capabilities = skill_capabilities(_skills(tmp_path))
     assert [c.id for c in capabilities] == ['demo-playbook', 'second-playbook']
+
+
+def test_catalog_description_leads_with_the_skills_modes(tmp_path: Path) -> None:
+    demo, _ = _skills(tmp_path)
+    assert skill_capabilities([demo])[0].description == '[active, passive] Use when reviewing demo findings'
+    (tmp_path / 'passive-only').mkdir()
+    (tmp_path / 'passive-only' / 'SKILL.md').write_text(
+        '---\nname: passive-only\ndescription: Read only\nmodes: [passive]\n---\nBODY\n'
+    )
+    passive, _ = load_skill(tmp_path / 'passive-only')
+    assert passive is not None and skill_capabilities([passive])[0].description == '[passive] Read only'
+    shipped = {c.id: c for c in skill_capabilities(usable_skills(build_registry().skills, build_registry().checks))}
+    assert shipped
+    assert all(c.description is not None and c.description.startswith('[') for c in shipped.values())
 
 
 def test_skills_for_uninstalled_checks_stay_out_of_the_catalog(tmp_path: Path) -> None:
