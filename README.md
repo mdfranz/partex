@@ -1,10 +1,9 @@
 # partex
 
-[Project lineage and evolution](LINEAGE.md)
 
 `partex` checks web and API traffic for security issues and links findings to the evidence behind them. Review saved traffic offline or run checks against systems you have permission to test.
 
-The project grew out of a review of ARTEX and other open-source security testing projects. Their workflows inspired how `partex` organizes assessments, keeps evidence with findings, and packages testing guidance. The engine is a standalone Python implementation. [Project background](docs/lineage/SOURCES.md)
+The project grew out of a review of ARTEX and other open-source security testing projects. Their workflows inspired how `partex` organizes assessments, keeps evidence with findings, and packages testing guidance. The engine is a standalone Python implementation.  See [project lineage and evolution](LINEAGE.md) and [sources and tools analyzed](docs/lineage/SOURCES.md) and [design](PLAN.md)
 
 ## Quick start
 
@@ -19,9 +18,9 @@ This example reviews bundled HTTP traffic offline. It prints sample findings and
 
 ## What you can do
 
-- **Review captured traffic.** Import a browser's HTTP archive (HAR) and check saved responses for issues such as missing security headers or insecure cookie settings. Offline checks run without a model.
 - **Run authorized live checks.** Capture responses within a defined target scope and request budget, then save the evidence alongside the findings.
 - **Work with saved results.** List past runs, export reports or captured traffic, and use read-only chat to review findings and their evidence.
+- **Review captured traffic.** Import a browser's HTTP archive (HAR) and check saved responses for issues such as missing security headers or insecure cookie settings. Offline checks run without a model.
 
 ## Skills, checks, and plugins
 
@@ -43,7 +42,7 @@ The live terminal includes a built-in CLAI2 plugin for operator commands. `/scop
 
 Use `partex reports RUN_ID` to list reports saved by `save_report` and `partex reports RUN_ID NAME` to print one as Markdown. Both forms accept `--db PATH` and `--json`.
 
-## Pydantic libraries
+## Pydantic Components
 
 [Pydantic](https://github.com/pydantic/pydantic) validates inputs such as assessment settings and captured traffic. [Pydantic AI](https://pydantic.dev/docs/ai/overview/) connects models to the tools they can use, and its [CLAI2](https://pypi.org/project/pydantic-clai2/) package provides the interactive terminal. [Monty](https://pydantic.dev/docs/monty/get-started/) runs model-generated Python in a sandbox when the interactive session needs to work with saved evidence.
 
@@ -127,4 +126,3 @@ Use `--db PATH` or `PARTEX_DB` to select a different database. Its artifacts, re
 
 Existing data stays where it is. To open previous runs, point `--db` at the original database, such as `./partex-probe.db` for the launcher or `${XDG_DATA_HOME:-$HOME/.local/share}/partex/partex.db` for the CLI.
 
-[Design](PLAN.md)
