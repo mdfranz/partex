@@ -14,6 +14,7 @@ import anyio.to_thread
 from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.exceptions import AgentRunError
 from pydantic_ai.models import Model
+from pydantic_ai.usage import UsageLimits
 
 # Imported at module level, before any tool frames text: CLAI2 registers its own framing tags at
 # import time, and a tag registered after escaping has started changes how earlier text renders.
@@ -45,8 +46,13 @@ from .usage import UsageRecordingModel
 # conversation content to the model a second time.
 CHAT_SETTINGS = Settings(model=None, code_mode=False, speculative_code_mode=False, session_namer=False)
 
+DEFAULT_REQUEST_LIMIT = 200
+"""Model turns one operator prompt may take. ``chat()`` does not apply CLAI2's ``request_limit`` setting (only its CLI
+does), so without an explicit ``usage_limits`` pydantic-ai's own default of 50 silently stopped long turns mid-task."""
+
 __all__ = [
     'BRIEFING_PROMPT',
+    'DEFAULT_REQUEST_LIMIT',
     'ReviewDeps',
     'TesterDeps',
     'WebSearcher',
@@ -95,6 +101,7 @@ async def run_chat(
     *,
     briefing: bool = True,
     skills: Sequence[AgentCapability[ReviewDeps]] = (),
+    request_limit: int = DEFAULT_REQUEST_LIMIT,
     console: Console | None = None,
 ) -> None:
     """Open *run_id* in *db_path* read-only, print a briefing (unless disabled), then start the chat."""
@@ -115,6 +122,7 @@ async def run_chat(
             store=SettingsStore(chat_dir / 'config.db'),
             console=console,
             settings=CHAT_SETTINGS,
+            usage_limits=UsageLimits(request_limit=request_limit),
         )
 
 
@@ -136,6 +144,7 @@ async def run_agent(
     briefing: bool = True,
     skills: Sequence[AgentCapability[TesterDeps]] = (),
     search_model: SearchModelConfig | None = None,
+    request_limit: int = DEFAULT_REQUEST_LIMIT,
     console: Console | None = None,
 ) -> str:
     """Open a new live session on *engagement_path*, brief, then let the operator direct probes in CLAI2.
@@ -231,6 +240,7 @@ async def run_agent(
                         builtin_plugins=(PluginSettings(id=SCOPE_PLUGIN_ID, factory=SCOPE_PLUGIN_FACTORY),),
                         console=console,
                         settings=CHAT_SETTINGS,
+                        usage_limits=UsageLimits(request_limit=request_limit),
                     )
                 finally:
                     current_control.reset(token)

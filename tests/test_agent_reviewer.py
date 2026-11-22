@@ -261,7 +261,7 @@ async def test_run_chat_hands_clai2_the_reviewer_with_plugins_off(
     tmp_path: Path,
 ) -> None:
     import partex.agent_adapter
-    from partex.agent_adapter import run_chat
+    from partex.agent_adapter import DEFAULT_REQUEST_LIMIT, run_chat
 
     reader, run_id, _, _, _, _ = seeded
     calls: list[dict[str, Any]] = []
@@ -282,6 +282,9 @@ async def test_run_chat_hands_clai2_the_reviewer_with_plugins_off(
     )
     assert call['agent'].name == 'partex_reviewer_agent'
     assert call['deps'].run_id == run_id
+    # chat() ignores CLAI2's request_limit setting, so without this pydantic-ai's default of 50 applies.
+    assert call['usage_limits'].request_limit == DEFAULT_REQUEST_LIMIT
+    assert DEFAULT_REQUEST_LIMIT > 50
 
 
 async def test_run_chat_uses_a_separate_history_for_each_database(

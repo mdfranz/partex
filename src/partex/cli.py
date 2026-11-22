@@ -63,6 +63,11 @@ ALLOW_METHOD_HELP = (
 )
 MAX_WRITES_HELP = 'budget of state-changing requests for this run (ceiling 1000); overrides max_write_requests'
 
+REQUEST_LIMIT_HELP = (
+    'most model turns one prompt may take before the turn stops (default {default}); a long investigation that '
+    'chains many tool calls may need more'
+)
+
 EXIT_OK = 0
 EXIT_FATAL = 1
 EXIT_USAGE = 2
@@ -161,6 +166,12 @@ async def _write_export(store: RunStore, run_id: str, out: str | None) -> None:
 
 
 # ── Parser ────────────────────────────────────────────────────────────────────
+
+
+def _request_limit_help() -> str:
+    from .agent_adapter import DEFAULT_REQUEST_LIMIT
+
+    return REQUEST_LIMIT_HELP.format(default=DEFAULT_REQUEST_LIMIT)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -315,6 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
         '--no-briefing', action='store_true', help='open the chat without the opening model summary of the run'
     )
     chat.add_argument('--skill-dir', **SKILL_DIR_ARGS)
+    chat.add_argument('--request-limit', type=_positive_int, default=None, metavar='N', help=_request_limit_help())
     chat.set_defaults(handler=_cmd_chat)
 
     agent = subparsers.add_parser(
@@ -351,6 +363,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="expose an imported bundle's surface to the session read-only (nothing is sent automatically, #76)",
     )
     agent.add_argument('--no-briefing', action='store_true', help='open the chat without the opening summary')
+    agent.add_argument('--request-limit', type=_positive_int, default=None, metavar='N', help=_request_limit_help())
     agent.add_argument('--skill-dir', **SKILL_DIR_ARGS)
     agent.set_defaults(handler=_cmd_agent)
 
@@ -767,6 +780,10 @@ def _session_skills(args: argparse.Namespace) -> list[Any]:
     return skill_capabilities(usable_skills(registry.skills, registry.checks))
 
 
+def _request_limit_kwargs(args: argparse.Namespace) -> dict[str, int]:
+    return {} if args.request_limit is None else {'request_limit': args.request_limit}
+
+
 def _cmd_chat(args: argparse.Namespace) -> int:
     from .agent_adapter import run_chat
     from .models_config import resolve_model
@@ -780,7 +797,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     anyio.run(check_run)  # unknown store or run: exit 1 before a model is built or the terminal opens
     model = resolve_model(args.model, gateway_route=args.gateway_route)
     skills = _session_skills(args)
-    anyio.run(partial(run_chat, args.run_id, db_path, model, briefing=not args.no_briefing, skills=skills))
+    anyio.run(
+        partial(
+            run_chat,
+            args.run_id,
+            db_path,
+            model,
+            briefing=not args.no_briefing,
+            skills=skills,
+            **_request_limit_kwargs(args),
+        )
+    )
     return EXIT_OK
 
 
@@ -825,6 +852,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             briefing=not args.no_briefing,
             skills=_session_skills(args),
             search_model=search_model,
+            **_request_limit_kwargs(args),
         )
     )
     print(f'session run {run_id} saved; review it with: partex show {run_id} --db {db_path}', file=sys.stderr)
