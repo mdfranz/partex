@@ -49,7 +49,7 @@ def test_http_exchange_forbids_extra():
         HttpExchange(
             request=HttpRequest(method='GET', url='https://example.test/', headers=[]),
             response=HttpResponse(status_code=200, headers=[]),
-            bogus=1,
+            bogus=1,  # pyright: ignore[reportCallIssue] — extra fields must be rejected
         )
 
 
@@ -180,7 +180,7 @@ def test_finding_draft_rejects_extra():
             description='desc',
             evidence_ids=['ev_abc'],
             remediation='fix',
-            not_a_field=42,
+            not_a_field=42,  # pyright: ignore[reportCallIssue] — extra fields must be rejected
         )
 
 
@@ -338,9 +338,9 @@ def test_engagement_rejects_extra():
     with pytest.raises(ValidationError):
         Engagement(
             target=EngagementTarget(name='app', base_url='https://example.test'),
-            scope=Scope(hosts=['example.test']),
+            scope=Scope(hosts=['example.test'], ports=[]),
             authorization=Authorization(attestation='x', operator='j'),
-            bogus='nope',
+            bogus='nope',  # pyright: ignore[reportCallIssue] — extra fields must be rejected
         )
 
 
@@ -354,12 +354,12 @@ def test_scope_requires_hosts():
 
 def test_scope_max_rps_positive():
     with pytest.raises(ValidationError):
-        Scope(hosts=['example.test'], max_rps=0)
+        Scope(hosts=['example.test'], ports=[], max_rps=0)
 
 
 def test_scope_max_requests_positive():
     with pytest.raises(ValidationError):
-        Scope(hosts=['example.test'], max_requests=0)
+        Scope(hosts=['example.test'], ports=[], max_requests=0)
 
 
 # ── Headers ────────────────────────────────────────────────────────────────────

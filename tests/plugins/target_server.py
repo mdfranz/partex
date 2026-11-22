@@ -7,6 +7,7 @@ spy tests use to assert that refused requests never put bytes on the wire.
 import http.server
 import threading
 from collections.abc import Iterator
+from typing import cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -32,7 +33,7 @@ class _FixtureHandler(http.server.BaseHTTPRequestHandler):
         self._handle()
 
     def _handle(self) -> None:
-        server: _FixtureServer = self.server  # pyright: ignore[reportUnnecessaryCast]
+        server = cast('_FixtureServer', self.server)
         length = int(self.headers.get('content-length') or 0)
         request_body = self.rfile.read(length).decode('utf-8', errors='replace') if length else ''
         server.requests.append(

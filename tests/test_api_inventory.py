@@ -54,12 +54,12 @@ def _http(
     *,
     ct: str = 'application/json',
 ) -> HttpEvidence:
-    headers = [['Content-Type', ct]] if ct else []
+    headers = [('Content-Type', ct)] if ct else []
     ev = HttpEvidence(
         id='placeholder',
         source='test',
         http=HttpExchange(
-            request=HttpRequest(method=method, url=url, headers=[['Host', 'api.example.test']]),
+            request=HttpRequest(method=method, url=url, headers=[('Host', 'api.example.test')]),
             response=HttpResponse(status_code=status, headers=headers, body=body),
         ),
     )
