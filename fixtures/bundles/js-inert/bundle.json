@@ -1,0 +1,14 @@
+{
+  "evidence_files": [
+    "evidence/0001-inert-js.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "js-analysis"
+  ],
+  "target": {
+    "base_url": "https://app.example.test",
+    "name": "js-inert",
+    "notes": "one successful inert JavaScript response (nothing to find)"
+  }
+}

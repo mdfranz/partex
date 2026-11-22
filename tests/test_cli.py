@@ -14,11 +14,16 @@ import anyio
 import pytest
 
 from partex import cli, engine
+from partex.bundle import load_bundle
 from partex.models import Evidence, FindingDraft
 from partex.storage import MAX_REPORT_BYTES, RunStore, run_reports_dir, write_report
 
 FIXTURES = Path(__file__).parent.parent / 'fixtures'
 VALID_BUNDLE = FIXTURES / 'bundles' / 'valid'
+SERVER_ERROR_BUNDLE = FIXTURES / 'bundles' / 'server-error'
+JS_INERT_BUNDLE = FIXTURES / 'bundles' / 'js-inert'
+CLEAN_OPENAPI_BUNDLE = FIXTURES / 'bundles' / 'clean-openapi'
+CLEAN_HEADERS_BUNDLE = FIXTURES / 'bundles' / 'clean-headers'
 MALFORMED_BUNDLE = FIXTURES / 'bundles' / 'malformed' / 'bundle-version--version-2'
 SECRET = 'Bearer cli-test-secret-token'
 
@@ -253,6 +258,81 @@ def test_active_check_on_bundle_exits_1(capsys: pytest.CaptureFixture[str], db: 
     code, _, err = run(capsys, 'review', str(VALID_BUNDLE), '--checks', 'version-disclosure', '--db', str(db))
     assert code == cli.EXIT_FATAL
     assert 'not-passive' in err
+
+
+# ── offline-review outcomes over saved bundles (issue #178) ─────────────────────
+
+
+async def _review_rows(db: Path, run_id: str) -> tuple[dict[str, list[str]], list[dict[str, Any]]]:
+    """Read one review run's findings (with citations) and coverage rows back from the store."""
+    async with await RunStore.open(db) as store:
+        findings = {finding.id: list(finding.evidence_ids) for finding in await store.findings(run_id)}
+        coverage = [entry.model_dump(mode='json') for entry in await store.coverage(run_id)]
+    return findings, coverage
+
+
+def test_review_server_error_bundle_produces_cited_finding(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    """The saved 5xx bundle: server-error applies, finds the route, and cites the saved exchange."""
+    code, out, _ = run(capsys, 'review', str(SERVER_ERROR_BUNDLE), '--checks', 'server-error', '--db', str(db))
+    assert code == cli.EXIT_FINDINGS
+    payload = json.loads(out)
+    assert payload['state'] == 'checks_complete'
+    assert payload['checks'] == ['server-error']
+    assert payload['skipped_checks'] == []  # applies: a 5xx response is present
+    (finding,) = payload['findings']
+    assert finding['check_id'] == 'server-error'
+    assert finding['severity'] == 'low'  # ordinary 500, no stack-trace/debug disclosure
+
+    # The finding cites the saved evidence: the citation resolves to the bundle's one exchange.
+    findings, _ = anyio.run(_review_rows, db, payload['run_id'])
+    (cited,) = findings[finding['id']]
+    (evidence,) = load_bundle(SERVER_ERROR_BUNDLE).evidence
+    assert cited == evidence.id
+
+
+def test_review_js_inert_bundle_is_checked_clean_and_skipped_distinguishable(
+    capsys: pytest.CaptureFixture[str], db: Path
+) -> None:
+    """The inert-JS bundle: js-analysis runs and is clean; server-error is skipped (no 5xx) — not clean-but-skipped."""
+    code, out, _ = run(capsys, 'review', str(JS_INERT_BUNDLE), '--checks', 'server-error,js-analysis', '--db', str(db))
+    assert code == cli.EXIT_OK
+    payload = json.loads(out)
+    assert payload['checks'] == ['server-error', 'js-analysis']
+    assert payload['findings'] == []  # inert JavaScript: nothing to find
+    assert payload['skipped_checks'] == ['server-error']  # no 5xx in the bundle
+
+
+def test_review_clean_openapi_bundle_is_clean_with_a_coverage_lead(
+    capsys: pytest.CaptureFixture[str], db: Path
+) -> None:
+    """The clean-spec bundle: openapi-spec-review runs, finds nothing, and persists its coverage lead."""
+    code, out, _ = run(capsys, 'review', str(CLEAN_OPENAPI_BUNDLE), '--checks', 'openapi-spec-review', '--db', str(db))
+    assert code == cli.EXIT_OK
+    payload = json.loads(out)
+    assert payload['checks'] == ['openapi-spec-review']
+    assert payload['skipped_checks'] == []  # applies: a format=openapi config excerpt is present
+    assert payload['findings'] == []  # secured spec: no spec findings
+
+    # The coverage lead persists: the callback_url parameter is a follow-up, never a finding.
+    _, coverage = anyio.run(_review_rows, db, payload['run_id'])
+    (entry,) = coverage
+    assert entry['surface'] == 'GET /api/widgets'
+    assert entry['risk_area'] == 'ssrf-or-open-redirect'
+    assert entry['outcome'] == 'needs_follow_up'
+    assert entry['source'] == 'check_observed'
+    assert 'callback_url' in entry['reason']
+    (spec,) = load_bundle(CLEAN_OPENAPI_BUNDLE).evidence
+    assert entry['evidence_ids'] == [spec.id]
+
+
+def test_review_clean_headers_bundle_is_clean(capsys: pytest.CaptureFixture[str], db: Path) -> None:
+    """The hardened-response bundle: header-security runs and produces zero findings."""
+    code, out, _ = run(capsys, 'review', str(CLEAN_HEADERS_BUNDLE), '--checks', 'header-security', '--db', str(db))
+    assert code == cli.EXIT_OK
+    payload = json.loads(out)
+    assert payload['checks'] == ['header-security']
+    assert payload['skipped_checks'] == []  # applies: an HTTP exchange is present
+    assert payload['findings'] == []
 
 
 @pytest.mark.parametrize(
