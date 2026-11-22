@@ -36,9 +36,20 @@ This example reviews bundled HTTP traffic offline. It prints sample findings and
 
 ## Skills, checks, and plugins
 
-Skills are Markdown guides that the interactive session can consult. The bundled guides cover headers and cookies, version disclosure, JavaScript review, API inventory, authorization, and session controls.
+Skills are Markdown playbooks in [`skills/`](skills/) that the interactive session loads on demand with `load_capability`. Each skill names the check it runs with. The checks are Python code registered through the `partex.checks` entry point and run by the engine; the skill only tells the model when to use them. Run `uv run partex checks` to see the installed checks and their linked skills.
 
-The built-in executable checks are `header-security`, `js-analysis`, and `version-disclosure`. Additional checks can register through the Python `partex.checks` entry point. Run `uv run partex checks` to see installed checks and their linked skills. [Skill guides](docs/skills/README.md)
+| Skill | Mode | Check | What it covers | Playbook and references |
+| --- | --- | --- | --- | --- |
+| [`header-review`](skills/header-review/SKILL.md) | passive | [`header-security`](src/partex/checks/header_security.py) | Missing or weak security headers (HSTS, CSP, framing, `X-Content-Type-Options`), cookie attributes, and permissive CORS, applied by response type | [response policies](skills/header-review/reference/response-policies.md), [research notes](docs/skills/header-review.md) |
+| [`version-disclosure`](skills/version-disclosure/SKILL.md) | active | [`version-disclosure`](src/partex/checks/version_disclosure.py) | Server and framework version banners and stack traces, confirmed by replaying a single request | [verification criteria](skills/version-disclosure/reference/verification-criteria.md), [research notes](docs/skills/version-disclosure.md) |
+| [`js-analysis`](skills/js-analysis/SKILL.md) | passive | [`js-analysis`](src/partex/checks/js_analysis.py) | Full JavaScript bundles downloaded in scope and parsed offline with `tree-sitter` for endpoints, embedded config, source map references, and risky DOM sinks | [analysis rules](skills/js-analysis/reference/analysis-rules.md) |
+| [`api-inventory`](skills/api-inventory/SKILL.md) | passive | [`api-contract-conformance`](src/partex/checks/api_inventory.py) | A normalized inventory of observed API operations, reconciled against declared OpenAPI contracts (shadow routes, unobserved operations, schema gaps) | [contract matching](skills/api-inventory/reference/contract-matching.md), [research notes](docs/skills/api-inventory.md) |
+| [`openapi-spec-review`](skills/openapi-spec-review/SKILL.md) | passive | [`openapi-spec-review`](src/partex/checks/openapi_spec_review.py) | Spec-level gaps in OpenAPI 3.0 and 3.1 documents: missing authentication, weak security schemes, internal server URLs, credential query parameters, and sensitive response properties | none |
+| [`server-error`](skills/server-error/SKILL.md) | passive | [`server-error`](src/partex/checks/server_error.py) | Unhandled HTTP 5xx responses and debug-page disclosure already present in captured evidence | none |
+| [`authorization-testing`](skills/authorization-testing/SKILL.md) | active and passive | [`authz-boundary`](src/partex/checks/authorization.py) | Broken object-level and function-level authorization (BOLA, IDOR, BFLA) by replaying operations across two engagement roles | [role-pair probing](skills/authorization-testing/reference/role-pair-probing.md), [research notes](docs/skills/authorization-testing.md) |
+| [`auth-session-controls`](skills/auth-session-controls/SKILL.md) | passive and active | Not yet registered | Session cookie configuration and token lifecycle weaknesses. Its checks (`session-cookie-config`, `token-weakness`) are not installed, so the skill is left out of the catalog until they are | [session and token checks](skills/auth-session-controls/reference/session-and-token-checks.md), [research notes](docs/skills/auth-session-controls.md) |
+
+Each skill's research notes in [`docs/skills/`](docs/skills/README.md) record the standards and false-positive guardrails behind it. Additional checks can register through the same `partex.checks` entry point.
 
 | Tools | What they do |
 | --- | --- |
