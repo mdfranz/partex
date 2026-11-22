@@ -370,11 +370,16 @@ async def test_secret_fields_marked_and_redacted(target_server: object) -> None:
 
 
 def _stub_client(
-    target_server: object, handler: object, *, source: str = DEFAULT_SOURCE, secrets: tuple[str, ...] = ()
+    target_server: object,
+    handler: object,
+    *,
+    source: str = DEFAULT_SOURCE,
+    secrets: tuple[str, ...] = (),
+    writes: int = 0,
 ) -> ScopedHttpClient:
     """A client on the fixture engagement whose transport is *handler* (no bytes leave the process)."""
     port = target_server.port  # pyright: ignore[reportAttributeAccessIssue]
-    engagement = engagement_for(target_server, hosts=['fixture.test'], ports=[port])
+    engagement = engagement_for(target_server, hosts=['fixture.test'], ports=[port], writes=writes)
     return ScopedHttpClient(
         engagement,
         source=source,
@@ -403,7 +408,7 @@ async def test_target_spans_use_default_local_log_without_sensitive_request_data
         return httpx2.Response(200, headers={'Set-Cookie': 'session=fixture-response-cookie'}, text='fixture-response')
 
     try:
-        client = _stub_client(target_server, reply, source=f'capture:{run_id}:verify', secrets=(path_secret,))
+        client = _stub_client(target_server, reply, source=f'capture:{run_id}:verify', secrets=(path_secret,), writes=5)
         async with client:
             with logfire.span('test caller'):
                 evidence = await client.request(
