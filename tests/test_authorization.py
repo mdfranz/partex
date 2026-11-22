@@ -251,10 +251,10 @@ async def test_probe_cites_baseline_first_so_the_recipe_leads_cross_role() -> No
 
     handles = {
         'owner': RoleHandle(
-            'owner', 'PARTEX_CRED_OWNER', ROLE_ENV['PARTEX_CRED_OWNER'], cast(ScopedHttpClient, StubClient(owner))
+            'owner', 'PARTEX_CRED_OWNER', ROLE_ENV['PARTEX_CRED_OWNER'], cast('ScopedHttpClient', StubClient(owner))
         ),
         'guest': RoleHandle(
-            'guest', 'PARTEX_CRED_GUEST', ROLE_ENV['PARTEX_CRED_GUEST'], cast(ScopedHttpClient, StubClient(guest))
+            'guest', 'PARTEX_CRED_GUEST', ROLE_ENV['PARTEX_CRED_GUEST'], cast('ScopedHttpClient', StubClient(guest))
         ),
     }
     (draft,) = await authz_boundary_check.probe([observed], handles['owner'].client, roles=handles)

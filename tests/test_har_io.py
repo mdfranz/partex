@@ -151,7 +151,9 @@ def test_import_fixture_har_produces_the_valid_bundle_evidence(tmp_path: Path) -
     assert len(loaded.evidence) == 5
     assert not loaded.warnings  # the cdn entry was already dropped at import, not deduped later
     valid = load_bundle(VALID_BUNDLE)
+    assert all(isinstance(item, HttpEvidence) for item in loaded.evidence)
     imported_ids = {item.id for item in loaded.evidence if isinstance(item, HttpEvidence)}
+    assert imported_ids
     valid_ids = {item.id for item in valid.evidence if isinstance(item, HttpEvidence)}
     assert imported_ids == valid_ids
 
@@ -180,6 +182,7 @@ def test_explicit_target_overrides_the_inferred_one(tmp_path: Path) -> None:
     assert result.dropped_out_of_scope == 1
     assert result.dropped_hosts == {'app.example.test': 1}
     loaded = load_bundle(out)
+    assert all(isinstance(item, HttpEvidence) for item in loaded.evidence)
     assert [item.http.request.url for item in loaded.evidence if isinstance(item, HttpEvidence)] == [
         'https://cdn.example.test/lib.js'
     ]

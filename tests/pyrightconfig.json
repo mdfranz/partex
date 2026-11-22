@@ -3,7 +3,10 @@
   "typeCheckingMode": "strict",
   "include": ["."],
   "venvPath": "..",
+  "venv": ".venv",
   "extraPaths": ["../src"],
+  // Deliberate exception to CLAUDE.md "pyright strict": tests poke private helpers and use untyped fixtures/mocks;
+  // full strict over tests/ is ~290 errors. Everything else stays strict.
   "reportPrivateUsage": false,
   "reportUnknownMemberType": false,
   "reportUnknownLambdaType": false,

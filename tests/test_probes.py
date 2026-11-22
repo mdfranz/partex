@@ -230,6 +230,7 @@ async def test_exported_run_seeds_a_second_engagement(target_app: Any, tmp_store
     first_urls = {
         item.http.request.url for item in await tmp_store.evidence(first.run_id) if isinstance(item, HttpEvidence)
     }
+    assert first_urls
     assert first_urls <= seeded_urls
     assert second.seed_plan.dropped_total == 0
 
@@ -367,6 +368,7 @@ async def test_agent_bundle_exposes_the_surface_read_only(
         assert calls[0].result['paths'] == [f'GET {seeded_path}']
         # Read-only: the session's own baseline and check probes exist, the seeded path does not.
         evidence = [item.http.request.url for item in await store.evidence(run_id) if isinstance(item, HttpEvidence)]
+        assert evidence
         assert seeded_path not in evidence
         assert evidence[0] == base_url  # the baseline capture
 
