@@ -57,7 +57,7 @@ on API payloads or redirects do not generate false positives.
 | Missing or unsafe CSP | HTML response lacks `Content-Security-Policy` or allows `unsafe-inline` / wildcard `script-src` | `medium` |
 | Missing `X-Content-Type-Options` | Response lacks `X-Content-Type-Options: nosniff` | `low` |
 | Weak `Set-Cookie` attributes | Session-like cookie lacks `HttpOnly`, `Secure` (on HTTPS), or `SameSite` | `low` / `medium` |
-| Permissive CORS with credentials | `Access-Control-Allow-Origin: *` or unvalidated origin reflection paired with `Access-Control-Allow-Credentials: true` | `high` |
+| Permissive CORS with credentials | `Access-Control-Allow-Origin: *` or unvalidated origin reflection paired with `Access-Control-Allow-Credentials: true` | `medium` |
 
 ## Output Discipline
 
