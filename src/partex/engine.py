@@ -51,7 +51,7 @@ from .models import (
     check_user_agent,
 )
 from .probes import SeedPlan, plan_seed_probes
-from .roles import role_handles
+from .roles import RoleHandle, role_handles
 from .scope import apply_urls, check_url, extend_scope, parse_urls_file
 from .storage import RunState, RunStore, SurfaceKind, SurfaceRel, run_artifact_dir, surface_node_id
 from .target import DEFAULT_MAX_ASSET_BYTES, RequestBudget, ScopedHttpClient, tls_unverified
@@ -692,7 +692,7 @@ async def run_test(
     budget = RequestBudget(engagement.scope.max_requests, engagement.scope.max_rps)
     pins: dict[str, str] = {}
     client = ScopedHttpClient(engagement, source=f'capture:{run_id}', on_capture=on_capture, budget=budget, pins=pins)
-    role_client_handles: dict[str, Any] = {}
+    role_client_handles: dict[str, RoleHandle] = {}
     if engagement.roles and any(getattr(check, 'role_aware', False) for check in active):
         role_client_handles = role_handles(
             engagement, on_capture=on_capture, source=f'capture:{run_id}', budget=budget, pins=pins

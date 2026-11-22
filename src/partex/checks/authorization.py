@@ -8,9 +8,19 @@ response — it compares at least two role-scoped identities from
 
 v1 scope (issue comment): read-only cross-role probing only.  Safe-method
 (``GET``/``HEAD``/``OPTIONS``) object reads and privileged reads are compared
-across roles; write-method probes (``POST``/``PUT``/``PATCH``/``DELETE``) are
-recorded ``needs_follow_up``, never sent, until the operator write-approval
-gate (#65) and the method-policy schema (#119) land.
+across roles; every other method — ``POST``/``PUT``/``PATCH``/``DELETE`` and
+anything else a target might accept — is recorded ``needs_follow_up``, never
+sent, until the operator write-approval gate (#65) and the method-policy
+schema (#119) land.
+
+The first role declared in ``engagement.roles`` is the *baseline* (Role A in
+``role-pair-probing.md``): the probe walks roles in declaration order and the
+draft cites evidence baseline-first, so the verify runner's ``original`` is
+the baseline exchange and the recipe leads with a cross-role replay.  (The
+citation order is deliberate, never id-sorted — ``evidence_id`` is a content
+hash, so sorting would make the recipe's lead a coin flip.)  Live sessions do
+not bind role handles yet, so there the probe claims nothing and coverage
+records ``needs_follow_up``.
 
 Candidate operations are harvested from captured evidence (observed object
 paths collapsed to ``{id}`` templates); a run with no object-scoped or
@@ -54,7 +64,6 @@ CHECK_DESCRIPTION = (
 )
 
 _SAFE_METHODS = frozenset({'GET', 'HEAD', 'OPTIONS'})
-_WRITE_METHODS = frozenset({'POST', 'PUT', 'PATCH', 'DELETE'})
 
 # Numeric, UUID, and long-hex path segments are concrete object ids (mirrors api_inventory's collapse).
 _ID_SEG = re.compile(r'\d+|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}|[0-9a-fA-F]{16,}')
@@ -72,7 +81,7 @@ class Candidate:
     key: str
     concrete_url: str
     object_ids: tuple[str, ...]
-    category: str  # 'bola' | 'bfla' | 'write'
+    category: str  # 'bola' | 'bfla' | 'gated'
     evidence_id: str
 
 
@@ -89,12 +98,22 @@ def _role_of(source: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _names_id(body: str, object_ids: tuple[str, ...]) -> bool:
+    """True when *body* carries one of *object_ids* as a standalone token.
+
+    The id must sit on token boundaries — id ``'4'`` must not match ``{"count": 14}`` —
+    so a match is never a substring of a longer numeric/hex run.
+    """
+    return any(re.search(rf'(?<![0-9A-Fa-f]){re.escape(oid)}(?![0-9A-Fa-f])', body) for oid in object_ids)
+
+
 def harvest_candidates(evidence: Sequence[Evidence]) -> tuple[Candidate, ...]:
     """Object-scoped and privileged operations observed in *evidence*, one per normalized key.
 
-    Write methods classify ``write`` (gated, #65); any object-id-bearing path classifies ``bola``;
-    an ``/admin``-prefixed read classifies ``bfla``.  Deterministic: first exchange wins per key,
-    keys sorted.
+    Only safe methods (``GET``/``HEAD``/``OPTIONS``) are probed; every other method classifies
+    ``gated`` (never sent, #65).  Any object-id-bearing safe-method path classifies ``bola``;
+    an ``/admin``-prefixed safe-method read classifies ``bfla``.  Deterministic: first exchange
+    wins per key, keys sorted.
     """
     by_key: dict[str, Candidate] = {}
     for item in evidence:
@@ -103,8 +122,8 @@ def harvest_candidates(evidence: Sequence[Evidence]) -> tuple[Candidate, ...]:
         method = item.http.request.method.upper()
         path = urlsplit(item.http.request.url).path
         object_ids = _concrete_ids(path)
-        if method in _WRITE_METHODS:
-            category = 'write'
+        if method not in _SAFE_METHODS:
+            category = 'gated'
         elif object_ids:
             category = 'bola'
         elif _ADMIN_RE.match(path):
@@ -157,20 +176,21 @@ class AuthzBoundaryCheck:
         """Replay each candidate under every role; a finding needs at least two roles to succeed.
 
         ``client`` is the engagement's unauthenticated handle; role probing goes through the
-        per-role handles the engine binds from ``engagement.roles``.  With fewer than two role
-        handles nothing is claimed — the coverage hook records ``needs_follow_up`` instead.
+        per-role handles the engine binds from ``engagement.roles``, walked in declaration
+        order (the first declared role is the baseline).  With fewer than two role handles
+        nothing is claimed — the coverage hook records ``needs_follow_up`` instead.
         """
-        handles = dict(roles or {})
+        handles = dict(roles or {})  # declaration order preserved: baseline first
         drafts: list[FindingDraft] = []
         for candidate in harvest_candidates(evidence):
             drafts.extend(await self._probe_candidate(candidate, handles))
         return drafts
 
     async def _probe_candidate(self, candidate: Candidate, handles: Mapping[str, RoleHandle]) -> list[FindingDraft]:
-        if candidate.category == 'write' or len(handles) < 2:
-            return []  # writes are gated (#65); a single response can never found a finding
+        if candidate.category == 'gated' or len(handles) < 2:
+            return []  # gated methods are never sent (#65); a single response can never found a finding
         accesses: list[tuple[str, HttpEvidence]] = []
-        for role in sorted(handles):
+        for role in handles:
             evidence = await handles[role].client.request(
                 candidate.method, candidate.concrete_url, headers=auth_headers(handles[role])
             )
@@ -182,15 +202,23 @@ class AuthzBoundaryCheck:
 
     @staticmethod
     def _exposes(candidate: Candidate, exchange: HttpEvidence) -> bool:
-        """A 2xx exposes the object when its body names one of the harvested object ids."""
+        """A 2xx exposes the object when its body carries one of the harvested object ids as a token."""
         if candidate.category != 'bola':
             return True
         body = exchange.http.response.body or ''
-        return bool(candidate.object_ids) and any(oid in body for oid in candidate.object_ids)
+        return bool(candidate.object_ids) and _names_id(body, candidate.object_ids)
 
     def _draft(self, candidate: Candidate, accesses: Sequence[tuple[str, HttpEvidence]]) -> FindingDraft:
+        """Build the finding, citing evidence in probe order: baseline role first, cross-roles after.
+
+        ``accesses`` arrive in engagement declaration order, so ``evidence_ids[0]`` is the
+        baseline exchange (the verify runner's ``original``) and ``evidence_ids[-1]`` a
+        cross-role one (the recipe's lead).  The order is deliberate, never id-sorted:
+        ``evidence_id`` is a content hash, so sorting would make the recipe's lead a coin
+        flip (#27 review).
+        """
         roles = ', '.join(role for role, _ in accesses)
-        evidence_ids = sorted(exchange.id for _, exchange in accesses)
+        evidence_ids = [exchange.id for _, exchange in accesses]
         if candidate.category == 'bola':
             severity: Severity = 'high'
             subject = f'bola:{candidate.key}'
@@ -249,30 +277,22 @@ class AuthzBoundaryCheck:
                     reason='no object-scoped or privileged operation observed (missing evidence)',
                 )
             ]
-        roles_seen: set[str] = set()
-        for item in exchanges:
-            role = _role_of(item.source)
-            if role is not None:
-                roles_seen.add(role)
-        role_names = sorted(roles_seen)
-        return [self._coverage_entry(candidate, exchanges, role_names) for candidate in candidates]
+        return [self._coverage_entry(candidate, exchanges) for candidate in candidates]
 
-    def _coverage_entry(
-        self, candidate: Candidate, exchanges: Sequence[HttpEvidence], role_names: Sequence[str]
-    ) -> CoverageEntry:
-        if candidate.category == 'write':
+    def _coverage_entry(self, candidate: Candidate, exchanges: Sequence[HttpEvidence]) -> CoverageEntry:
+        if candidate.category == 'gated':
             return CoverageEntry(
                 surface=candidate.key,
                 risk_area=CHECK_ID,
                 outcome='needs_follow_up',
                 source='check_observed',
                 evidence_ids=[candidate.evidence_id],
-                reason='write-method probe gated behind the operator write-approval gate (#65); not sent',
+                reason='non-safe method; probe gated behind the operator write-approval gate (#65); not sent',
             )
         hits: dict[str, list[HttpEvidence]] = {}
         for exchange in exchanges:
             role = _role_of(exchange.source)
-            if role is None or role not in role_names:
+            if role is None:
                 continue
             key = normalized_operation_key(
                 exchange.http.request.method.upper(), collapse_path_ids(urlsplit(exchange.http.request.url).path)
@@ -315,9 +335,13 @@ class AuthzBoundaryCheck:
     def verify_recipe(self, finding: Finding, evidence: Sequence[Evidence]) -> VerificationRecipe | None:
         """The minimal re-verification: both cited exchanges, each re-sent with its own role credential.
 
-        The cross-role capture leads the recipe so the verify runner's first-replay matcher sees the
-        boundary crossing rather than the authorized baseline.  Returns ``None`` (reported-only) when a
-        cited exchange lacks its ``Authorization`` header to replay.
+        The draft cites evidence baseline-first (probe order), so the last cited exchange is a
+        cross-role capture; the rotation leads with it so the verify runner's first-replay
+        matcher re-tests the boundary crossing, not the authorized baseline.  (With more than
+        two granted roles the verdict still rests on that one lead replay — the runner only
+        matches the first; handing every replay to the matcher is the #176 follow-up.)
+        Returns ``None`` (reported-only) when a cited exchange lacks its ``Authorization``
+        header to replay.
         """
         exchanges = [item for item in evidence if isinstance(item, HttpEvidence)]
         if len(exchanges) < 2:
@@ -334,7 +358,7 @@ class AuthzBoundaryCheck:
                     headers={'Authorization': authorization},
                 )
             )
-        # Lead with the last cited (cross-role) exchange; keep the owner baseline as the second request.
+        # Lead with the last cited (cross-role) exchange; the baseline, cited first, stays second.
         requests = [requests[-1], *requests[:-1]]
         return VerificationRecipe(
             description=f'Replay {finding.subject} across roles and re-test the authorization boundary.',
@@ -348,7 +372,7 @@ class AuthzBoundaryCheck:
         if finding.subject.startswith('bola:'):
             object_ids = _concrete_ids(urlsplit(original.http.request.url).path)
             body = replay.http.response.body or ''
-            return bool(object_ids) and any(oid in body for oid in object_ids)
+            return bool(object_ids) and _names_id(body, object_ids)
         return finding.subject.startswith('bfla:')
 
 

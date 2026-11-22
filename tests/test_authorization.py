@@ -21,6 +21,7 @@ from partex.checks.authorization import (
 from partex.engine import run_test
 from partex.ids import evidence_id
 from partex.models import Finding, HttpEvidence, HttpExchange, HttpRequest, HttpResponse
+from partex.roles import RoleHandle
 from partex.storage import RunStore
 
 ROLE_ENV = {'PARTEX_CRED_OWNER': 'owner-secret-token', 'PARTEX_CRED_GUEST': 'guest-secret-token'}
@@ -120,10 +121,14 @@ def test_harvest_extracts_object_and_privileged_candidates() -> None:
     assert by_key['GET /api/admin/audit'].category == 'bfla'
 
 
-def test_harvest_classifies_write_methods_as_gated() -> None:
-    evidence = [make_exchange('http://127.0.0.1:1/api/orders/42', method='DELETE', status=405)]
-    (candidate,) = harvest_candidates(evidence)
-    assert candidate.category == 'write'
+def test_harvest_classifies_every_non_safe_method_as_gated() -> None:
+    """Writes and odd verbs (PROPFIND, MKCOL, …) are never replayed: v1 is read-only."""
+    evidence = [
+        make_exchange('http://127.0.0.1:1/api/orders/42', method='DELETE', status=405),
+        make_exchange('http://127.0.0.1:1/api/admin/x', method='MKCOL', status=405),
+        make_exchange('http://127.0.0.1:1/api/orders/42', method='PROPFIND', status=207),
+    ]
+    assert {candidate.category for candidate in harvest_candidates(evidence)} == {'gated'}
 
 
 def test_harvest_is_deterministic_and_deduplicates() -> None:
@@ -184,6 +189,84 @@ def test_verify_match_confirms_the_cross_role_2xx_and_refuses_denials() -> None:
     denied_replay = make_exchange('http://127.0.0.1:1/api/orders/42', status=403, body='{"error": "no"}')
     assert authz_boundary_check.verify_match(finding, owner, open_replay)
     assert not authz_boundary_check.verify_match(finding, owner, denied_replay)
+
+
+def test_verify_match_needs_the_object_id_as_a_standalone_token() -> None:
+    """Id ``4`` inside ``{"count": 14}`` is a substring, not exposure of object 4."""
+    finding = Finding.model_validate(
+        {
+            'id': 'fn_x',
+            'check_id': CHECK_ID,
+            'check_version': '1.0',
+            'severity': 'high',
+            'subject': 'bola:GET /api/orders/{id}',
+            'title': 't',
+            'description': 'd',
+            'evidence_ids': ['ev_x'],
+            'remediation': 'r',
+            'status': 'reported',
+        }
+    )
+    original = make_exchange('http://127.0.0.1:1/api/orders/4')
+    assert authz_boundary_check.verify_match(
+        finding, original, make_exchange('http://127.0.0.1:1/api/orders/4', body='{"id": 4}')
+    )
+    assert not authz_boundary_check.verify_match(
+        finding, original, make_exchange('http://127.0.0.1:1/api/orders/4', body='{"count": 14}')
+    )
+
+
+async def test_probe_cites_baseline_first_so_the_recipe_leads_cross_role() -> None:
+    """The draft cites evidence in engagement declaration order (baseline first), never id-sorted.
+
+    ``evidence_id`` is a content hash, so sorting citations would make the recipe's lead a coin
+    flip (#169 review); here the guest exchange hashes first, so only deliberate ordering puts
+    the owner baseline in ``evidence_ids[0]`` and the cross-role replay in the recipe's lead.
+    """
+
+    class StubClient:
+        """A TargetClient returning one pre-captured exchange per role — no sockets."""
+
+        def __init__(self, exchange: HttpEvidence) -> None:
+            self._exchange = exchange
+
+        async def request(
+            self, method: str, url: str, *, headers: object = None, body: str | None = None
+        ) -> HttpEvidence:
+            return self._exchange
+
+    observed = make_exchange('http://127.0.0.1:1/api/orders/42')
+    owner = make_exchange(
+        'http://127.0.0.1:1/api/orders/42',
+        headers=[('Authorization', 'Bearer owner-secret-token')],
+        body='{"id": "42", "amount": 9}',
+    )
+    guest = make_exchange(
+        'http://127.0.0.1:1/api/orders/42',
+        headers=[('Authorization', 'Bearer guest-secret-token')],
+        body='{"id": "42", "amount": 9}',
+    )
+    assert guest.id < owner.id  # the hash order is against the citation convention
+
+    handles = {
+        'owner': RoleHandle('owner', 'PARTEX_CRED_OWNER', ROLE_ENV['PARTEX_CRED_OWNER'], StubClient(owner)),
+        'guest': RoleHandle('guest', 'PARTEX_CRED_GUEST', ROLE_ENV['PARTEX_CRED_GUEST'], StubClient(guest)),
+    }
+    (draft,) = await authz_boundary_check.probe([observed], handles['owner'].client, roles=handles)
+    assert draft.evidence_ids == [owner.id, guest.id]  # baseline first — not id-sorted
+
+    # The verify runner loads cited evidence in evidence_ids order, then builds the recipe.
+    finding = Finding.model_validate(
+        draft.model_dump()
+        | {
+            'id': 'fn_x',
+            'status': 'reported',
+        }
+    )
+    recipe = authz_boundary_check.verify_recipe(finding, [owner, guest])
+    assert recipe is not None
+    assert recipe.requests[0].headers == {'Authorization': 'Bearer guest-secret-token'}
+    assert recipe.requests[1].headers == {'Authorization': 'Bearer owner-secret-token'}
 
 
 # ── Live end-to-end over the fixture app ──────────────────────────────────────
