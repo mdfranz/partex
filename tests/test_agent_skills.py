@@ -105,7 +105,8 @@ def test_catalog_description_leads_with_the_skills_modes(tmp_path: Path) -> None
     passive, _ = load_skill(tmp_path / 'passive-only')
     assert passive is not None and skill_capabilities([passive])[0].description == '[passive] Read only'
     shipped = {c.id: c for c in skill_capabilities(usable_skills(build_registry().skills, build_registry().checks))}
-    assert all(c.description.startswith('[') for c in shipped.values())
+    assert shipped
+    assert all(c.description is not None and c.description.startswith('[') for c in shipped.values())
 
 
 def test_skills_for_uninstalled_checks_stay_out_of_the_catalog(tmp_path: Path) -> None:

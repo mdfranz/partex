@@ -67,6 +67,8 @@ def skill_capabilities(skills: list[Skill]) -> list[Capability[Any]]:
         text = skill_text(skill)
         if not text:
             continue
-        description = f'[{", ".join(sorted(skill.modes))}] {skill.description}' if skill.modes else skill.description
+        description = (
+            f'[{", ".join(sorted(set(skill.modes)))}] {skill.description}' if skill.modes else skill.description
+        )
         capabilities.append(Capability(id=skill.name, description=description, instructions=text, defer_loading=True))
     return capabilities
