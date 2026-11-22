@@ -709,13 +709,17 @@ async def run_test(
             # itself is skipped), so checks review every imported host:port, not just base_url.
             if engagement.scope.urls:
                 # Rule 5: a probe pass cut short by the budget ends it cleanly, like active work.
-                budget_exhausted = budget_exhausted or (
-                    await probe_url_entries(
-                        partial(client.request, 'GET'),
-                        entries=engagement.scope.urls,
-                        base_url=engagement.target.base_url,
-                    )
-                )[2] > 0
+                budget_exhausted = (
+                    budget_exhausted
+                    or (
+                        await probe_url_entries(
+                            partial(client.request, 'GET'),
+                            entries=engagement.scope.urls,
+                            base_url=engagement.target.base_url,
+                        )
+                    )[2]
+                    > 0
+                )
             # Seeded bundle-surface probes (#76): right after the baseline so active checks see
             # the seeded evidence. Candidates are pre-filtered with the same scope gate, so a
             # refusal here is a logic bug — counted, never a run failure (the #80 lesson).
@@ -877,7 +881,7 @@ async def _maybe_register_openapi(
 
 
 async def probe_url_entries(
-    request: Callable[[str], Awaitable[object]], *, entries: Sequence[str], base_url: str
+    request: Callable[[str], Awaitable[object]], *, entries: Sequence[str], base_url: str, verbose: bool | None = None
 ) -> tuple[int, int, int]:
     """The #215 initial probe pass: one ``GET`` per active URL-list entry, before checks run.
 
@@ -889,8 +893,11 @@ async def probe_url_entries(
     ``scope.urls``; *base_url* is skipped (the baseline capture already probed it), duplicates
     collapse. A dead host (:class:`PartexError` on connect) is counted and probed past, never a
     run failure; budget exhaustion stops the pass cleanly (PLAN §6). Returns
-    ``(probed, failed, unprobed)`` and prints one summary line to stderr.
+    ``(probed, failed, unprobed)`` and prints one summary line to stderr. With *verbose* (or on a
+    TTY, the default) it also prints a live line per probe as it lands — the pass can take
+    minutes at the engagement's rate limit, and a blank terminal reads as a hang.
     """
+    show = sys.stderr.isatty() if verbose is None else verbose
     seen: set[str] = set()
     urls: list[str] = []
     for entry in entries:
@@ -898,15 +905,25 @@ async def probe_url_entries(
         if url != base_url and url not in seen:
             seen.add(url)
             urls.append(url)
+    if show and urls:
+        print(f'partex: probing {len(urls)} URL-list target(s) …', file=sys.stderr)
     probed = failed = 0
-    for url in urls:
+    for index, url in enumerate(urls, start=1):
+        stopped = False
         try:
             await request(url)
             probed += 1
+            outcome = 'ok'
         except BudgetExhausted:
-            break
+            stopped = True
+            outcome = 'stopped (request budget)'
         except PartexError:
             failed += 1
+            outcome = 'unreachable'
+        if show:
+            print(f'  [{index}/{len(urls)}] {url} — {outcome}', file=sys.stderr)
+        if stopped:
+            break
     unprobed = len(urls) - probed - failed
     if urls:
         print(

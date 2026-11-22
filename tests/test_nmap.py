@@ -355,6 +355,42 @@ async def test_probe_pass_with_only_the_baseline_probes_nothing(capsys: pytest.C
     assert capsys.readouterr().err == ''
 
 
+async def test_probe_pass_shows_live_lines_on_a_terminal(capsys: pytest.CaptureFixture[str]) -> None:
+    """The pass can take minutes at the rate limit; a blank terminal reads as a hang (#215)."""
+
+    async def request(url: str) -> object:
+        if url == 'http://dead.test:9':
+            raise PartexError('request to http://dead.test:9 failed: connection refused')
+        return object()
+
+    _, failed, _ = await probe_url_entries(
+        request,
+        entries=['http://ok.test/', 'http://dead.test:9/*'],
+        base_url='http://base.test/',
+        verbose=True,
+    )
+    err = capsys.readouterr().err
+    assert failed == 1
+    assert 'probing 2 URL-list target(s)' in err  # the header lands before the first probe
+    assert '[1/2] http://ok.test/ — ok' in err  # one line per probe, as it lands
+    assert '[2/2] http://dead.test:9 — unreachable' in err
+    assert 'initial probe of 3 URL-list target(s)' in err  # the summary still follows
+
+
+async def test_probe_pass_is_quiet_off_a_terminal_by_default(capsys: pytest.CaptureFixture[str]) -> None:
+    """capsys's stderr is not a TTY, so the default (verbose=None) prints only the summary."""
+
+    async def request(url: str) -> object:
+        return object()
+
+    await probe_url_entries(
+        request, entries=['http://ok.test/', 'http://other.test/x'], base_url='http://base.test/', verbose=False
+    )
+    err = capsys.readouterr().err
+    assert '[1/2]' not in err and 'probing 2 URL-list' not in err
+    assert 'initial probe of 3 URL-list target(s): 2 probed, 0 unreachable, 0 unprobed' in err
+
+
 def _engagement_with_urls(directory: Path, urls: list[str], ports: list[int]) -> Path:
     manifest = json.loads((directory / 'engagement.json').read_text(encoding='utf-8'))
     manifest['scope']['urls'] = urls

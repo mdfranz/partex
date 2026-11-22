@@ -35,9 +35,9 @@
 #   -N, --nmap-file PATH     import authorized targets from an `nmap -oX` scan file: its open HTTP(S) ports become the
 #                            authorized-URL list (one scheme://host:port/* entry each; everything else is reported and
 #                            skipped), so only scanned host:port targets can be requested [PARTEX_NMAP_FILE]. The session
-#                            opens with one initial GET per listed target (each captured as evidence; --max-requests is
-#                            raised automatically when the import needs the room). Merges with -u. <target-url> is then
-#                            optional: the first imported entry is the baseline target.
+#                            opens with one initial GET per listed target, each captured as evidence and shown live on a
+#                            terminal (--max-requests is raised automatically when the import needs the room). Merges
+#                            with -u. <target-url> is then optional: the first imported entry is the baseline target.
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
 #   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000]
 #   -R, --max-rps N          requests per second [PARTEX_MAX_RPS, default 2; ceiling 64]
