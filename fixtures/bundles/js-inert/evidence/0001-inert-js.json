@@ -1,0 +1,25 @@
+{
+  "http": {
+    "request": {
+      "headers": [
+        [
+          "Host",
+          "app.example.test"
+        ]
+      ],
+      "method": "GET",
+      "url": "https://app.example.test/static/app.js"
+    },
+    "response": {
+      "body": "function add(a, b) { return a + b; }\n",
+      "headers": [
+        [
+          "Content-Type",
+          "application/javascript"
+        ]
+      ],
+      "status_code": 200
+    }
+  },
+  "kind": "http_exchange"
+}

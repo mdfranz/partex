@@ -1,0 +1,25 @@
+{
+  "http": {
+    "request": {
+      "headers": [
+        [
+          "Host",
+          "app.example.test"
+        ]
+      ],
+      "method": "GET",
+      "url": "https://app.example.test/api/orders"
+    },
+    "response": {
+      "body": "{\"error\": \"internal server error\"}",
+      "headers": [
+        [
+          "Content-Type",
+          "application/json"
+        ]
+      ],
+      "status_code": 500
+    }
+  },
+  "kind": "http_exchange"
+}
