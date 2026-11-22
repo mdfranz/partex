@@ -214,6 +214,7 @@ def test_review_with_findings_exits_3(capsys: pytest.CaptureFixture[str], db: Pa
         'header-security',
         'js-analysis',
         'openapi-spec-review',
+        'privacy-signals',
         'server-error',
     ]  # --all: installed passive checks only
     assert 'js-analysis' in payload['skipped_checks']
@@ -550,6 +551,7 @@ def test_checks_json(capsys: pytest.CaptureFixture[str]) -> None:
         'header-security': 'passive',
         'js-analysis': 'passive',
         'openapi-spec-review': 'passive',
+        'privacy-signals': 'passive',
         'server-error': 'passive',
         'version-disclosure': 'active',
     }
