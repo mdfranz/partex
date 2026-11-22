@@ -1,0 +1,14 @@
+{
+  "evidence_files": [
+    "evidence/0001-openapi.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "openapi-spec-review"
+  ],
+  "target": {
+    "base_url": "https://app.example.test",
+    "name": "clean-openapi",
+    "notes": "a clean, secured OpenAPI 3.1 spec (coverage lead only, no findings)"
+  }
+}

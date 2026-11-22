@@ -1,0 +1,14 @@
+{
+  "evidence_files": [
+    "evidence/0001-clean.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "header-security"
+  ],
+  "target": {
+    "base_url": "https://app.example.test",
+    "name": "clean-headers",
+    "notes": "one fully hardened HTTPS response (no header findings)"
+  }
+}
