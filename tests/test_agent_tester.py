@@ -153,10 +153,12 @@ async def test_session_refused_before_any_socket(tmp_store: RunStore, tmp_path: 
 
 
 async def test_error_inside_session_marks_the_run_failed(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    run_id = ''
     with pytest.raises(RuntimeError):
         async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
             run_id = session.run_id
             raise RuntimeError('operator tooling crashed')
+    assert run_id  # assigned before the crash
     run = await tmp_store.get_run(run_id)
     assert run.state == 'checks_failed' and 'operator tooling crashed' in (run.error or '')
     assert await tmp_store.evidence(run_id)  # the baseline captured before the failure survives

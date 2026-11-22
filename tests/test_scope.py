@@ -364,7 +364,7 @@ def test_malformed_authorities_refused(url: str, message: str) -> None:
 # ── operator scope extension: parsing and merging (issue #64) ─────────────────
 
 
-def _scope(**update: object) -> Scope:
+def _scope(**update: Any) -> Scope:
     data: dict[str, Any] = {'hosts': ['a.test'], 'path_prefixes': ['/'], 'exclusions': ['/logout'], 'ports': [443]}
     return Scope(**{**data, **update})
 
