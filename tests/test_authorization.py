@@ -217,6 +217,63 @@ def test_verify_match_needs_the_object_id_as_a_standalone_token() -> None:
     )
 
 
+def test_verify_match_all_needs_two_crossings_across_every_replay() -> None:
+    """A role-pair verdict counts crossings across every replay, never just the recipe's lead (#176).
+
+    The finding claims ≥2 roles are granted on the operation, so a partial fix that denies one
+    role — whichever one — must not confirm: one remaining crossing is a denied boundary for
+    that role, not a reproduction of the multi-role claim.
+    """
+    finding = Finding.model_validate(
+        {
+            'id': 'fn_x',
+            'check_id': CHECK_ID,
+            'check_version': '1.0',
+            'severity': 'high',
+            'subject': 'bola:GET /api/orders/{id}',
+            'title': 't',
+            'description': 'd',
+            'evidence_ids': ['ev_x'],
+            'remediation': 'r',
+            'status': 'reported',
+        }
+    )
+    original = make_exchange('http://127.0.0.1:1/api/orders/42', body='{"id": "42"}')
+    open_guest = make_exchange('http://127.0.0.1:1/api/orders/42', status=200, body='{"id": "42"}')
+    open_owner = make_exchange('http://127.0.0.1:1/api/orders/42', status=200, body='{"id": "42"}')
+    denied = make_exchange('http://127.0.0.1:1/api/orders/42', status=403, body='{"error": "no"}')
+    assert authz_boundary_check.verify_match_all(finding, original, [open_guest, open_owner])
+    # Partial fixes deny a single role — either side of the pair — and must not confirm.
+    assert not authz_boundary_check.verify_match_all(finding, original, [open_guest, denied])
+    assert not authz_boundary_check.verify_match_all(finding, original, [denied, open_owner])
+    assert not authz_boundary_check.verify_match_all(finding, original, [open_guest])
+    assert not authz_boundary_check.verify_match_all(finding, original, [])
+
+
+def test_verify_match_all_bfla_counts_granted_replays() -> None:
+    """BFLA has no object token to name: any 2xx replay crosses, so ≥2 of them confirm (#176)."""
+    finding = Finding.model_validate(
+        {
+            'id': 'fn_x',
+            'check_id': CHECK_ID,
+            'check_version': '1.0',
+            'severity': 'high',
+            'subject': 'bfla:POST /api/admin',
+            'title': 't',
+            'description': 'd',
+            'evidence_ids': ['ev_x'],
+            'remediation': 'r',
+            'status': 'reported',
+        }
+    )
+    original = make_exchange('http://127.0.0.1:1/api/admin', method='POST')
+    granted = make_exchange('http://127.0.0.1:1/api/admin', method='POST', status=200)
+    denied = make_exchange('http://127.0.0.1:1/api/admin', method='POST', status=403)
+    assert authz_boundary_check.verify_match_all(finding, original, [granted, granted])
+    assert not authz_boundary_check.verify_match_all(finding, original, [granted, denied])
+    assert not authz_boundary_check.verify_match_all(finding, original, [denied, denied])
+
+
 async def test_probe_cites_baseline_first_so_the_recipe_leads_cross_role() -> None:
     """The draft cites evidence in engagement declaration order (baseline first), never id-sorted.
 

@@ -323,6 +323,10 @@ class VersionDisclosureCheck:
             ],
         )
 
+    def verify_match_all(self, finding: Finding, original: HttpEvidence, replays: Sequence[HttpEvidence]) -> bool:
+        """Confirmed iff any replay still exhibits the finding's class (the recipe is a single re-send)."""
+        return any(self.verify_match(finding, original, replay) for replay in replays)
+
     def verify_match(self, finding: Finding, original: HttpEvidence, replay: HttpEvidence) -> bool:
         """Confirmed iff the replay still exhibits the finding's class (skill §3)."""
         if finding.subject.startswith('header:'):

@@ -8,14 +8,15 @@ case the original evidence and the finding remain readable.
 """
 
 import importlib.util
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
 
+from partex.checks.version_disclosure import version_disclosure_check
 from partex.engine import run_test
 from partex.errors import PartexError, ValidationFailed
-from partex.models import Finding
+from partex.models import Finding, HttpEvidence, VerificationRecipe, VerificationRequest
 from partex.storage import RunStore
 from partex.verify import run_verification
 
@@ -175,6 +176,71 @@ async def test_recipeless_check_is_reported_only(target_app: object, tmp_path: P
         await run_verification(
             run_id, original.id, tmp_store, authorized=True, registry={'version-disclosure': Recipeless()}
         )
+
+
+async def test_runner_hands_every_replay_to_the_matcher(
+    target_app: object, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    """Every captured replay reaches ``verify_match_all`` — the verdict never rests on the lead alone (#176)."""
+    run_id, findings = await make_run(tmp_path, tmp_store, target_app)
+    banner = banner_finding(findings)
+
+    class TwoResends:
+        """A multi-request recipe: the same banner re-send twice, so two replays are captured."""
+
+        check_id = 'version-disclosure'
+
+        def __init__(self) -> None:
+            self.seen: list[HttpEvidence] = []
+
+        def verify_recipe(self, finding: Finding, evidence: list[object]) -> VerificationRecipe | None:
+            exchanges = [item for item in evidence if isinstance(item, HttpEvidence)]
+            request = VerificationRequest(method='GET', path=exchanges[0].http.request.url)
+            return VerificationRecipe(description='re-send the banner twice', requests=[request, request])
+
+        def verify_match_all(self, finding: Finding, original: HttpEvidence, replays: Sequence[HttpEvidence]) -> bool:
+            self.seen = list(replays)
+            return any(version_disclosure_check.verify_match(finding, original, replay) for replay in replays)
+
+    recorder = TwoResends()
+    result = await run_verification(
+        run_id, banner.id, tmp_store, authorized=True, registry={'version-disclosure': recorder}
+    )
+    assert result.verdict == 'confirmed'
+    assert len(recorder.seen) == 2  # both replays were handed over, not just the first
+    assert result.replay_evidence_ids  # both are cited on the verification either way
+
+
+async def test_checks_without_verify_match_all_keep_single_replay_semantics(
+    target_app: object, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    """A check predating the multi-replay seam is matched on its first replay, as before (#176)."""
+    run_id, findings = await make_run(tmp_path, tmp_store, target_app)
+    banner = banner_finding(findings)
+
+    class OldStyle:
+        """Only the single-replay seam — no ``verify_match_all``."""
+
+        check_id = 'version-disclosure'
+
+        def __init__(self) -> None:
+            self.matched: list[HttpEvidence] = []
+
+        def verify_recipe(self, finding: Finding, evidence: list[object]) -> VerificationRecipe | None:
+            return version_disclosure_check.verify_recipe(
+                finding, [item for item in evidence if isinstance(item, HttpEvidence)]
+            )
+
+        def verify_match(self, finding: Finding, original: HttpEvidence, replay: HttpEvidence) -> bool:
+            self.matched.append(replay)
+            return version_disclosure_check.verify_match(finding, original, replay)
+
+    old_style = OldStyle()
+    result = await run_verification(
+        run_id, banner.id, tmp_store, authorized=True, registry={'version-disclosure': old_style}
+    )
+    assert result.verdict == 'confirmed'
+    assert len(old_style.matched) == 1  # the fallback still matches — once, on the first replay
 
 
 async def test_replay_runs_inside_the_recorded_scope(target_app: object, tmp_path: Path, tmp_store: RunStore) -> None:

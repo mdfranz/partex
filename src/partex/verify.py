@@ -6,14 +6,16 @@ verdict::
     load run + finding + cited evidence ─▶ build recipe ─▶ replay through the
                                            scope gate   scoped client   │
                                                                         ▼
-              confirmed ←── check.verify_match ── response received ──┤
+              confirmed ←── check.verify_match_all ── responses received ─┤
               not_reproduced ←────────────── no match ────────────────┤
               inconclusive ←─── transport error / budget spent ─────────┘
 
 Verdict rules (``skills/version-disclosure/reference/verification-criteria.md``
 §3, generalized): *confirmed* when the check's matcher says the replayed
-response still exhibits the finding's class; *not_reproduced* when a response
-arrived and it does not; *inconclusive* when no usable response arrived
+responses still exhibit the finding's class — every captured replay is handed
+to the matcher (#176), so a role-pair finding confirms only when enough of its
+replays still cross; *not_reproduced* when responses arrived and they do not;
+*inconclusive* when no usable response arrived
 (unreachable, rate-limited, budget exhausted) — recorded, but the finding keeps
 its current status.  Verification never deletes a finding: both transitions
 retain the original evidence and the replay evidence.
@@ -210,8 +212,8 @@ async def run_verification(
     finally:
         await client.aclose()
 
-    replay_exchange = next((item for item in replays if isinstance(item, HttpEvidence)), None)
-    if replay_exchange is None:
+    replay_exchanges = [item for item in replays if isinstance(item, HttpEvidence)]
+    if not replay_exchanges:
         return await _record(
             store,
             run_id,
@@ -224,8 +226,15 @@ async def run_verification(
             requests_spent=client.requests_spent,
             transition=False,
         )
-    matched = bool(check.verify_match(finding, original, replay_exchange))
-    status = replay_exchange.http.response.status_code
+    # #176: every captured replay goes to the matcher. Checks that predate the
+    # multi-replay seam keep their single-replay semantics via the first replay.
+    match_all = getattr(check, 'verify_match_all', None)
+    matched = (
+        bool(match_all(finding, original, replay_exchanges))
+        if match_all is not None
+        else bool(check.verify_match(finding, original, replay_exchanges[0]))
+    )
+    status = replay_exchanges[0].http.response.status_code
     if matched:
         return await _record(
             store,

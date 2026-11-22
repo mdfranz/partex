@@ -106,3 +106,13 @@ class ActiveCheck(Protocol):
         class is still present.  This is the confirmed/not_reproduced seam.
         """
         raise NotImplementedError  # Protocol — only for static typing
+
+    def verify_match_all(self, finding: Finding, original: HttpEvidence, replays: Sequence[HttpEvidence]) -> bool:
+        """Return whether *replays* — every exchange the recipe captured — still exhibit *finding*.
+
+        The multi-replay seam (#176): a role-pair finding claims a property of *several* exchanges,
+        so confirmation must consider every replay, never only the one the recipe happens to lead
+        with.  A check that does not define this method keeps the single-replay :meth:`verify_match`
+        semantics: the runner falls back to matching the first captured replay.
+        """
+        raise NotImplementedError  # Protocol — only for static typing
