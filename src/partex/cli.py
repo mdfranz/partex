@@ -330,8 +330,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent.add_argument(
         '--checks',
-        default='version-disclosure',
-        help='active checks run before the chat opens (comma-separated; default: %(default)s)',
+        default=','.join(engine.DEFAULT_AGENT_CHECKS),
+        help='checks run before the chat opens (comma-separated; default: %(default)s). The passive discovery '
+        'checks also re-run by themselves when assets or specs are captured (#185)',
     )
     agent.add_argument('--from', dest='from_run', default=None, help='earlier run the agent may read (run_…)')
     agent.add_argument(

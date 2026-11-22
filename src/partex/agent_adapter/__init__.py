@@ -128,7 +128,7 @@ async def run_agent(
     urls_file: Path | None = None,
     recursive: bool = False,
     user_agent: str | None = None,
-    checks: tuple[str, ...] = ('version-disclosure',),
+    checks: tuple[str, ...] = engine.DEFAULT_AGENT_CHECKS,
     from_run: str | None = None,
     bundle: Path | None = None,
     briefing: bool = True,

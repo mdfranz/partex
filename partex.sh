@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# partex.sh: open a `partex agent` session on a target: baseline + version-disclosure, a briefing, then
+# partex.sh: open a `partex agent` session on a target: baseline + version-disclosure and passive discovery, a briefing, then
 # the CLAI2 terminal where you direct further GET/HEAD/OPTIONS probes and checks (model via the Gateway).
 #
 #   ./partex.sh http://192.168.12.1/home      # asks who authorized the test
@@ -194,4 +194,4 @@ if [[ -n $ROUTE || $MODEL == gateway/* || $MODEL != *:* ]] && [[ -z ${PYDANTIC_A
 fi
 echo "opening a partex agent session on $TARGET_URL (db: $DB)"
 uv run --quiet partex agent "$eng" --authorized --db "$DB" --model "$MODEL" ${ROUTE:+--gateway-route "$ROUTE"} \
-  ${SEARCH_MODEL:+--search-model "$SEARCH_MODEL"} ${URLS_FILE:+--urls-file "$URLS_FILE"} ${RECURSIVE:+--recursive} --checks version-disclosure ${RUN_ID:+--from "$RUN_ID"}
+  ${SEARCH_MODEL:+--search-model "$SEARCH_MODEL"} ${URLS_FILE:+--urls-file "$URLS_FILE"} ${RECURSIVE:+--recursive} ${RUN_ID:+--from "$RUN_ID"}
