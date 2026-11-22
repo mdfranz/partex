@@ -1,0 +1,14 @@
+{
+  "evidence_files": [
+    "evidence/0001-server-error.json"
+  ],
+  "schema_version": 1,
+  "suggested_checks": [
+    "server-error"
+  ],
+  "target": {
+    "base_url": "https://app.example.test",
+    "name": "server-error",
+    "notes": "one ordinary 500 JSON response (no debug disclosure)"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "kind": "config_excerpt",
+  "config": {
+    "path": "openapi.yaml",
+    "format": "openapi",
+    "content": "openapi: 3.1.0\ninfo:\n  title: Clean Example API\n  version: 1.0.0\nservers:\n  - url: https://api.example.test\nsecurity:\n  - bearerAuth: []\npaths:\n  /api/widgets:\n    get:\n      summary: List widgets\n      parameters:\n        - name: callback_url\n          in: query\n          required: false\n          schema:\n            type: string\n      responses:\n        \"200\":\n          description: Widget page\n          content:\n            application/json:\n              schema:\n                $ref: \"#/components/schemas/WidgetPage\"\n  /api/widgets/{id}:\n    get:\n      summary: Fetch one widget\n      parameters:\n        - name: id\n          in: path\n          required: true\n          schema:\n            type: string\n      responses:\n        \"200\":\n          description: One widget\n          content:\n            application/json:\n              schema:\n                $ref: \"#/components/schemas/Widget\"\ncomponents:\n  securitySchemes:\n    bearerAuth:\n      type: http\n      scheme: bearer\n      bearerFormat: JWT\n  schemas:\n    Widget:\n      type: object\n      properties:\n        id:\n          type: string\n        name:\n          type: string\n    WidgetPage:\n      type: object\n      properties:\n        items:\n          type: array\n          items:\n            $ref: \"#/components/schemas/Widget\"\n        total:\n          type: integer\n",
+    "revision": "v1.0.0"
+  }
+}
