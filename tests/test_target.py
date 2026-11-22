@@ -6,13 +6,20 @@ run against the localhost fixture server; the suite's non-loopback socket
 block stays armed.
 """
 
+import json
+from pathlib import Path
+from urllib.parse import quote
+
 import httpx2
+import logfire
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from partex.engagement import Engagement
-from partex.errors import BudgetExhausted, ScopeViolation
+from partex.errors import BudgetExhausted, PartexError, ScopeViolation
 from partex.models import HttpEvidence, get_all, get_header, redact
 from partex.target import DEFAULT_SOURCE, ScopedHttpClient, TokenBucket
+from partex.telemetry import configure_telemetry, resolve_log_path
 
 pytest_plugins = ['plugins.target_server']
 
@@ -362,12 +369,16 @@ async def test_secret_fields_marked_and_redacted(target_server: object) -> None:
 # ── #37: capped capture, body notes, target-issued secrets ────────────────────
 
 
-def _stub_client(target_server: object, handler: object) -> ScopedHttpClient:
+def _stub_client(
+    target_server: object, handler: object, *, source: str = DEFAULT_SOURCE, secrets: tuple[str, ...] = ()
+) -> ScopedHttpClient:
     """A client on the fixture engagement whose transport is *handler* (no bytes leave the process)."""
     port = target_server.port  # pyright: ignore[reportAttributeAccessIssue]
     engagement = engagement_for(target_server, hosts=['fixture.test'], ports=[port])
     return ScopedHttpClient(
         engagement,
+        source=source,
+        secrets=secrets,
         resolver=lambda host: '127.0.0.1',
         transport=httpx2.MockTransport(handler),  # pyright: ignore[reportArgumentType]
     )
@@ -375,6 +386,86 @@ def _stub_client(target_server: object, handler: object) -> ScopedHttpClient:
 
 def _url(target_server: object, path: str = '/api/x') -> str:
     return f'http://fixture.test:{target_server.port}{path}'  # pyright: ignore[reportAttributeAccessIssue]
+
+
+async def test_target_spans_use_default_local_log_without_sensitive_request_data(
+    target_server: object, tmp_path: Path
+) -> None:
+    run_id = 'run_' + 'a' * 32
+    path_secret = 'private@path-marker'
+    encoded_secret = quote(path_secret, safe='')
+    log_path = resolve_log_path('test', None, {'PARTEX_STATE_DIR': str(tmp_path)})
+    assert log_path is not None and log_path.parent == tmp_path / 'logs'
+    configure_telemetry(log_path=log_path, remote=False, service_version='test')
+
+    def reply(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.host == '127.0.0.1'
+        return httpx2.Response(200, headers={'Set-Cookie': 'session=fixture-response-cookie'}, text='fixture-response')
+
+    try:
+        client = _stub_client(target_server, reply, source=f'capture:{run_id}:verify', secrets=(path_secret,))
+        async with client:
+            with logfire.span('test caller'):
+                evidence = await client.request(
+                    'POST',
+                    _url(target_server, '/api/orders?key=fixture-query'),
+                    headers={'Authorization': 'Bearer fixture-auth'},
+                    body='fixture-body',
+                )
+                artifact = await client.download_asset(
+                    _url(target_server, f'/api/{encoded_secret}?other=fixture-download-query'),
+                    dest_dir=tmp_path / 'downloads',
+                )
+        raw_log = log_path.read_text()
+    finally:
+        logfire.configure(send_to_logfire=False, console=False)
+
+    records = [json.loads(line) for line in raw_log.splitlines()]
+    caller = next(record for record in records if record['name'] == 'test caller')
+    spans = [record for record in records if record['name'] == 'target request {method} {host}{path}']
+    assert len(spans) == 2
+    for span, (method, path, evidence_id) in zip(
+        spans, [('POST', '/api/orders', evidence.id), ('GET', '[redacted]', artifact.id)], strict=True
+    ):
+        assert span['parent_span_id'] == caller['span_id']
+        attrs = span['attributes']
+        assert (attrs['run_id'], attrs['method'], attrs['host'], attrs['path']) == (
+            run_id,
+            method,
+            'fixture.test',
+            path,
+        )
+        assert (attrs['status_code'], attrs['evidence_id']) == (200, evidence_id)
+
+    for secret in (
+        path_secret,
+        encoded_secret,
+        'fixture-query',
+        'fixture-download-query',
+        'fixture-auth',
+        'fixture-body',
+        'fixture-response',
+    ):
+        assert secret not in raw_log
+
+
+async def test_target_span_omits_exception_details_and_refused_requests(
+    target_server: object, in_memory_span_exporter: InMemorySpanExporter
+) -> None:
+    def fail(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError('fixture-private-error', request=request)
+
+    async with _stub_client(target_server, fail) as client:
+        with pytest.raises(ScopeViolation):
+            await client.request('GET', _url(target_server, '/admin/shutdown'))
+        with pytest.raises(PartexError, match='fixture-private-error'):
+            await client.request('GET', _url(target_server, '/api/x?value=fixture-private-query'))
+
+    (span,) = in_memory_span_exporter.get_finished_spans()
+    assert span.attributes is not None and span.attributes['request_failed'] is True
+    assert span.attributes['path'] == '/api/x'
+    assert not span.events
+    assert span.status.description is None
 
 
 async def test_large_body_is_truncated_at_the_cap(target_server: object) -> None:
