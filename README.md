@@ -107,7 +107,7 @@ To run a live session using Gemini directly for both the main model (`-m`) and n
 ./partex.sh -m google:gemini-3.8-flash -S google:gemini-3.8-flash http://127.0.0.1:8765/
 ```
 
-If Gemini's configurable content filters block parts of a session (`finishReason: SAFETY` — authorized security testing discusses exploit and payload evidence, which the "dangerous content" category can flag), relax them per model with `PARTEX_GOOGLE_SAFETY_SETTINGS`: a preset (`off`, `high`) or a JSON `[{"category": "HARM_CATEGORY_…", "threshold": "BLOCK_…"}]` list. It applies only to `google:` and `google-cloud:` model roles, startup prints exactly what was relaxed, and the provider's non-configurable CSAM and PII filters stay on regardless.
+If Gemini's configurable content filters interfere with a session (`finishReason: SAFETY` — authorized security testing discusses exploit and payload evidence, which the "dangerous content" category can flag), note that partex **disables them by default** for `google:` and `google-cloud:` model roles: startup prints the effective thresholds, and the provider's non-configurable CSAM and PII filters stay on regardless. To change the thresholds, set `PARTEX_GOOGLE_SAFETY_SETTINGS` to a preset (`off`, `high`) or a JSON `[{"category": "HARM_CATEGORY_…", "threshold": "BLOCK_…"}]` list; set on a non-Google model it refuses to start.
 
 ```sh
 PARTEX_GOOGLE_SAFETY_SETTINGS=off ./partex.sh -m google:gemini-3.8-flash http://127.0.0.1:8765/

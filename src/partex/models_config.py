@@ -33,9 +33,18 @@ DEFAULT_GOOGLE_CLOUD_LOCATION = 'global'
 ``global`` only; ``us-central1`` returns 404 for them (live-verified, #111). Override with ``GOOGLE_CLOUD_LOCATION``."""
 
 GOOGLE_SAFETY_ENV = 'PARTEX_GOOGLE_SAFETY_SETTINGS'
-"""Operator opt-in Gemini configurable content-filter thresholds (#218). Presets or a JSON
-``[{"category": "HARM_CATEGORY_…", "threshold": "BLOCK_…"}]`` list; startup prints what was relaxed.
-The provider's non-configurable CSAM and PII/SPII filters stay on whatever this sets."""
+"""Gemini configurable content-filter thresholds (#218). Default **off** for ``google:`` /
+``google-cloud:`` model roles (:data:`GOOGLE_SAFETY_DEFAULT_PRESET`); this variable overrides
+with a preset (``high``, ``off``) or a JSON
+``[{"category": "HARM_CATEGORY_…", "threshold": "BLOCK_…"}]`` list. Startup prints the effective
+thresholds. The provider's non-configurable CSAM and PII/SPII filters stay on whatever this sets."""
+
+GOOGLE_SAFETY_DEFAULT_PRESET = 'off'
+"""partex's default for ``google:`` / ``google-cloud:`` model roles (#218, operator-directed):
+the provider's configurable content filters are disabled — authorized security testing carries
+exploit and payload evidence the ``dangerous`` category flags, so the filters are a
+false-positive source for partex's own gated, authorized work. :data:`GOOGLE_SAFETY_ENV`
+overrides (``high``, ``off``, or a JSON list); the non-configurable CSAM/PII filters stay on."""
 
 GOOGLE_SAFETY_PRESETS: dict[str, str] = {'off': 'OFF', 'high': 'BLOCK_ONLY_HIGH'}
 """Preset name → threshold, applied to every configurable category."""
@@ -335,23 +344,30 @@ def parse_google_safety_settings(raw: str) -> list[dict[str, str]]:
 
 
 def resolve_google_safety_settings(model: Model | str, *, env: Mapping[str, str] | None = None) -> ModelSettings | None:
-    """The ``google_safety_settings`` model settings for *model* when the operator opted in (#218).
+    """The ``google_safety_settings`` model settings for *model* (#218).
 
-    Unset/blank :data:`GOOGLE_SAFETY_ENV` → ``None`` (provider defaults). Set on a ``google:`` /
-    ``google-cloud:`` model → ``{'google_safety_settings': [...]}`` for pydantic-ai to pass into every
-    Gemini request. Set on any other model → :class:`ModelConfigError` (fail closed: the operator asked
-    for relaxed filters, so silently skipping them would hide that they are still on). Resolve before
-    wrapping a model (``UsageRecordingModel`` passes per-request settings through unchanged).
+    Default **off** for a ``google:`` / ``google-cloud:`` model: the provider's configurable
+    content filters are disabled (:data:`GOOGLE_SAFETY_DEFAULT_PRESET`), so authorized security
+    work carrying exploit/payload evidence is not blocked by the ``dangerous`` category.
+    :data:`GOOGLE_SAFETY_ENV` overrides with a preset or a JSON ``[{category, threshold}]``
+    list. Any other model → ``None`` unset (its provider filters apply untouched), or a
+    :class:`ModelConfigError` when the operator set the variable for it (fail closed: a silently
+    skipped relaxation would hide that the filters are still on). Resolve before wrapping a
+    model (``UsageRecordingModel`` passes per-request settings through unchanged).
     """
     raw = (os.environ if env is None else env).get(GOOGLE_SAFETY_ENV, '')
+    google = _is_google_model(model)
     if not raw.strip():
-        return None
-    settings = parse_google_safety_settings(raw)
-    if not _is_google_model(model):
-        raise ModelConfigError(
-            f'{GOOGLE_SAFETY_ENV} is set but this model is not a google:/google-cloud: model; '
-            'the Gemini content filters only exist there'
-        )
+        if not google:
+            return None
+        settings = parse_google_safety_settings(GOOGLE_SAFETY_DEFAULT_PRESET)
+    else:
+        settings = parse_google_safety_settings(raw)
+        if not google:
+            raise ModelConfigError(
+                f'{GOOGLE_SAFETY_ENV} is set but this model is not a google:/google-cloud: model; '
+                'the Gemini content filters only exist there'
+            )
     return cast('ModelSettings', {'google_safety_settings': settings})
 
 
@@ -365,6 +381,6 @@ def google_safety_summary(settings: ModelSettings | None) -> str | None:
     how = next(iter(thresholds)) if len(thresholds) == 1 else ' / '.join(sorted(thresholds))
     note = f' ({GOOGLE_SAFETY_OFF_NOTE})' if how == 'OFF' else ''
     return (
-        f'Gemini configurable content filters relaxed by operator ({GOOGLE_SAFETY_ENV}): {what} → {how}{note}. '
-        'The provider CSAM/PII filters are non-configurable and stay on.'
+        f'Gemini configurable content filters: {what} → {how}{note}. '
+        f'({GOOGLE_SAFETY_ENV} overrides; the provider CSAM/PII filters are non-configurable and stay on.)'
     )

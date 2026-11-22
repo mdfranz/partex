@@ -137,9 +137,11 @@ def test_safety_parse_failures_are_config_errors(raw: str) -> None:
     assert excinfo.value.rule_code == 'model-config'
 
 
-def test_safety_settings_unset_means_provider_defaults() -> None:
-    assert resolve_google_safety_settings('google:gemini-x', env={}) is None
-    assert resolve_google_safety_settings('openai:gpt-5', env={}) is None
+def test_safety_settings_default_off_for_google_models_only() -> None:
+    """#218: a Google model role gets the off preset with no env var; others get nothing."""
+    assert resolve_google_safety_settings('google:gemini-x', env={}) == {'google_safety_settings': ALL_CATEGORIES_OFF}
+    assert resolve_google_safety_settings('openai:gpt-5', env={}) is None  # its provider filters untouched
+    assert resolve_google_safety_settings('test', env={}) is None
 
 
 def test_safety_settings_resolve_for_every_google_spec_shape() -> None:
@@ -154,7 +156,7 @@ def test_safety_settings_resolve_for_every_google_spec_shape() -> None:
 
 @pytest.mark.parametrize('model', ['openai:gpt-5', 'anthropic:claude-sonnet-5-5', 'gateway/anthropic:claude', 'test'])
 def test_safety_set_on_a_non_google_model_fails_closed(model: str) -> None:
-    """The operator asked for relaxed filters; silently skipping them would hide that they are still on."""
+    """The operator asked for adjusted filters; silently skipping them would hide that they are still on."""
     with pytest.raises(ModelConfigError, match='google:/google-cloud:'):
         resolve_google_safety_settings(model, env={GOOGLE_SAFETY_ENV: 'off'})
 
