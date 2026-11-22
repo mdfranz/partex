@@ -20,6 +20,7 @@ from partex.engine import (
     run_test,
     select_live_checks,
 )
+from partex.models import HttpEvidence
 from partex.storage import RunStore
 
 # tmp_store comes from the root conftest's pytest_plugins (registered there by #8).
@@ -282,7 +283,7 @@ async def test_crashing_check_keeps_committed_evidence_and_earlier_findings(
     assert any(finding.check_id == 'version-disclosure' for finding in earlier)
     # ...and so does the evidence the crashing check had already captured.
     stored = await tmp_store.evidence(result.run_id)
-    assert any(item.http.request.url.endswith('/boom-request') for item in stored)
+    assert any(isinstance(item, HttpEvidence) and item.http.request.url.endswith('/boom-request') for item in stored)
 
 
 async def test_scope_violating_probe_is_a_check_failure(

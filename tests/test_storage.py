@@ -552,7 +552,7 @@ async def test_summary_lifecycle(tmp_store: RunStore):
 async def test_record_engagement_is_idempotent(tmp_store: RunStore):
     engagement = Engagement(
         target=EngagementTarget(name='app', base_url='https://app.example.test'),
-        scope=Scope(hosts=['app.example.test']),
+        scope=Scope(hosts=['app.example.test'], ports=[]),
         authorization=Authorization(attestation='SOW-1', operator='op'),
     )
     first = await tmp_store.record_engagement(engagement)
@@ -666,7 +666,7 @@ async def test_surface_graph(tmp_store: RunStore):
     ],
 )
 async def test_schema_drift_is_a_load_error(tmp_store: RunStore, tmp_store_path: Path, sql: str, read: object):
-    run_id = await _run(tmp_store, scope_snapshot=Scope(hosts=['h']))
+    run_id = await _run(tmp_store, scope_snapshot=Scope(hosts=['h'], ports=[]))
     item = _http()
     await tmp_store.commit_passive(run_id, [item], [_finding(item)])
     _execute(tmp_store_path, sql)

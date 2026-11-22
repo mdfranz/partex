@@ -9,7 +9,7 @@ findings.
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -23,6 +23,7 @@ from partex.ids import evidence_id
 from partex.models import Finding, HttpEvidence, HttpExchange, HttpRequest, HttpResponse
 from partex.roles import RoleHandle
 from partex.storage import RunStore
+from partex.target import ScopedHttpClient
 
 ROLE_ENV = {'PARTEX_CRED_OWNER': 'owner-secret-token', 'PARTEX_CRED_GUEST': 'guest-secret-token'}
 
@@ -249,8 +250,12 @@ async def test_probe_cites_baseline_first_so_the_recipe_leads_cross_role() -> No
     assert guest.id < owner.id  # the hash order is against the citation convention
 
     handles = {
-        'owner': RoleHandle('owner', 'PARTEX_CRED_OWNER', ROLE_ENV['PARTEX_CRED_OWNER'], StubClient(owner)),
-        'guest': RoleHandle('guest', 'PARTEX_CRED_GUEST', ROLE_ENV['PARTEX_CRED_GUEST'], StubClient(guest)),
+        'owner': RoleHandle(
+            'owner', 'PARTEX_CRED_OWNER', ROLE_ENV['PARTEX_CRED_OWNER'], cast(ScopedHttpClient, StubClient(owner))
+        ),
+        'guest': RoleHandle(
+            'guest', 'PARTEX_CRED_GUEST', ROLE_ENV['PARTEX_CRED_GUEST'], cast(ScopedHttpClient, StubClient(guest))
+        ),
     }
     (draft,) = await authz_boundary_check.probe([observed], handles['owner'].client, roles=handles)
     assert draft.evidence_ids == [owner.id, guest.id]  # baseline first — not id-sorted

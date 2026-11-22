@@ -1,0 +1,12 @@
+{
+  "pythonVersion": "3.14",
+  "typeCheckingMode": "strict",
+  "include": ["."],
+  "venvPath": "..",
+  "extraPaths": ["../src"],
+  "reportPrivateUsage": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownLambdaType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownArgumentType": false
+}
