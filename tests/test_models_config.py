@@ -1,12 +1,19 @@
 """Model resolution — ``--model`` / ``--gateway-route`` (issue #49). No provider is contacted."""
 
+import json
+
 import pytest
 from pydantic_ai.models.openai import OpenAIChatModel
 
 from partex.models_config import (
     GATEWAY_BASE_URL_ENV,
+    GOOGLE_SAFETY_CATEGORIES,
+    GOOGLE_SAFETY_ENV,
     ModelConfigError,
+    google_safety_summary,
     normalize_gateway_base_url,
+    parse_google_safety_settings,
+    resolve_google_safety_settings,
     resolve_model,
 )
 
@@ -82,3 +89,91 @@ def test_normalize_leaves_other_urls_and_unset_alone() -> None:
     env[GATEWAY_BASE_URL_ENV] = 'https://gateway-us.pydantic.dev/proxy/doubleword/'
     normalize_gateway_base_url('doubleword', env)
     assert env[GATEWAY_BASE_URL_ENV] == 'https://gateway-us.pydantic.dev/proxy'
+
+
+# ── Gemini configurable content filters (issue #218) ───────────────────────────
+
+
+ALL_CATEGORIES_OFF = [{'category': category, 'threshold': 'OFF'} for category in GOOGLE_SAFETY_CATEGORIES]
+
+
+@pytest.mark.parametrize(
+    ('preset', 'threshold'),
+    [('off', 'OFF'), ('high', 'BLOCK_ONLY_HIGH')],
+)
+def test_safety_presets_cover_every_configurable_category(preset: str, threshold: str) -> None:
+    assert parse_google_safety_settings(preset) == [
+        {'category': category, 'threshold': threshold} for category in GOOGLE_SAFETY_CATEGORIES
+    ]
+    assert parse_google_safety_settings(f'  {preset} ') == parse_google_safety_settings(preset)
+
+
+def test_safety_json_list_parses_per_category_thresholds() -> None:
+    raw = json.dumps([{'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_ONLY_HIGH'}])
+    assert parse_google_safety_settings(raw) == [
+        {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_ONLY_HIGH'}
+    ]
+
+
+@pytest.mark.parametrize(
+    'raw',
+    [
+        '',
+        '   ',
+        'medium',
+        'not json',
+        '[]',
+        '{}',
+        '"a string"',
+        '[{"category": "HARM_CATEGORY_HARASSMENT"}]',  # threshold missing
+        '[{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF", "extra": 1}]',
+        '[{"category": "NOT_A_CATEGORY", "threshold": "OFF"}]',
+        '[{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "MAYBE"}]',
+    ],
+)
+def test_safety_parse_failures_are_config_errors(raw: str) -> None:
+    with pytest.raises(ModelConfigError) as excinfo:
+        parse_google_safety_settings(raw)
+    assert excinfo.value.rule_code == 'model-config'
+
+
+def test_safety_settings_unset_means_provider_defaults() -> None:
+    assert resolve_google_safety_settings('google:gemini-x', env={}) is None
+    assert resolve_google_safety_settings('openai:gpt-5', env={}) is None
+
+
+def test_safety_settings_resolve_for_every_google_spec_shape() -> None:
+    from pydantic_ai.models.google import GoogleModel
+
+    expected = {'google_safety_settings': ALL_CATEGORIES_OFF}
+    assert resolve_google_safety_settings('google:gemini-x', env={GOOGLE_SAFETY_ENV: 'off'}) == expected
+    assert resolve_google_safety_settings('google-cloud:gemini-x', env={GOOGLE_SAFETY_ENV: 'off'}) == expected
+    instance = GoogleModel.__new__(GoogleModel)  # no provider needed: only the type is checked
+    assert resolve_google_safety_settings(instance, env={GOOGLE_SAFETY_ENV: 'off'}) == expected
+
+
+@pytest.mark.parametrize('model', ['openai:gpt-5', 'anthropic:claude-sonnet-5-5', 'gateway/anthropic:claude', 'test'])
+def test_safety_set_on_a_non_google_model_fails_closed(model: str) -> None:
+    """The operator asked for relaxed filters; silently skipping them would hide that they are still on."""
+    with pytest.raises(ModelConfigError, match='google:/google-cloud:'):
+        resolve_google_safety_settings(model, env={GOOGLE_SAFETY_ENV: 'off'})
+
+
+def test_safety_summary_names_what_was_relaxed_and_what_stays_on() -> None:
+    settings = resolve_google_safety_settings('google:gemini-x', env={GOOGLE_SAFETY_ENV: 'off'})
+    summary = google_safety_summary(settings)
+    assert summary is not None
+    assert 'OFF' in summary and 'CSAM/PII' in summary and GOOGLE_SAFETY_ENV in summary
+    assert google_safety_summary(None) is None
+
+
+def test_safety_summary_says_mixed_thresholds_without_a_single_note() -> None:
+    raw = json.dumps(
+        [
+            {'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'BLOCK_NONE'},
+            {'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_ONLY_HIGH'},
+        ]
+    )
+    settings = resolve_google_safety_settings('google:gemini-x', env={GOOGLE_SAFETY_ENV: raw})
+    summary = google_safety_summary(settings)
+    assert summary is not None and 'BLOCK_NONE / BLOCK_ONLY_HIGH' in summary

@@ -14,6 +14,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.settings import ModelSettings
 
 from partex.agent_adapter import ReviewDeps, build_reviewer_agent
 from partex.agent_adapter.tools import UNTRUSTED_TAG
@@ -121,6 +122,13 @@ def test_agent_is_named_and_needs_no_credentials_to_build() -> None:
         'lookup_research',
         'read_report',
     ]
+
+
+def test_reviewer_carries_operator_google_safety_settings() -> None:
+    """The operator's Gemini filter opt-in (#218) reaches the chat agent; default is none."""
+    safety: ModelSettings = {'google_safety_settings': [{'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'OFF'}]}
+    assert build_reviewer_agent('test', model_settings=safety).model_settings == safety
+    assert build_reviewer_agent('test').model_settings is None
 
 
 async def test_tools_read_the_run_redacted_and_framed(

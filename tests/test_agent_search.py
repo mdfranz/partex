@@ -37,6 +37,7 @@ from partex import agent_adapter, cli
 from partex.agent_adapter import TesterDeps, WebSearcher, build_search_agent, build_tester_agent, run_agent
 from partex.agent_adapter.search import (
     SEARCH_ANTHROPIC_MAX_USES,
+    SEARCH_ANTHROPIC_SETTINGS,
     SEARCH_MAX_SOURCES,
     SEARCH_QUERY_MAX_CHARS,
     SEARCH_RESULT_MAX_CHARS,
@@ -462,6 +463,22 @@ async def test_search_agent_has_only_native_web_search_tool() -> None:
     o_settings = fake_openai.seen_settings[0] or {}
     assert o_settings.get('openai_include_web_search_sources') is True
     assert 'anthropic_web_tools_allowed_callers' not in o_settings
+
+
+async def test_search_agent_carries_operator_google_safety_settings() -> None:
+    """The operator's Gemini filter opt-in (#218) rides the search agent into every request."""
+    safety: ModelSettings = {
+        'google_safety_settings': [{'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'OFF'}]
+    }
+    agent = build_search_agent('test', provider='google', model_settings=safety)
+    assert agent.model_settings == safety
+    fake = FakeNativeSearchModel(name='fake-google')
+    agent = build_search_agent(fake, provider='google-cloud', model_settings=safety)
+    await agent.run('nginx 1.24.0 cve')
+    assert (fake.seen_settings[0] or {}).get('google_safety_settings') == safety['google_safety_settings']
+    # No opt-in → the per-provider default: none for Google providers.
+    assert build_search_agent('test', provider='google').model_settings is None
+    assert build_search_agent('test', provider='anthropic').model_settings == SEARCH_ANTHROPIC_SETTINGS
 
 
 # ── Tester integration: disabled vs enabled, audit, usage, span, framing ──────

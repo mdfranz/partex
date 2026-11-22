@@ -16,12 +16,14 @@ Credentials stay in the environment: pydantic-ai reads ``PYDANTIC_AI_GATEWAY_API
 ``OPENAI_API_KEY``, and Google ADC itself, and nothing here logs or stores them.
 """
 
+import json
 import os
 from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic_ai.models import Model
+from pydantic_ai.settings import ModelSettings
 
 from .errors import PartexError
 
@@ -29,6 +31,34 @@ GATEWAY_BASE_URL_ENV = 'PYDANTIC_AI_GATEWAY_BASE_URL'
 DEFAULT_GOOGLE_CLOUD_LOCATION = 'global'
 """Vertex location for ``google-cloud:`` search. Newer Gemini models (3.x and later) are served from
 ``global`` only; ``us-central1`` returns 404 for them (live-verified, #111). Override with ``GOOGLE_CLOUD_LOCATION``."""
+
+GOOGLE_SAFETY_ENV = 'PARTEX_GOOGLE_SAFETY_SETTINGS'
+"""Operator opt-in Gemini configurable content-filter thresholds (#218). Presets or a JSON
+``[{"category": "HARM_CATEGORY_…", "threshold": "BLOCK_…"}]`` list; startup prints what was relaxed.
+The provider's non-configurable CSAM and PII/SPII filters stay on whatever this sets."""
+
+GOOGLE_SAFETY_PRESETS: dict[str, str] = {'off': 'OFF', 'high': 'BLOCK_ONLY_HIGH'}
+"""Preset name → threshold, applied to every configurable category."""
+
+GOOGLE_SAFETY_OFF_NOTE = 'no automated content-filter blocking'
+"""What the ``off`` preset means in the startup warning; ``high`` keeps a high-severity block."""
+
+GOOGLE_SAFETY_CATEGORIES: tuple[str, ...] = (
+    'HARM_CATEGORY_HARASSMENT',
+    'HARM_CATEGORY_HATE_SPEECH',
+    'HARM_CATEGORY_SEXUALLY_EXPLICIT',
+    'HARM_CATEGORY_DANGEROUS_CONTENT',
+)
+"""Gemini's configurable harm categories. CSAM and PII/SPII are separate, non-configurable filters."""
+
+GOOGLE_SAFETY_THRESHOLDS: tuple[str, ...] = (
+    'BLOCK_LOW_AND_ABOVE',
+    'BLOCK_MEDIUM_AND_ABOVE',
+    'BLOCK_ONLY_HIGH',
+    'BLOCK_NONE',
+    'OFF',
+)
+"""Thresholds the Gemini API accepts for a configurable harm category."""
 
 type SearchProvider = Literal['anthropic', 'google', 'google-cloud', 'openai']
 type SearchAuthMode = Literal['api_key', 'adc']
@@ -247,4 +277,94 @@ def resolve_search_model(
         model=GoogleModel(model_name, provider=provider),
         project=project,
         location=location,
+    )
+
+
+# ── Gemini configurable content filters (issue #218) ───────────────────────────
+
+
+def _is_google_model(model: Model | str) -> bool:
+    """Whether *model* is a Gemini request path: a ``google:``/``google-cloud:`` spec or a GoogleModel."""
+    if isinstance(model, str):
+        return model.split(':', 1)[0] in ('google', 'google-cloud')
+    from pydantic_ai.models.google import GoogleModel
+
+    return isinstance(model, GoogleModel)
+
+
+def parse_google_safety_settings(raw: str) -> list[dict[str, str]]:
+    """Parse :data:`GOOGLE_SAFETY_ENV`'s value: a preset or a JSON ``[{category, threshold}]`` list.
+
+    Fails closed as :class:`ModelConfigError` on anything the Gemini API would reject or ignore
+    (empty value, unknown preset, malformed JSON, not a list, missing or unknown keys) — a relaxed
+    filter the operator asked for but did not get is worse than a refused startup.
+    """
+    value = raw.strip()
+    hint = f'presets: {", ".join(GOOGLE_SAFETY_PRESETS)}; or a JSON list of {{"category", "threshold"}} objects'
+    if not value:
+        raise ModelConfigError(f'{GOOGLE_SAFETY_ENV} is empty; {hint}')
+    if value in GOOGLE_SAFETY_PRESETS:
+        threshold = GOOGLE_SAFETY_PRESETS[value]
+        return [{'category': category, 'threshold': threshold} for category in GOOGLE_SAFETY_CATEGORIES]
+    try:
+        data: Any = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ModelConfigError(
+            f'{GOOGLE_SAFETY_ENV} is neither a preset ({", ".join(GOOGLE_SAFETY_PRESETS)}) nor valid JSON: {exc}'
+        ) from exc
+    if not isinstance(data, list) or not data:
+        raise ModelConfigError(f'{GOOGLE_SAFETY_ENV} must be a non-empty JSON list; {hint}')
+    settings: list[dict[str, str]] = []
+    for entry in cast('list[Any]', data):
+        if not isinstance(entry, dict):
+            raise ModelConfigError(f'{GOOGLE_SAFETY_ENV} entries must be {{"category", "threshold"}} objects; {hint}')
+        record: dict[str, Any] = cast('dict[str, Any]', entry)
+        if set(record) != {'category', 'threshold'}:
+            raise ModelConfigError(f'{GOOGLE_SAFETY_ENV} entries must be {{"category", "threshold"}} objects; {hint}')
+        category, threshold = record['category'], record['threshold']
+        if not isinstance(category, str) or category not in GOOGLE_SAFETY_CATEGORIES:
+            raise ModelConfigError(
+                f'{GOOGLE_SAFETY_ENV} category {category!r} is not one of {", ".join(GOOGLE_SAFETY_CATEGORIES)}'
+            )
+        if not isinstance(threshold, str) or threshold not in GOOGLE_SAFETY_THRESHOLDS:
+            raise ModelConfigError(
+                f'{GOOGLE_SAFETY_ENV} threshold {threshold!r} is not one of {", ".join(GOOGLE_SAFETY_THRESHOLDS)}'
+            )
+        settings.append({'category': category, 'threshold': threshold})
+    return settings
+
+
+def resolve_google_safety_settings(model: Model | str, *, env: Mapping[str, str] | None = None) -> ModelSettings | None:
+    """The ``google_safety_settings`` model settings for *model* when the operator opted in (#218).
+
+    Unset/blank :data:`GOOGLE_SAFETY_ENV` → ``None`` (provider defaults). Set on a ``google:`` /
+    ``google-cloud:`` model → ``{'google_safety_settings': [...]}`` for pydantic-ai to pass into every
+    Gemini request. Set on any other model → :class:`ModelConfigError` (fail closed: the operator asked
+    for relaxed filters, so silently skipping them would hide that they are still on). Resolve before
+    wrapping a model (``UsageRecordingModel`` passes per-request settings through unchanged).
+    """
+    raw = (os.environ if env is None else env).get(GOOGLE_SAFETY_ENV, '')
+    if not raw.strip():
+        return None
+    settings = parse_google_safety_settings(raw)
+    if not _is_google_model(model):
+        raise ModelConfigError(
+            f'{GOOGLE_SAFETY_ENV} is set but this model is not a google:/google-cloud: model; '
+            'the Gemini content filters only exist there'
+        )
+    return cast('ModelSettings', {'google_safety_settings': settings})
+
+
+def google_safety_summary(settings: ModelSettings | None) -> str | None:
+    """The operator-facing startup line for *settings* (``None`` when nothing was relaxed)."""
+    if not settings:
+        return None
+    entries = [entry['category'] for entry in settings.get('google_safety_settings', [])]
+    thresholds = {entry['threshold'] for entry in settings.get('google_safety_settings', [])}
+    what = ', '.join(sorted(entries)) if entries else 'no categories'
+    how = next(iter(thresholds)) if len(thresholds) == 1 else ' / '.join(sorted(thresholds))
+    note = f' ({GOOGLE_SAFETY_OFF_NOTE})' if how == 'OFF' else ''
+    return (
+        f'Gemini configurable content filters relaxed by operator ({GOOGLE_SAFETY_ENV}): {what} → {how}{note}. '
+        'The provider CSAM/PII filters are non-configurable and stay on.'
     )

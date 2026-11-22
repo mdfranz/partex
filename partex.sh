@@ -14,6 +14,11 @@
 #   -S, --search-model NAME  optional separate model for web_search [PARTEX_SEARCH_MODEL]: anthropic:<name>,
 #                            google:<name> (API key), google-cloud:<name> (ADC), or openai:<name>; off unless set. Queries
 #                            leave this machine and never go through the Gateway.
+#                            Gemini safety filters: set PARTEX_GOOGLE_SAFETY_SETTINGS to relax the configurable content
+#                            filters for google:/google-cloud: models (#218) — a preset (off, high) or a JSON
+#                            [{"category": "HARM_CATEGORY_…", "threshold": "BLOCK_…"}] list. Startup prints what was
+#                            relaxed; the provider's non-configurable CSAM/PII filters stay on. A non-Google model with
+#                            the variable set refuses to start.
 #   -d, --db PATH            database [PARTEX_DB, default partex.db in the state directory]
 #                            Set PARTEX_STATE_DIR to override the state directory for all local files.
 #   -f, --from RUN_ID        let the new session read an earlier run [RUN_ID]

@@ -10,6 +10,7 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.framing import wrap
 from pydantic_ai.models import Model
+from pydantic_ai.settings import ModelSettings
 
 from .tools import BRIEFING_TAG, REVIEWER_TOOLS, ReviewDeps
 
@@ -53,12 +54,17 @@ Do not repeat the raw evidence."""
 
 
 def build_reviewer_agent(
-    model: Model | str, *, briefing: str | None = None, skills: Sequence[AgentCapability[ReviewDeps]] = ()
+    model: Model | str,
+    *,
+    briefing: str | None = None,
+    skills: Sequence[AgentCapability[ReviewDeps]] = (),
+    model_settings: ModelSettings | None = None,
 ) -> Agent[ReviewDeps, str]:
     """Construct the reviewer for *model* (resolved by :func:`partex.models_config.resolve_model`).
 
     *briefing*, the summary already shown when the chat opened, is added to the instructions so
-    follow-up questions ("tell me more about the second one") have that context.
+    follow-up questions ("tell me more about the second one") have that context. *model_settings*
+    carries the operator's Gemini content-filter opt-in (#218) when *model* is a Google one.
     """
     instructions = REVIEWER_INSTRUCTIONS
     if briefing:
@@ -74,6 +80,7 @@ def build_reviewer_agent(
         instructions=instructions,
         tools=REVIEWER_TOOLS,
         capabilities=list(skills),
+        model_settings=model_settings,
         defer_model_check=True,
     )
 

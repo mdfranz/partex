@@ -14,6 +14,7 @@ import anyio.to_thread
 from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.exceptions import AgentRunError
 from pydantic_ai.models import Model
+from pydantic_ai.settings import ModelSettings
 
 # Imported at module level, before any tool frames text: CLAI2 registers its own framing tags at
 # import time, and a tag registered after escaping has started changes how earlier text renders.
@@ -26,7 +27,7 @@ from rich.rule import Rule
 
 from .. import engine
 from ..bundle import LoadedBundle, load_bundle
-from ..models_config import SearchModelConfig
+from ..models_config import SearchModelConfig, google_safety_summary, resolve_google_safety_settings
 from ..probes import plan_seed_probes, plan_summary, seed_lines
 from ..storage import RunReader, RunStore, run_artifact_dir
 from .approval import WriteGate
@@ -59,14 +60,21 @@ __all__ = [
 ]
 
 
-async def brief(model: Model | str, deps: ReviewDeps, console: Console) -> str | None:
+async def brief(
+    model: Model | str,
+    deps: ReviewDeps,
+    console: Console,
+    *,
+    model_settings: ModelSettings | None = None,
+) -> str | None:
     """Run the reviewer once on :data:`BRIEFING_PROMPT` and print the result; ``None`` if the model failed.
 
     A failed briefing is reported and the chat still opens: the operator can ask directly.
+    *model_settings* carries the Gemini content-filter opt-in (#218), the same as the chat agent.
     """
     with console.status(f'Reviewing {deps.run_id} …'):
         try:
-            result = await build_reviewer_agent(model).run(BRIEFING_PROMPT, deps=deps)
+            result = await build_reviewer_agent(model, model_settings=model_settings).run(BRIEFING_PROMPT, deps=deps)
         except AgentRunError as exc:
             console.print(f'[yellow]briefing unavailable:[/] {exc}')
             return None
@@ -88,6 +96,12 @@ async def _pause_on(summary: str | None, console: Console) -> None:
         await anyio.to_thread.run_sync(lambda: console.input('[dim]Press Enter to open the chat…[/]'))
 
 
+def _safety_warning(console: Console, settings: ModelSettings | None) -> None:
+    """Print the startup line for a relaxed Gemini filter set (#218), so the transcript shows it."""
+    if summary := google_safety_summary(settings):
+        console.print(f'[yellow]{summary}[/]')
+
+
 async def run_chat(
     run_id: str,
     db_path: Path,
@@ -99,12 +113,14 @@ async def run_chat(
 ) -> None:
     """Open *run_id* in *db_path* read-only, print a briefing (unless disabled), then start the chat."""
     console = console or Console()
+    safety = resolve_google_safety_settings(model)
+    _safety_warning(console, safety)
     async with await RunReader.open(db_path) as reader:
         await reader.get_run(run_id)  # unknown run → StoreError(run-not-found) before any model call or UI
         deps = ReviewDeps(run_id=run_id, reader=reader)
-        summary = await brief(model, deps, console) if briefing else None
+        summary = await brief(model, deps, console, model_settings=safety) if briefing else None
         await _pause_on(summary, console)
-        agent = build_reviewer_agent(model, briefing=summary, skills=skills)
+        agent = build_reviewer_agent(model, briefing=summary, skills=skills, model_settings=safety)
         # CLAI2 stores conversations, input history, and telemetry beside its settings database.
         chat_dir = db_path.with_name(f'{db_path.name}.clai2')
         chat_dir.mkdir(mode=0o700, exist_ok=True)
@@ -146,6 +162,11 @@ async def run_agent(
     Returns the session's run ID.
     """
     console = console or Console()
+    # Resolve before any run row or socket: a bad filter spec refuses startup (#218), fail closed.
+    safety = resolve_google_safety_settings(model)
+    _safety_warning(console, safety)
+    search_safety = resolve_google_safety_settings(search_model.model) if search_model is not None else None
+    _safety_warning(console, search_safety)
     seed_bundle = await anyio.to_thread.run_sync(_load_seed_bundle, bundle) if bundle is not None else None
     async with await RunStore.open(db_path) as store:
         if from_run is not None:
@@ -184,7 +205,9 @@ async def run_agent(
                 )
                 searcher = WebSearcher(
                     config=search_model,
-                    agent=build_search_agent(recorded_search, provider=search_model.provider),
+                    agent=build_search_agent(
+                        recorded_search, provider=search_model.provider, model_settings=search_safety
+                    ),
                 )
 
             async def audit(tool: str, args: dict[str, object], result: dict[str, object]) -> None:
@@ -202,7 +225,7 @@ async def run_agent(
                 searcher=searcher,
                 write_gate=write_gate,
             )
-            summary = await brief(recorded, deps, console) if briefing else None
+            summary = await brief(recorded, deps, console, model_settings=safety) if briefing else None
             await _pause_on(summary, console)
             artifacts = run_artifact_dir(store.path, session.run_id)
             artifacts.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -212,6 +235,7 @@ async def run_agent(
                 skills=skills,
                 artifacts_dir=artifacts,
                 web_search_enabled=searcher is not None,
+                model_settings=safety,
             )
             # The operator-only /scope command is a CLAI2 plugin (slash commands exist only as plugins). A
             # private, empty settings store keeps the operator's saved and drop-in CLAI2 plugins out, and
