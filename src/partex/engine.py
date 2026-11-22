@@ -21,7 +21,7 @@ import hashlib
 import importlib.metadata
 import os
 import sys
-from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
@@ -54,7 +54,7 @@ from .models import (
 from .openapi_resolver import derive_openapi_config_evidence
 from .probes import SeedPlan, plan_seed_probes
 from .roles import RoleHandle, role_handles
-from .scope import apply_urls, check_url, extend_scope, parse_urls_file, validate_scope
+from .scope import apply_urls, check_url, entry_url, extend_scope, parse_urls_file, validate_scope
 from .storage import RunState, RunStore, SurfaceKind, SurfaceRel, run_artifact_dir, surface_node_id
 from .target import DEFAULT_MAX_ASSET_BYTES, RequestBudget, ScopedHttpClient, tls_unverified
 
@@ -705,6 +705,17 @@ async def run_test(
     try:
         try:
             await client.request('GET', engagement.target.base_url)
+            # #215 initial probe pass: one GET per active URL-list entry (the baseline target
+            # itself is skipped), so checks review every imported host:port, not just base_url.
+            if engagement.scope.urls:
+                # Rule 5: a probe pass cut short by the budget ends it cleanly, like active work.
+                budget_exhausted = budget_exhausted or (
+                    await probe_url_entries(
+                        partial(client.request, 'GET'),
+                        entries=engagement.scope.urls,
+                        base_url=engagement.target.base_url,
+                    )
+                )[2] > 0
             # Seeded bundle-surface probes (#76): right after the baseline so active checks see
             # the seeded evidence. Candidates are pre-filtered with the same scope gate, so a
             # refusal here is a logic bug — counted, never a run failure (the #80 lesson).
@@ -863,6 +874,47 @@ async def _maybe_register_openapi(
 
 
 # ── Live session (issue #54; PLAN §9 operator-in-the-loop) ─────────────────────
+
+
+async def probe_url_entries(
+    request: Callable[[str], Awaitable[object]], *, entries: Sequence[str], base_url: str
+) -> tuple[int, int, int]:
+    """The #215 initial probe pass: one ``GET`` per active URL-list entry, before checks run.
+
+    Only at startup (``partex test`` / ``partex agent``): an operator-confirmed import is the
+    authorization, every probe is a safe method through the same scope gate and budget, and each
+    capture commits at capture time — so the passive checks then review banner and error-page
+    evidence from *every* imported host:port, not just the baseline target. ``request`` is a bound
+    ``GET`` (``LiveSession.request`` or ``ScopedHttpClient.request``); *entries* is the active
+    ``scope.urls``; *base_url* is skipped (the baseline capture already probed it), duplicates
+    collapse. A dead host (:class:`PartexError` on connect) is counted and probed past, never a
+    run failure; budget exhaustion stops the pass cleanly (PLAN §6). Returns
+    ``(probed, failed, unprobed)`` and prints one summary line to stderr.
+    """
+    seen: set[str] = set()
+    urls: list[str] = []
+    for entry in entries:
+        url = entry_url(entry)
+        if url != base_url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    probed = failed = 0
+    for url in urls:
+        try:
+            await request(url)
+            probed += 1
+        except BudgetExhausted:
+            break
+        except PartexError:
+            failed += 1
+    unprobed = len(urls) - probed - failed
+    if urls:
+        print(
+            f'partex: initial probe of {len(urls) + 1} URL-list target(s): '
+            f'{probed} probed, {failed} unreachable, {unprobed} unprobed (request budget)',
+            file=sys.stderr,
+        )
+    return probed, failed, unprobed
 
 
 class LiveSessionRefused(PartexError):
@@ -1110,6 +1162,12 @@ async def live_session(
     session = LiveSession(run_id=run_id, engagement=engagement, registry=registry, store=store)
     try:
         await session.request('GET', engagement.target.base_url)
+        # #215 initial probe pass: one GET per active URL-list entry, before the checks, so
+        # passive review covers every imported host:port and active checks see all of it.
+        if engagement.scope.urls:
+            await probe_url_entries(
+                partial(session.request, 'GET'), entries=engagement.scope.urls, base_url=engagement.target.base_url
+            )
         active, passive = order_for_live_run(selected)
         for check in (*active, *passive):  # probes first, so passive checks also see their traffic
             if check.applies_to(session.captured):

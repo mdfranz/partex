@@ -375,6 +375,13 @@ tool — is validated immediately before send:
    size); `/scope nmap <scan.xml>` stages the same batch in the live session and `/scope confirm` applies it
    as one `scope_amend` audit row recording the scan path and its sha256 (the batch keeps
    `target.base_url` covered; a run's `scope_snapshot` pins the exact entries).
+   **Initial probe pass.** A session with an active URL list (however it got there) opens with one
+   `GET` per listed entry — safe method, same scope gate and budget, captured at capture time —
+   before the checks run, so passive review covers banner and error-page evidence from every listed
+   host:port, not just the baseline target (whose own capture counts for it). A dead host is counted
+   and probed past, never a run failure; budget exhaustion ends the pass cleanly. Startup only: an
+   operator-confirmed `/scope nmap` widens scope but probes nothing (the operator asks in chat).
+   `partex.sh -N` raises `--max-requests` to cover the import (capped at the E3 ceiling).
 4. **Redirects**: never followed automatically; a redirect response is captured as evidence,
    and the new location is re-validated from rule 1 if the caller chooses to follow it.
 5. **Budgets**: a token-bucket limiter enforces `max_rps`; a run-level counter enforces

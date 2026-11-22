@@ -14,8 +14,8 @@ import pytest
 
 from partex.agent_adapter.scope_plugin import ScopeControl
 from partex.cli import main as cli_main
-from partex.engine import live_session
-from partex.errors import PartexError, ScopeViolation
+from partex.engine import live_session, probe_url_entries, run_test
+from partex.errors import BudgetExhausted, PartexError, ScopeViolation
 from partex.nmap import ScanSource, convert_nmap, ensure_base_url_entry, parse_nmap_xml
 from partex.scope import parse_urls_file
 from partex.storage import RunStore
@@ -300,3 +300,89 @@ async def test_scope_nmap_already_listed_is_a_noop(target_server: Any, tmp_path:
         assert 'Nothing pending' in await control.handle(['confirm'])
         assert session.engagement.scope.urls == [f'http://127.0.0.1:{target_server.port}/*']
         assert not [c for c in await tmp_store.tool_calls(session.run_id) if c.tool == 'scope_amend']
+
+
+# ── initial probe pass: one GET per listed entry at startup (#215) ─────────────
+
+
+async def test_probe_pass_probes_each_entry_once_skipping_the_baseline(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+
+    async def request(url: str) -> object:
+        calls.append(url)
+        return object()
+
+    probed, failed, unprobed = await probe_url_entries(
+        request,
+        entries=['http://h.test/', 'http://h.test/x', 'http://b.test:9/*', 'http://b.test:9/*'],
+        base_url='http://h.test/',
+    )
+    assert calls == ['http://h.test/x', 'http://b.test:9']  # the baseline capture covers entry 1; duplicates collapse
+    assert (probed, failed, unprobed) == (2, 0, 0)
+    assert 'initial probe' in capsys.readouterr().err
+
+
+async def test_probe_pass_tolerates_dead_hosts_and_stops_cleanly_at_the_budget(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+
+    async def request(url: str) -> object:
+        calls.append(url)
+        if url == 'http://dead.test:9':
+            raise PartexError('request to http://dead.test:9 failed: connection refused')
+        if url == 'http://last.test/':
+            raise BudgetExhausted('max_requests budget (1) exhausted')
+        return object()
+
+    probed, failed, unprobed = await probe_url_entries(
+        request,
+        entries=['http://ok.test/x', 'http://dead.test:9/*', 'http://last.test/', 'http://never.test/x'],
+        base_url='http://base.test/',
+    )
+    assert calls == ['http://ok.test/x', 'http://dead.test:9', 'http://last.test/']  # stopped at the budget
+    assert (probed, failed, unprobed) == (1, 1, 2)  # never.test left unprobed, never a run failure
+    assert 'unprobed' in capsys.readouterr().err
+
+
+async def test_probe_pass_with_only_the_baseline_probes_nothing(capsys: pytest.CaptureFixture[str]) -> None:
+    async def request(url: str) -> object:
+        raise AssertionError(f'nothing should be probed, got {url}')
+
+    assert await probe_url_entries(request, entries=['http://h.test/'], base_url='http://h.test/') == (0, 0, 0)
+    assert capsys.readouterr().err == ''
+
+
+def _engagement_with_urls(directory: Path, urls: list[str], ports: list[int]) -> Path:
+    manifest = json.loads((directory / 'engagement.json').read_text(encoding='utf-8'))
+    manifest['scope']['urls'] = urls
+    manifest['scope']['ports'] = ports
+    (directory / 'engagement.json').write_text(json.dumps(manifest), encoding='utf-8')
+    return directory
+
+
+async def test_live_session_probes_every_imported_entry(
+    target_server: Any, tmp_path: Path, tmp_store: RunStore
+) -> None:
+    base, port = target_server.base_url, target_server.port
+    urls = [f'{base}/*', f'http://127.0.0.1:{port}/alt/*', 'http://127.0.0.1:9/dead/*']
+    directory = _engagement_with_urls(engagement_dir(tmp_path, target_server), urls, [port, 9])
+    async with live_session(directory, tmp_store, authorized=True, checks=()) as session:
+        paths = {request['path'] for request in target_server.requests}
+        assert '/' in paths and '/alt' in paths  # the baseline GET plus the /alt entry probe
+        assert session.engagement.scope.urls == urls
+    assert (await tmp_store.get_run(session.run_id)).state == 'checks_complete'  # the dead :9 entry never fails it
+
+
+async def test_run_test_probes_every_listed_entry(target_server: Any, tmp_path: Path, tmp_store: RunStore) -> None:
+    base, port = target_server.base_url, target_server.port
+    urls_file = tmp_path / 'urls.txt'
+    urls_file.write_text(f'{base}/*\nhttp://127.0.0.1:{port}/alt/*\n', encoding='utf-8')
+    result = await run_test(
+        engagement_dir(tmp_path, target_server), tmp_store, ['version-disclosure'], authorized=True, urls_file=urls_file
+    )
+    assert result.state == 'checks_complete'
+    paths = {request['path'] for request in target_server.requests}
+    assert '/' in paths and '/alt' in paths

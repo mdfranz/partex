@@ -33,8 +33,10 @@
 #                            [PARTEX_RECURSIVE=1]
 #   -N, --nmap-file PATH     import authorized targets from an `nmap -oX` scan file: its open HTTP(S) ports become the
 #                            authorized-URL list (one scheme://host:port/* entry each; everything else is reported and
-#                            skipped), so only scanned host:port targets can be requested [PARTEX_NMAP_FILE]. Merges
-#                            with -u. <target-url> is then optional: the first imported entry is the baseline target.
+#                            skipped), so only scanned host:port targets can be requested [PARTEX_NMAP_FILE]. The session
+#                            opens with one initial GET per listed target (each captured as evidence; --max-requests is
+#                            raised automatically when the import needs the room). Merges with -u. <target-url> is then
+#                            optional: the first imported entry is the baseline target.
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
 #   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000]
 #   -R, --max-rps N          requests per second [PARTEX_MAX_RPS, default 2; ceiling 64]
@@ -171,6 +173,13 @@ for line in open(sys.argv[1], encoding='utf-8'):
 print(len(hosts), urls)
 PY
 )"
+  # The session opens with one initial GET per listed URL target (#215); make sure the budget
+  # covers the import plus working room, or the pass would stop at --max-requests.
+  if (( nmap_urls_count + 20 > MAX_REQUESTS )); then
+    MAX_REQUESTS=$((nmap_urls_count + 20))
+    (( MAX_REQUESTS > 100000 )) && MAX_REQUESTS=100000  # the engagement scope ceiling (E3)
+    echo "imported $nmap_urls_count URL target(s): raising --max-requests to $MAX_REQUESTS so the initial probe pass fits"
+  fi
 fi
 if [[ -z $TARGET_URL && -n $URLS_FILE ]]; then  # no <target-url>: the first URL in the file is the baseline target
   while IFS= read -r _line || [[ -n $_line ]]; do
