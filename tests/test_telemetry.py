@@ -8,7 +8,7 @@ import logfire
 import pytest
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 
-from partex.telemetry import JsonlSpanExporter, resolve_log_path
+from partex.telemetry import JsonlSpanExporter, configure_telemetry, resolve_log_path
 
 
 def test_default_path_is_under_the_state_dir_for_logged_commands(tmp_path: Path) -> None:
@@ -63,3 +63,17 @@ def test_log_file_is_created_lazily_on_the_first_span(tmp_path: Path) -> None:
     exporter = JsonlSpanExporter(path)
     exporter.shutdown()
     assert not path.exists() and not path.parent.exists()
+
+
+def test_tool_and_model_content_is_not_scrubbed_but_other_attributes_still_are(tmp_path: Path) -> None:
+    """Logfire's default scrubber blanked tool I/O mentioning auth/password/cookie; content attributes are kept."""
+    path = tmp_path / 'scrub.jsonl'
+    configure_telemetry(log_path=path, remote=False, service_version='test')
+    with logfire.span(
+        'tool',
+        **{'gen_ai.tool.call.result': 'auth providers: password reset, Cookie: sid=abc', 'note': 'password=hunter2'},
+    ):
+        pass
+    attributes = next(json.loads(line) for line in path.read_text().splitlines())['attributes']
+    assert attributes['gen_ai.tool.call.result'] == 'auth providers: password reset, Cookie: sid=abc'
+    assert 'Scrubbed' in attributes['note'] and 'hunter2' not in attributes['note']

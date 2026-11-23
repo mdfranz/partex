@@ -16,12 +16,15 @@ import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
 from .paths import mkdir_private, state_dir
+
+if TYPE_CHECKING:
+    from logfire import ScrubMatch
 
 LOG_FILE_ENV = 'PARTEX_LOG_FILE'
 LOGGED_COMMANDS = frozenset({'review', 'test', 'verify', 'chat', 'agent'})
@@ -101,6 +104,29 @@ class JsonlSpanExporter(SpanExporter):
             self._file.close()
 
 
+# Span attributes that carry model prompts, replies and tool I/O. Logfire's default scrubber blanks any value that
+# mentions ``auth``, ``secret``, ``password``, ``cookie`` …, which hid most tool results in security testing
+# (headers, auth endpoints, config) and made traces useless for debugging. These values are already
+# secret-redacted by partex (``redact()`` / ``frame_untrusted``) before they reach a span, so they are kept;
+# every other attribute keeps the default scrubbing.
+CONTENT_ATTRIBUTES = frozenset(
+    {
+        'gen_ai.input.messages',
+        'gen_ai.output.messages',
+        'gen_ai.system_instructions',
+        'gen_ai.tool.call.arguments',
+        'gen_ai.tool.call.result',
+        'final_result',
+    }
+)
+
+
+def keep_content(match: ScrubMatch) -> Any:
+    """Scrub callback: return the original value for :data:`CONTENT_ATTRIBUTES`, else ``None`` (scrub it)."""
+    path = match.path
+    return match.value if len(path) >= 2 and path[0] == 'attributes' and path[1] in CONTENT_ATTRIBUTES else None
+
+
 def configure_telemetry(*, log_path: Path | None, remote: bool, service_version: str) -> None:
     """Configure Logfire once for the process: the local JSONL log, and remote export only if *remote*.
 
@@ -115,6 +141,7 @@ def configure_telemetry(*, log_path: Path | None, remote: bool, service_version:
         send_to_logfire='if-token-present' if remote else False,
         console=False,
         additional_span_processors=processors,
+        scrubbing=logfire.ScrubbingOptions(callback=keep_content),
     )
     logfire.instrument_pydantic_ai()
 
