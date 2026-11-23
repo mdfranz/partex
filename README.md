@@ -35,6 +35,16 @@ This example reviews bundled HTTP traffic offline. It prints sample findings and
 - **Work with saved results.** List past runs, export reports or captured traffic, and use read-only chat to review findings and their evidence.
 - **Review captured traffic.** Import a browser's HTTP archive (HAR) and check saved responses for issues such as missing security headers or insecure cookie settings. Offline checks run without a model.
 
+```mermaid
+flowchart LR
+    Offline["Bundle or HAR (import-har)"] --> Review["partex review (passive, model-free)"]
+    Target["Target + Scope (-u / -N)"] --> Client["ScopedHttpClient (scope + write-approval gate)"]
+    Client --> Live["partex test / partex agent (passive + active + verify)"]
+    Review --> DB[("partex.db")]
+    Live --> DB
+    DB --> Inspect["partex show / chat / reports"]
+```
+
 ## Skills, checks, and plugins
 
 Skills are Markdown playbooks in [`skills/`](skills/) that the interactive session loads on demand with `load_capability`. Each skill names the check it runs with. The checks are Python code registered through the `partex.checks` entry point and run by the engine; the skill only tells the model when to use them. Run `uv run partex checks` to see the installed checks and their linked skills.

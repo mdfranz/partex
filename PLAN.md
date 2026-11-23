@@ -112,34 +112,25 @@ Several initial assumptions in earlier drafts have been explicitly amended as im
 
 ## 2. Architecture
 
-```text
-┌───────────────────────────── partex CLI ──────────────────────────────────┐
-│ engage   review <bundle>   test <eng>   verify <run-id> <finding-id>      │
-│ runs   show <run-id>   summarize <run-id>   checks   agent <eng>          │
-│ chat <run-id>                                                              │
-└──────┬──────────────────────────────────────────────┬───────────────────┘
-       │                                              │
-┌──────▼───────────────────────────────┐   ┌──────────▼──────────────────┐
-│  Engine                              │   │  Agent adapter              │
-│  bundle/engagement load + validate   │   │  Pydantic AI agent + scoped │
-│  evidence registry                   │   │  tools (http, findings,     │
-│  passive checks (deterministic)      │   │  verify) over CLAI2 chat()  │
-│  active checks via target client     │   │  interactive + --auto loop  │
-│  verification runner (PoC replay)    │   │  load_plugins=False         │
-│  findings commit (single writer)     │   └──────────┬──────────────────┘
-└──────┬───────────────────────────────┘              │
-       │                                             │
-┌──────▼─────────────────────────────────────────────▼───────────────────┐
-│  RunStore: SQLite (engagements, runs, evidence, findings,              │
-│  verifications, tool_calls, summaries) + JSON export                    │
-└────────────────────────────────────────────────────────────────────────┘
-       ▲                    ▲                            ▲
-┌──────┴───────────┐ ┌──────┴──────────────┐ ┌───────────┴───────────┐
-│  Skill registry  │ │  Target client      │ │  pydantic-ai core     │
-│  skill dirs      │ │  scoped HTTP client │ │  Agent, TestModel,    │
-│  (data) + entry- │ │  scope gate, capture│ │  FunctionModel,       │
-│  point checks    │ │  rate limiting      │ │  pydantic_clai2       │
-└──────────────────┘ └─────────────────────┘ └───────────────────────┘
+```mermaid
+flowchart TD
+    CLI["partex CLI — engage, review, test, verify, runs, show, summarize, checks, agent, chat"]
+    Engine["Engine — load + validate, evidence registry, passive/active checks, verify runner, findings commit"]
+    Adapter["Agent adapter — Pydantic AI agent + scoped tools over CLAI2 chat(), interactive + --auto"]
+    Store[("RunStore — SQLite (engagements, runs, evidence, findings, verifications, tool_calls, summaries) + JSON export")]
+    Skills["Skill registry — skill dirs (data) + entry-point checks"]
+    Target["Target client — ScopedHttpClient (scope gate, capture, rate limiting)"]
+    PydanticAI["pydantic-ai core — Agent, TestModel, FunctionModel, pydantic_clai2"]
+
+    CLI --> Engine
+    CLI --> Adapter
+    Engine -->|single writer| Store
+    Adapter -->|read + tool audit| Store
+    Skills --> Engine
+    Skills --> Adapter
+    Target --> Engine
+    Target --> Adapter
+    PydanticAI --> Adapter
 ```
 
 Layer rules:
@@ -642,17 +633,17 @@ Two entry pipelines share one lifecycle core:
   passive checks over captures → run active checks (probes) → run verification on eligible
   findings → commit findings incrementally per stage (§6.1) → optionally summarize.
 
-```text
-load + validate ─▶ register evidence ─▶ checks (passive then active, local workers §7.1)
-     │                                          │
-  invalid                       findings committed per stage (§6.1) ─▶ checks_complete
-  (exit 1)                                          │
-                       ┌────────────────────────────┼─────────────────────────────┐
-                  --no-summary                 summarize (§11)          failure / timeout /
-                       │                           │                       Ctrl-C
-                       ▼                           ▼                           ▼
-                     done                      complete              stays checks_complete
-                                                                   (retry: summarize <run-id>)
+```mermaid
+flowchart TD
+    Start["load + validate"] -->|valid| Reg["register evidence"]
+    Start -->|invalid| Invalid["invalid (exit 1)"]
+    Reg --> Checks["checks: passive then active (local workers §7.1)"]
+    Checks -->|check raises| Failed["checks_failed (exit 1; live keeps prior commits §6.1)"]
+    Checks -->|findings committed per stage §6.1| CompleteChecks["checks_complete"]
+    CompleteChecks -->|--no-summary or no --model| Done["done"]
+    CompleteChecks -->|summarize §11| Summarize["generate + validate summary"]
+    Summarize -->|ok| Complete["complete"]
+    Summarize -->|failure / timeout / Ctrl-C| Retry["stays checks_complete (retry: partex summarize)"]
 ```
 
 Run states (stored, monotonic):
