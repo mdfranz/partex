@@ -1319,6 +1319,48 @@ def test_scope_refusal_advice_depends_on_the_rule() -> None:
     assert 'outside the engagement rules' in scope_refusal_advice(ScopeViolation('x', kind='path'))
 
 
+async def test_run_check_skill_name_names_the_check(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    """``run_check('header-review')`` is retried with the paired check ID, not an unknown-check error (#232)."""
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        result = await drive(session, tmp_store, [('run_check', {'check_id': 'header-review'})])
+        [retried] = tool_returns(result.all_messages())
+        assert retried.outcome == 'retried'
+        assert "'header-review' is a skill name, not a check ID; run header-security." in str(retried.content)
+
+
+async def test_run_check_unknown_skill_keeps_the_unknown_check_error(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    """A name that is neither a check ID, a rule ID, nor a known skill name keeps the plain retry."""
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        result = await drive(session, tmp_store, [('run_check', {'check_id': 'gateway-policy'})])
+        [retried] = tool_returns(result.all_messages())
+        assert retried.outcome == 'retried'
+        assert 'available' in str(retried.content)
+
+
+async def test_run_check_skill_with_uninstalled_checks_does_not_suggest_them(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    """A skill whose declared checks are not installed falls back to the available-checks retry (#232)."""
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        result = await drive(session, tmp_store, [('run_check', {'check_id': 'auth-session-controls'})])
+        [retried] = tool_returns(result.all_messages())
+        assert retried.outcome == 'retried'
+        assert 'available' in str(retried.content)
+        assert 'session-cookie-config' not in str(retried.content)
+
+
+def test_skill_check_hint_lists_multiple_installed_checks() -> None:
+    from partex.agent_adapter.tester import _skill_check_hint  # pyright: ignore[reportPrivateUsage]
+
+    hint = _skill_check_hint('auth-session-controls', {'session-cookie-config': object(), 'token-weakness': object()})
+    assert (
+        hint
+        == "'auth-session-controls' is a skill name, not a check ID; run one of: session-cookie-config, token-weakness."
+    )
+
+
 async def test_run_check_rule_id_names_the_owning_check(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
     async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
         result = await drive(session, tmp_store, [('run_check', {'check_id': 'error-page-disclosure'})])
