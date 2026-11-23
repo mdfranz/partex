@@ -12,7 +12,7 @@ The project grew out of a review of ARTEX and other open-source security testing
 - **Pydantic** (`pydantic`): Evidence and engagement records are `BaseModel`s with `extra='forbid'`, so unknown fields are rejected. Evidence is a discriminated union on `kind` (HTTP, config, and artifact), and `TypeAdapter` round-trips it through bundle import, SQLite storage, and export. Engagement validation errors are mapped onto the E-rule failure modes.
 - **Pydantic AI** (`pydantic-ai-slim`): `Agent` and `RunContext` back the read-only reviewer and the live tester. `Capability` defers each skill playbook until the model calls `load_capability`. `WebSearch(local=None)` runs provider-native search in a separate agent with no function tools. `framing.wrap` and `register_tag` mark tool results as untrusted target data. A `WrapperModel` records token usage for each request in `llm_usage`.
 - **Pydantic AI Harness** (`pydantic-ai-harness`): Supplies `CodeMode`, which connects Monty to the agent, and the `ask_user` request type that write approvals use.
-- **CLAI2** (`pydantic-clai2`): `chat()` runs the terminal loop. The reviewer runs with `load_plugins=False`. The `/scope` command is a CLAI2 `Plugin` with a `Command`. Write approvals reuse CLAI2's `TerminalAnswerer` picker, and chat history and settings are stored in `partex.db.clai2/`.
+- **CLAI2** (`pydantic-clai2`): `chat()` runs the terminal loop. `/scope` and `/targets` are CLAI2 `Plugin`s with operator-only `Command`s (`partex chat` loads only the read-only `/targets` plugin). Write approvals reuse CLAI2's `TerminalAnswerer` picker, and chat history and settings are stored in `partex.db.clai2/`.
 - **Monty** (`pydantic-monty`): The live tester's `run_code` tool runs with `eager=True`, `max_tool_calls=50`, a 10-second limit, and 256 MiB of memory. `/artifacts` is a read-only `MountDir` holding the run's downloads. `os_access` is `None`, so the sandbox has no environment, clock, network, or shell. `partex sandboxes` reports the installed Monty version.
 
 [Runtime](RUNTIME.md) · [Dependencies](DEPS.md)
@@ -31,6 +31,7 @@ This example reviews bundled HTTP traffic offline. It prints sample findings and
 ## What you can do
 
 - **Run authorized live checks.** Capture responses within a defined target scope and request budget, then save the evidence alongside the findings.
+- **Authorize targets from a URL list or a scan.** Restrict a session to an exact URL list (`-u urls.txt`), or import authorized targets from `nmap -oX` scan output (`-N scan.xml`): each open HTTP(S) port becomes a `scheme://host:port/*` entry, and ports running other services are reported and skipped.
 - **Work with saved results.** List past runs, export reports or captured traffic, and use read-only chat to review findings and their evidence.
 - **Review captured traffic.** Import a browser's HTTP archive (HAR) and check saved responses for issues such as missing security headers or insecure cookie settings. Offline checks run without a model.
 
@@ -46,6 +47,7 @@ Skills are Markdown playbooks in [`skills/`](skills/) that the interactive sessi
 | [`api-inventory`](skills/api-inventory/SKILL.md) | passive | [`api-contract-conformance`](src/partex/checks/api_inventory.py) | A normalized inventory of observed API operations, reconciled against declared OpenAPI contracts (shadow routes, unobserved operations, schema gaps) | [contract matching](skills/api-inventory/reference/contract-matching.md), [research notes](docs/skills/api-inventory.md) |
 | [`openapi-spec-review`](skills/openapi-spec-review/SKILL.md) | passive | [`openapi-spec-review`](src/partex/checks/openapi_spec_review.py) | Spec-level gaps in OpenAPI 3.0 and 3.1 documents: missing authentication, weak security schemes, internal server URLs, credential query parameters, and sensitive response properties | none |
 | [`server-error`](skills/server-error/SKILL.md) | passive | [`server-error`](src/partex/checks/server_error.py) | Unhandled HTTP 5xx responses and debug-page disclosure already present in captured evidence | none |
+| [`privacy-review`](skills/privacy-review/SKILL.md) | passive | [`privacy-signals`](src/partex/checks/privacy_signals.py) | Third-party tracker, analytics, session-replay, error-monitoring, advertising, support-chat and CAPTCHA SDKs referenced by captured pages, scripts and runtime config, and whether any consent-management signal accompanies non-essential ones (static signals, not verdicts) | [tracker signatures](skills/privacy-review/reference/tracker-signatures.md), [research notes](docs/skills/privacy-review.md) |
 | [`authorization-testing`](skills/authorization-testing/SKILL.md) | active and passive | [`authz-boundary`](src/partex/checks/authorization.py) | Broken object-level and function-level authorization (BOLA, IDOR, BFLA) by replaying operations across two engagement roles | [role-pair probing](skills/authorization-testing/reference/role-pair-probing.md), [research notes](docs/skills/authorization-testing.md) |
 | [`auth-session-controls`](skills/auth-session-controls/SKILL.md) | passive and active | Not yet registered | Session cookie configuration and token lifecycle weaknesses. Its checks (`session-cookie-config`, `token-weakness`) are not installed, so the skill is left out of the catalog until they are | [session and token checks](skills/auth-session-controls/reference/session-and-token-checks.md), [research notes](docs/skills/auth-session-controls.md) |
 
@@ -63,7 +65,7 @@ Each skill's research notes in [`docs/skills/`](docs/skills/README.md) record th
 
 `--search-model` takes `anthropic:<model>` (`ANTHROPIC_API_KEY`), `google:<model>` (`GOOGLE_API_KEY` or `GEMINI_API_KEY`), `google-cloud:<model>` (Application Default Credentials and `GOOGLE_CLOUD_PROJECT`), or `openai:<model>` (`OPENAI_API_KEY`, Responses API). OpenAI search has no per-query search limit and costs more per query than the others, so prefer a small model. `google-cloud:` uses the `global` location by default, since newer Gemini models are only served there; set `GOOGLE_CLOUD_LOCATION` to override it.
 
-The live terminal includes a built-in CLAI2 plugin for operator commands. `/scope` shows the current scope and requires operator confirmation for changes; with `-k` (`--insecure`), hosts it adds are not certificate-verified either, and the confirmation says so. `/report` writes a redacted Markdown report, and `/secrets` writes secret values to a private file.
+The terminal sessions include built-in CLAI2 plugins for operator commands. `/targets` (`TargetsPlugin`, also usable standalone in CLAI2 via `partex.agent_adapter.targets_plugin:TargetsPlugin`) gives a deterministic, redacted summary of what has been discovered across all targets in the current run or across saved runs (`--all`, `--findings`, or `/targets <host>`). In live `agent` sessions, `/scope` shows the current scope and requires operator confirmation for changes; with `-k` (`--insecure`), hosts it adds are not certificate-verified either, and the confirmation says so. `/scope nmap scan.xml` stages an nmap import for `/scope confirm`, which applies the whole batch as one recorded scope change that names the scan file and its hash. `/report` writes a redacted Markdown report, and `/secrets` writes secret values to a private file.
 
 Use `partex reports RUN_ID` to list reports saved by `save_report` and `partex reports RUN_ID NAME` to print one as Markdown. Both forms accept `--db PATH` and `--json`.
 
@@ -100,10 +102,24 @@ To use Z.ai's GLM-5.3 through Pydantic AI Gateway, set `PYDANTIC_AI_GATEWAY_API_
 ./partex.sh -m zai-org/GLM-5.3 -r doubleword --resume
 ```
 
+To run a live session using Gemini directly for both the main model (`-m`) and native `web_search` (`-S`), set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and use the `google:` provider prefix. No Gateway key is needed when using a direct `google:` model string; omit `-S` to leave web search off (or pass `--resume` without `-S` for read-only chat).
+
+```sh
+./partex.sh -m google:gemini-3.8-flash -S google:gemini-3.8-flash http://127.0.0.1:8765/
+```
+
+If Gemini's configurable content filters interfere with a session (`finishReason: SAFETY` — authorized security testing discusses exploit and payload evidence, which the "dangerous content" category can flag), note that partex **disables them by default** for `google:` and `google-cloud:` model roles: startup prints the effective thresholds, and the provider's non-configurable CSAM and PII filters stay on regardless. To change the thresholds, set `PARTEX_GOOGLE_SAFETY_SETTINGS` to a preset (`off`, `high`) or a JSON `[{"category": "HARM_CATEGORY_…", "threshold": "BLOCK_…"}]` list; set on a non-Google model it refuses to start.
+
+```sh
+PARTEX_GOOGLE_SAFETY_SETTINGS=off ./partex.sh -m google:gemini-3.8-flash http://127.0.0.1:8765/
+```
+
 ## Commands and documentation
 
 - `./partex.sh --help` shows options for the interactive testing launcher.
 - `./partex.sh -u urls.txt <target-url>` restricts the session to the URLs in `urls.txt` (one per line, `#` comments, a trailing `/*` allows a path prefix). The target URL is optional with `-u`: the first listed URL is used (an explicit one must be listed). A URL without a port covers both 80 and 443; add `:port` to pin one. Anything unlisted is refused by the scope gate. Add `--recursive` to treat every listed URL as a path prefix, so a file containing `http://foo/` allows everything under `foo`.
+- `./partex.sh -N scan.xml <target-url>` imports authorized targets from `nmap -oX` scan output. Each open HTTP(S) port on an up host becomes a `scheme://host:port/*` entry in the session's URL list, so only scanned host:port targets can be requested. Ports running other services (SSH, databases, TLS-wrapped non-HTTP) are reported and skipped, never guessed. The session opens with one initial `GET` per listed target, each captured as evidence and shown live on a terminal; `--max-requests` is raised automatically when the import needs the room. The target URL is optional with `-N`: the first imported entry is used (an explicit one must be listed). Combine with `-u` to merge a hand-written list. Set `PARTEX_NMAP_FILE` to pass the scan without the flag.
+- `uv run partex nmap scan.xml [--use-hostnames] [--out targets.txt]` converts a scan without opening a session: it prints the entries and the skip report, or writes them to a `--urls-file` with `# source:` lines recording each scan file and its hash, so you can review and edit the list before it becomes scope. With `--use-hostnames`, entries use the scan's PTR hostnames instead of the scanned IPs (reverse DNS can be stale, so IPs are the default). Several scan files merge, such as a plain sweep plus a `-sV` version pass.
 - `./partex.sh list` lists saved runs from the default database.
 - `uv run partex --help` lists the available CLI commands.
 

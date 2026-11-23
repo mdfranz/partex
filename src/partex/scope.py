@@ -260,6 +260,11 @@ _PREFIX_SUFFIX = '/*'
 _DEFAULT_PORT_SET = frozenset({80, 443})
 
 
+def entry_url(entry: str) -> str:
+    """The plain URL an allowlist *entry* names — the trailing ``/*`` prefix marker dropped."""
+    return _entry_url(entry)
+
+
 def _entry_url(entry: str) -> str:
     """The plain URL of an allowlist *entry*: a trailing ``/*`` (prefix marker) is dropped."""
     return entry.removesuffix(_PREFIX_SUFFIX) or '/' if entry.endswith(_PREFIX_SUFFIX) else entry

@@ -27,6 +27,7 @@ and gateway policy verification.
 | **P1.1 (S1)** | [api-inventory.md](api-inventory.md) | `skills/api-inventory/` (shipped, #24) | `api-contract-conformance` | `passive` | OpenAPI 3.0.3 / 3.1.0, JSON Schema 2020-12, OWASP API3:2023 & API9:2023 |
 | **P1.2 (S2)** | [authorization-testing.md](authorization-testing.md) | `skills/authorization-testing/` | `authz-boundary` | `active` + `passive` (`verify_recipe`) | OWASP API1:2023, API3:2023, API5:2023, WSTG-ATHZ-01..04 |
 | **P1.3 (S3)** | [auth-session-controls.md](auth-session-controls.md) | `skills/auth-session-controls/` | `session-cookie-config`, `token-weakness` | `passive` + `active` (`verify_recipe`) | RFC 8725 (JWT BCP), RFC 7515–7519, RFC 6265bis, OWASP API2:2023, WSTG-SESS/ATHN |
+| **P1.4 (#224)** | [privacy-review.md](privacy-review.md) | `skills/privacy-review/` | `privacy-signals` | `passive` | GDPR Arts. 5-7/13, ePrivacy Art. 5(3), OWASP Top 10 Privacy Risks, ASVS V8 (signals only, no legal conclusions) |
 | **P2.2 (S5) + M7** | [gateway-and-spa-recon.md](gateway-and-spa-recon.md) | `gateway-policy` (planned) + M7 `browser.py` | `gateway-policy` (planned) | `passive` + `active` + browser harness | OWASP API4:2023, RFC 8594 (`Sunset`), RFC 9745 (`Deprecation`), IETF `RateLimit` |
 | **Data-only (follow-up check)** | [graphql.md](graphql.md) | `skills/graphql/` (shipped, #192) | — (`checks: []`; deterministic check follow-up) | `passive` + `active` | GraphQL & GraphQL-over-HTTP specs, OWASP WSTG-APIT-01, API1/API3/API4/API5:2023, Apollo CSRF/Federation |
 

@@ -45,6 +45,9 @@ htmlcov/
 /pydantic-clai2/
 /pydantic-monty*/
 
+# Operator scan artifacts from local network recon — never commit (issue #215).
+/nmap*.xml
+
 # Downloaded assets, operator exports, saved reports, and chat history beside the local DB.
 *.db.artifacts/
 *.db.exports/
