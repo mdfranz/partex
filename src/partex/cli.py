@@ -29,6 +29,7 @@ from .errors import PartexError
 from .export import IncludeSecretsWarning, export_run_data, write_run_export
 from .har_io import export_bundle, import_har
 from .ids import canonical_json
+from .nmap import convert_nmap
 from .paths import STATE_DIR_ENV, state_dir
 from .probes import seed_summary
 from .registry import build_registry
@@ -286,6 +287,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_bundle_cmd.set_defaults(handler=_cmd_export_bundle)
 
+    nmap_cmd = subparsers.add_parser(
+        'nmap',
+        parents=[common],
+        help='convert nmap -oX scan output into authorized-URL-list entries (pure conversion; review before use)',
+    )
+    nmap_cmd.add_argument(
+        'files', nargs='+', metavar='XML', help='nmap -oX scan file(s); several merge (a sweep plus a -sV pass)'
+    )
+    nmap_cmd.add_argument(
+        '--use-hostnames',
+        action='store_true',
+        help='entry hosts from the scan PTR hostnames instead of the scanned IPs (reverse DNS can be stale)',
+    )
+    nmap_cmd.add_argument(
+        '--out', default=None, metavar='PATH', help='write the entries to this --urls-file instead of stdout'
+    )
+    nmap_cmd.add_argument('--json', action='store_true', help='JSON output even on a TTY')
+    nmap_cmd.set_defaults(handler=_cmd_nmap)
+
     checks = subparsers.add_parser('checks', parents=[common], help='list installed checks')
     checks.add_argument('--json', action='store_true', help='JSON output even on a TTY')
     checks.add_argument(
@@ -308,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.set_defaults(handler=_cmd_verify)
 
     chat = subparsers.add_parser(
-        'chat', parents=[with_db], help='read-only review chat over a saved run (CLAI2 terminal, no plugins)'
+        'chat', parents=[with_db], help='read-only review chat over a saved run (CLAI2 terminal)'
     )
     chat.add_argument('run_id', help='run id (run_…)')
     chat.add_argument(
@@ -664,6 +684,32 @@ def _cmd_reports(args: argparse.Namespace) -> int:
                 print(f'{report.name}\t{report.size_bytes} bytes\t{report.mtime}\t{report.sha256}')
         else:
             print('No saved reports.')
+    return EXIT_OK
+
+
+# ── nmap (issue #215) ──────────────────────────────────────────────────────────
+
+
+def _cmd_nmap(args: argparse.Namespace) -> int:
+    imported = convert_nmap(args.files, use_hostnames=args.use_hostnames)
+    lines = imported.as_lines()
+    if args.out:
+        Path(args.out).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    if _wants_json(args.json):
+        _print_json(
+            {
+                'entries': imported.entries,
+                'hosts': imported.hosts,
+                'skipped': imported.skipped,
+                'sources': [{'path': s.path, 'sha256': s.sha256} for s in imported.sources],
+                'out': args.out,
+            }
+        )
+    else:
+        print('\n'.join(lines))
+        where = f'written to {args.out}' if args.out else 'printed above'
+        print(f'{len(imported.entries)} URL entries across {len(imported.hosts)} host(s), {where}')
+        print('pass it to a session with: partex.sh -u <file> (or partex test|agent --urls-file <file>)')
     return EXIT_OK
 
 

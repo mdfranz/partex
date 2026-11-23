@@ -7,13 +7,14 @@ Driven headlessly with a scripted ``FunctionModel``; the CLAI2 terminal itself i
 import ast
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.settings import ModelSettings
 
 from partex.agent_adapter import ReviewDeps, build_reviewer_agent
 from partex.agent_adapter.tools import UNTRUSTED_TAG
@@ -121,6 +122,16 @@ def test_agent_is_named_and_needs_no_credentials_to_build() -> None:
         'lookup_research',
         'read_report',
     ]
+
+
+def test_reviewer_carries_operator_google_safety_settings() -> None:
+    """The operator's Gemini filter opt-in (#218) reaches the chat agent; default is none."""
+    safety = cast(
+        'ModelSettings',
+        {'google_safety_settings': [{'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'OFF'}]},
+    )
+    assert build_reviewer_agent('test', model_settings=safety).model_settings == safety
+    assert build_reviewer_agent('test').model_settings is None
 
 
 async def test_tools_read_the_run_redacted_and_framed(
@@ -255,7 +266,7 @@ async def test_saved_report_tools_frame_content_and_audit_metadata(
     ]
 
 
-async def test_run_chat_hands_clai2_the_reviewer_with_plugins_off(
+async def test_run_chat_hands_clai2_the_reviewer_with_only_targets_plugin(
     seeded: tuple[RunReader, str, str, HttpEvidence, HttpEvidence, Finding],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -272,7 +283,8 @@ async def test_run_chat_hands_clai2_the_reviewer_with_plugins_off(
     monkeypatch.setattr(partex.agent_adapter, 'chat', fake_chat)
     await run_chat(run_id, reader.path, TestModel())
     (call,) = calls
-    assert call['load_plugins'] is False
+    assert call['load_plugins'] is True
+    assert [plugin.id for plugin in call['builtin_plugins']] == ['partex_targets']
     assert call['store'].path == tmp_path / 'partex.db.clai2' / 'config.db'
     # Saved CLAI2 preferences can't swap the model or fold tools into a run_code sandbox.
     assert (call['settings'].model, call['settings'].code_mode, call['settings'].speculative_code_mode) == (
@@ -386,7 +398,8 @@ async def test_chat_opens_with_a_briefing_the_agent_remembers(
     shown = buffer.getvalue()
     assert f'briefing · {run_id}' in shown and 'Overview' in shown and finding.id in shown
     (call,) = calls
-    assert call['console'] is console and call['load_plugins'] is False
+    assert call['console'] is console and call['load_plugins'] is True
+    assert [plugin.id for plugin in call['builtin_plugins']] == ['partex_targets']
     instructions = call['instructions']
     assert finding.id in instructions  # the chat agent knows what was already said
     assert instructions.count(f'</{BRIEFING_TAG}>') == 1  # the model's text cannot close the frame

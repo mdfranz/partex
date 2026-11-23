@@ -113,6 +113,19 @@ def test_urls_file_must_exist_before_any_traffic(tmp_path: Path) -> None:
     assert 'URLs file not found' in result.stderr
 
 
+def test_nmap_file_must_exist_before_any_traffic(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ['bash', str(SCRIPT), '-a', 'test attestation', '-N', str(tmp_path / 'missing.xml')],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 1
+    assert 'nmap scan file not found' in result.stderr
+
+
 def _run_urls(tmp_path: Path, content: str) -> subprocess.CompletedProcess[str]:
     (tmp_path / 'urls.txt').write_text(content)
     return subprocess.run(  # relative -u path from outside the repo; port 9 on loopback refuses, so no real traffic

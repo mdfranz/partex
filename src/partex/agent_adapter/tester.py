@@ -26,6 +26,7 @@ from pydantic_ai import Agent, ModelRetry, RunContext, ToolFailed
 from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.framing import wrap
 from pydantic_ai.models import Model
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai_harness.code_mode import CodeMode, CodeModeResourceLimits
 from pydantic_monty import MountDir
 
@@ -632,11 +633,14 @@ def build_tester_agent(
     skills: Sequence[AgentCapability[TesterDeps]] = (),
     artifacts_dir: Path | None = None,
     web_search_enabled: bool = False,
+    model_settings: ModelSettings | None = None,
 ) -> Agent[TesterDeps, str]:
     """Construct the tester for *model*; *briefing* (shown at session start) is added as framed context.
 
     *skills* are the on-demand skill capabilities (#59); *artifacts_dir* is mounted read-only at
-    ``/artifacts`` inside ``run_code`` (#83); *web_search_enabled* registers ``web_search`` (#111).
+    ``/artifacts`` inside ``run_code`` (#83); *web_search_enabled* registers ``web_search`` (#111);
+    *model_settings* carries the operator's Gemini content-filter opt-in (#218) when *model* is a
+    Google one.
     """
     instructions = TESTER_INSTRUCTIONS + (
         WEB_SEARCH_ENABLED_LINE if web_search_enabled else WEB_SEARCH_UNAVAILABLE_LINE
@@ -655,6 +659,7 @@ def build_tester_agent(
         instructions=instructions,
         tools=tools,
         capabilities=[code_mode_capability(artifacts_dir), *skills],
+        model_settings=model_settings,
         defer_model_check=True,
     )
 

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<!-- Synthetic fixture: a plain -sS sweep (no service detection) over 192.168.1.0/24; see tests/test_nmap.py -->
+<nmaprun scanner="nmap" args="nmap -vv -sS -oX sweep.xml 192.168.1.0/24" start="1795370878" startstr="Sun Nov 22 18:07:58 2026" version="7.98" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="3" services="22,80,443"/>
+<verbose level="2"/>
+<debugging level="0"/>
+<taskbegin task="Ping Scan" time="1795370878"/>
+<hosthint><status state="up" reason="unknown-response" reason_ttl="0"/>
+<address addr="192.168.1.29" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+</hosthint>
+<taskend task="Ping Scan" time="1795370882" extrainfo="256 total hosts"/>
+<host><status state="down" reason="no-response" reason_ttl="0"/>
+<address addr="192.168.1.2" addrtype="ipv4"/>
+</host>
+<host><status state="up" reason="unknown-response" reason_ttl="0"/>
+<address addr="192.168.1.1" addrtype="ipv4"/>
+<address addr="00:11:22:33:44:55" addrtype="mac"/>
+<hostnames><hostname name="router.local" type="PTR"/></hostnames>
+<ports><extraports state="closed" count="2"><extrareasons reason="reset" count="2"/></extraports>
+<port protocol="tcp" portid="22"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="ssh" method="table" conf="3"/></port>
+</ports>
+</host>
+<host><status state="up" reason="unknown-response" reason_ttl="0"/>
+<address addr="192.168.1.29" addrtype="ipv4"/>
+<address addr="00:aa:bb:cc:dd:ee" addrtype="mac"/>
+<hostnames><hostname name="app.local" type="PTR"/></hostnames>
+<ports><extraports state="closed" count="0"/>
+<port protocol="udp" portid="53"><state state="open"/></port>
+<port protocol="tcp" portid="53"><state state="closed"/></port>
+<port protocol="tcp" portid="80"><state state="open" reason="syn-ack" reason_ttl="64"/></port>
+<port protocol="tcp" portid="443"><state state="open" reason="syn-ack" reason_ttl="64"/></port>
+</ports>
+</host>
+<runstats><finished time="1795370882" timestr="Sun Nov 22 18:08:02 2026" elapsed="4.00" summary="256 hosts scanned (2 up)"/><hosts up="2" down="254" total="256"/>
+</runstats>
+</nmaprun>
