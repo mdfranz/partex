@@ -356,7 +356,7 @@ async def test_agent_download_asset_and_js_analysis_e2e(tmp_store: RunStore, tmp
 
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     port = int(server.server_address[1])
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True)
     thread.start()
 
     eng_dir = tmp_path / 'engagement'
