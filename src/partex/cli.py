@@ -169,6 +169,9 @@ async def _write_export(store: RunStore, run_id: str, out: str | None) -> None:
 # ── Parser ────────────────────────────────────────────────────────────────────
 
 
+THINKING_LEVELS = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max')
+
+
 def _request_limit_help() -> str:
     from .agent_adapter import DEFAULT_REQUEST_LIMIT
 
@@ -385,6 +388,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent.add_argument('--no-briefing', action='store_true', help='open the chat without the opening summary')
     agent.add_argument('--request-limit', type=_positive_int, default=None, metavar='N', help=_request_limit_help())
+    agent.add_argument(
+        '--thinking',
+        choices=THINKING_LEVELS,
+        default=None,
+        help="tester model's reasoning effort (default: the provider's); lower is faster and cheaper",
+    )
     agent.add_argument('--skill-dir', **SKILL_DIR_ARGS)
     agent.set_defaults(handler=_cmd_agent)
 
@@ -896,6 +905,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             briefing=not args.no_briefing,
             skills=_session_skills(args),
             search_model=search_model,
+            thinking=args.thinking,
             **_request_limit_kwargs(args),
         )
     )

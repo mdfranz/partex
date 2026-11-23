@@ -9,12 +9,13 @@ new live session, adding ``partex_scope`` and the tester's scoped ``http_request
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
+from typing import cast
 
 import anyio.to_thread
 from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.exceptions import AgentRunError
 from pydantic_ai.models import Model
-from pydantic_ai.settings import ModelSettings
+from pydantic_ai.settings import ModelSettings, ThinkingLevel
 from pydantic_ai.usage import UsageLimits
 
 # Imported at module level, before any tool frames text: CLAI2 registers its own framing tags at
@@ -103,6 +104,13 @@ async def _pause_on(summary: str | None, console: Console) -> None:
         await anyio.to_thread.run_sync(lambda: console.input('[dim]Press Enter to open the chat…[/]'))
 
 
+def tester_settings(base: ModelSettings | None, thinking: ThinkingLevel | None) -> ModelSettings | None:
+    """*base* plus the operator's reasoning-effort choice; reasoning dominates latency and output tokens."""
+    if thinking is None:
+        return base
+    return cast('ModelSettings', {**(base or {}), 'thinking': thinking})
+
+
 def _safety_warning(console: Console, settings: ModelSettings | None) -> None:
     """Print the startup line for a relaxed Gemini filter set (#218), so the transcript shows it."""
     if summary := google_safety_summary(settings):
@@ -168,6 +176,7 @@ async def run_agent(
     skills: Sequence[AgentCapability[TesterDeps]] = (),
     search_model: SearchModelConfig | None = None,
     request_limit: int = DEFAULT_REQUEST_LIMIT,
+    thinking: ThinkingLevel | None = None,
     console: Console | None = None,
 ) -> str:
     """Open a new live session on *engagement_path*, brief, then let the operator direct probes in CLAI2.
@@ -177,6 +186,7 @@ async def run_agent(
     With *bundle*, the imported capture's surface (method+URL candidates, scope-filtered against
     this engagement, #76) is exposed to the session read-only — shown to the operator, included in
     the agent's context, and recorded as a ``seed_surface`` audit row; nothing is sent automatically.
+    *thinking* sets the tester model's reasoning effort (None leaves the provider default).
     Returns the session's run ID.
     """
     console = console or Console()
@@ -252,7 +262,7 @@ async def run_agent(
                 skills=skills,
                 artifacts_dir=artifacts,
                 web_search_enabled=searcher is not None,
-                model_settings=safety,
+                model_settings=tester_settings(safety, thinking),
             )
             # The operator-only /scope command is a CLAI2 plugin (slash commands exist only as plugins). A
             # private, empty settings store keeps the operator's saved and drop-in CLAI2 plugins out, and

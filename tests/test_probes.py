@@ -346,6 +346,7 @@ async def test_agent_bundle_exposes_the_surface_read_only(
     seen: dict[str, Any] = {}
 
     async def fake_chat(agent: Agent[TesterDeps, str], **kwargs: Any) -> None:
+        seen['agent'] = agent
         seen['deps'] = kwargs['deps']
         seen['usage_limits'] = kwargs['usage_limits']
 
@@ -360,9 +361,11 @@ async def test_agent_bundle_exposes_the_surface_read_only(
         bundle=seed_bundle,
         briefing=False,
         request_limit=120,
+        thinking='low',
     )
 
     assert seen['usage_limits'].request_limit == 120
+    assert seen['agent'].model_settings['thinking'] == 'low'
     deps = seen['deps']
     assert deps.seed_surface == (f'GET {seeded_path}',)
     async with await RunStore.open(db) as store:
