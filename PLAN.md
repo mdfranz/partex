@@ -117,7 +117,7 @@ flowchart TD
     CLI["partex CLI — engage, review, test, verify, runs, show, summarize, checks, agent, chat"]
     Engine["Engine — load + validate, evidence registry, passive/active checks, verify runner, findings commit"]
     Adapter["Agent adapter — Pydantic AI agent + scoped tools over CLAI2 chat(), interactive + --auto"]
-    Store[("RunStore — SQLite (engagements, runs, evidence, findings, verifications, tool_calls, summaries) + JSON export")]
+    Store[("RunStore — SQLite (engagements, runs, evidence, findings, verifications, tool_calls, coverage_entries, web_research) + JSON export")]
     Skills["Skill registry — skill dirs (data) + entry-point checks"]
     Target["Target client — ScopedHttpClient (scope gate, capture, rate limiting)"]
     PydanticAI["pydantic-ai core — Agent, TestModel, FunctionModel, pydantic_clai2"]
@@ -180,7 +180,6 @@ the root where they already are:
                            #   per-role ModelSettings (thinking, cache, timeouts)
     errors.py              # PartexError, ValidationFailed (rule code), ScopeViolation, BudgetExhausted
     registry.py            # check/skill discovery and join
-    surface.py             # deterministic surface graph population (nodes/edges) from evidence
     checks/
       __init__.py          # PassiveCheck / ActiveCheck / TargetClient protocols, FindingDraft,
                            #   VerificationRecipe, draft validation
@@ -194,7 +193,7 @@ the root where they already are:
                            #   (httpx2, follow_redirects=False, pinned resolver + SNI)
     verify.py              # verification runner: minimal PoC replay, verdict, evidence
     engine.py              # run lifecycle, ordered execution, failure policy, single writer
-    storage.py             # SQLite RunStore, schema, migrations
+    storage.py             # SQLite RunStore, schema v5, version gate
     export.py              # JSON export with default secret redaction
     summarize.py           # model-backed ReviewSummary generation + reference validation
     agent_adapter/         # the only package that imports pydantic_clai2
@@ -231,7 +230,7 @@ the build backend force-includes them into the wheel at `partex/skills/` and the
 loads them through `importlib.resources`. They remain data: nothing under `skills/` is imported
 or executed. `fixtures/` and `tests/` are not shipped.
 
-The module splits above (`errors.py`, `surface.py`, one module per built-in check, and
+The module splits above (`errors.py`, one module per built-in check, and
 `agent_adapter/` as a package) exist so independent work items own disjoint files; the
 architectural boundaries in §2 are unchanged (`agent_adapter` is still the only importer of
 `pydantic_clai2`, `target.py` still the only engine socket-opening module, with the M7
@@ -652,9 +651,9 @@ Run states (stored, monotonic):
 |---|---|---|
 | `created` | run row opened, input path recorded | no |
 | `invalid` | input failed validation; diagnostic stored | no |
-| `checks_complete` | all selected checks finished; findings committed | **yes** |
+| `checks_complete` | all selected checks finished; findings committed (agent sessions end here with `ended_at` set) | **yes** |
 | `checks_failed` | a check raised; error stored | partial (see §6.1) |
-| `complete` | summary generated and reference-validated | yes |
+| `complete` | summary generated and reference-validated (M4 only; schema deferred until M4 ships) | yes |
 
 ### 6.1 Failure and commit policy
 
@@ -687,6 +686,12 @@ present"); `1` fatal (invalid input, unauthorized, scope error at startup, stora
 crash); `130` interrupted.
 
 ## 7. Storage and export
+
+> **The database is the engagement record; logs and Logfire are diagnostics.**
+> - A fact goes in SQLite only if (a) it shows what was authorized, sent to the target, captured, or concluded, or (b) partex reads it back (read tools, `report`, `show`, export). The record must be complete with `--log-file off` and without `--logfire`.
+> - How the model got there (turns, prompts, per-call tokens and latency, read-only lookups) is span data: the local JSONL log, plus Logfire when opted in (§11.1, #238).
+> - No table or column without a writer in the same milestone; a planned feature adds its schema when it ships.
+> - **Before 1.0 there are no migrations.** A schema change bumps `user_version`, and older stores are refused with a clear message. `export-bundle` / `show --format json` is how data moves between versions; `scripts/clean-state.sh` (#242) removes old stores.
 
 Single SQLite file, stdlib `sqlite3`, WAL mode. The CLI and launcher use `PARTEX_STATE_DIR`
 as the state directory when set, resolving relative values from the caller's working directory.
@@ -738,30 +743,37 @@ CREATE TABLE engagements (
 CREATE TABLE runs (
   id TEXT PRIMARY KEY,            -- "run_" + uuid4
   created_at TEXT NOT NULL,
+  ended_at TEXT,                  -- set when a session or run ends (distinguishes finished from crashed)
   state TEXT NOT NULL,
   input_kind TEXT NOT NULL,       -- 'bundle' | 'engagement'
-  input_ref TEXT NOT NULL,        -- bundle path or engagement id
+  input_ref TEXT NOT NULL,        -- bundle path or engagement path
   input_sha256 TEXT NOT NULL,     -- fingerprint over sorted (file, sha256(file))
+  engagement_id TEXT REFERENCES engagements, -- set on live runs; read tools match "same target" on this
   engine_version TEXT NOT NULL,
   selected_checks TEXT NOT NULL,  -- JSON array, selection order
   authorized_flag INTEGER NOT NULL DEFAULT 0,  -- --authorized was passed (live runs)
   model TEXT,
+  model_calls INTEGER NOT NULL DEFAULT 0,      -- run-level model call count
+  input_tokens INTEGER NOT NULL DEFAULT 0,     -- run-level input token total
+  output_tokens INTEGER NOT NULL DEFAULT 0,    -- run-level output token total
   requests_spent INTEGER NOT NULL DEFAULT 0,   -- live runs: outbound requests consumed
-  write_requests_spent INTEGER NOT NULL DEFAULT 0, -- live runs: state-changing sends consumed (schema v4, #65)
+  write_requests_spent INTEGER NOT NULL DEFAULT 0, -- live runs: state-changing sends consumed (#65)
   scope_snapshot TEXT,            -- serialized Scope (live runs), for cross-run coverage comparison
-  error TEXT,                     -- check/validation failure diagnostic
-  summary_error TEXT              -- summary generation/validation failure diagnostic
+  error TEXT                      -- check/validation failure diagnostic
 );
 CREATE TABLE evidence (
   run_id TEXT NOT NULL REFERENCES runs,
   evidence_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
   kind TEXT NOT NULL,
   content TEXT NOT NULL,          -- serialized Evidence (incl. secret_fields)
-  PRIMARY KEY (run_id, evidence_id)
+  PRIMARY KEY (run_id, evidence_id),
+  UNIQUE (run_id, seq)
 );
 CREATE TABLE findings (
   run_id TEXT NOT NULL REFERENCES runs,
   finding_id TEXT NOT NULL,
+  finding_key TEXT NOT NULL,      -- hash of (check_id, subject, title): stable identity across runs
   check_id TEXT NOT NULL,
   check_version TEXT NOT NULL,
   severity TEXT NOT NULL,
@@ -771,8 +783,10 @@ CREATE TABLE findings (
   evidence_ids TEXT NOT NULL,     -- JSON array
   remediation TEXT NOT NULL,
   status TEXT NOT NULL,           -- reported | verified | verification_failed
+  verification_id TEXT,
   PRIMARY KEY (run_id, finding_id)
 );
+CREATE INDEX idx_findings_finding_key ON findings (finding_key);
 CREATE TABLE verifications (
   run_id TEXT NOT NULL REFERENCES runs,
   verification_id TEXT NOT NULL,
@@ -782,37 +796,16 @@ CREATE TABLE verifications (
   created_at TEXT NOT NULL,
   PRIMARY KEY (run_id, verification_id)
 );
-CREATE TABLE tool_calls (
+CREATE TABLE tool_calls (         -- actions only: target sends/refusals, write_approval, scope_amend,
+                                  --   tls_verify_disabled, download_asset, run_check, web_search,
+                                  --   save_report, initial_probe (read-only lookups are spans only)
   run_id TEXT NOT NULL REFERENCES runs,
   call_id TEXT NOT NULL,          -- "tc_" + uuid4
-  tool TEXT NOT NULL,             -- http_request | run_check | request_verification | ...
+  tool TEXT NOT NULL,
   args TEXT NOT NULL,             -- JSON, secret values redacted at capture
   result TEXT NOT NULL,           -- JSON summary (typed error or committed-effect reference)
   created_at TEXT NOT NULL,
   PRIMARY KEY (run_id, call_id)
-);
-CREATE TABLE summaries (
-  run_id TEXT PRIMARY KEY REFERENCES runs,
-  content TEXT NOT NULL,
-  model TEXT NOT NULL,
-  generated_at TEXT NOT NULL
-);
-CREATE TABLE surface_nodes (
-  run_id TEXT NOT NULL REFERENCES runs,
-  node_id TEXT NOT NULL,          -- deterministic hash of (kind, key)
-  kind TEXT NOT NULL,             -- host | endpoint | parameter | role | tech_banner
-  key TEXT NOT NULL,              -- normalized key (e.g. "GET /users/{id}" per §12)
-  metadata TEXT NOT NULL,         -- JSON attributes
-  evidence_ids TEXT NOT NULL,     -- JSON array of supporting evidence_ids
-  PRIMARY KEY (run_id, node_id)
-);
-CREATE TABLE surface_edges (
-  run_id TEXT NOT NULL REFERENCES runs,
-  src_id TEXT NOT NULL,
-  dst_id TEXT NOT NULL,
-  rel TEXT NOT NULL,              -- exposes_endpoint | accepts_param | authenticated_as | redirects_to
-  evidence_id TEXT,
-  PRIMARY KEY (run_id, src_id, dst_id, rel)
 );
 CREATE TABLE coverage_entries (
   run_id TEXT NOT NULL REFERENCES runs,
@@ -826,25 +819,12 @@ CREATE TABLE coverage_entries (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (run_id, surface, risk_area)
 );
-CREATE TABLE llm_usage (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT NOT NULL REFERENCES runs,
-  role TEXT NOT NULL,             -- tester | verifier | summarizer | reviewer | judge
-  model TEXT NOT NULL,
-  input_tokens INTEGER NOT NULL DEFAULT 0,
-  output_tokens INTEGER NOT NULL DEFAULT 0,
-  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-  latency_ms INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL,           -- ok | error
-  created_at TEXT NOT NULL
-);
-CREATE TABLE web_research (       -- schema v3 (#113): persisted web_search answers; never evidence
+CREATE TABLE web_research (       -- persisted web_search answers (#113); never evidence
   run_id TEXT NOT NULL REFERENCES runs,
   research_id TEXT NOT NULL,      -- wr_...
   call_id TEXT,                   -- the web_search tool_calls row written in the same transaction
   query TEXT NOT NULL,
-  provider TEXT NOT NULL,         -- anthropic | google | google-cloud
+  provider TEXT NOT NULL,         -- anthropic | google | google-cloud | openai
   model TEXT NOT NULL,
   auth_mode TEXT NOT NULL,        -- api_key | adc
   answer TEXT NOT NULL,           -- capped like the tool return (4,000 chars)
@@ -855,16 +835,9 @@ CREATE TABLE web_research (       -- schema v3 (#113): persisted web_search answ
 );
 ```
 
-Dual-graph & coverage note: `surface_nodes` / `surface_edges` (populated deterministically at capture and OpenAPI contract ingestion time) form the **Surface Graph** ("what exists"), while `coverage_entries` + `findings` + `verifications` + `tool_calls` form the **Exploration & Coverage Ledger** ("what was tested, by which source, and with what evidence"). Reconciling `agent_reported` closures against `check_observed` runtime facts (checks run, skills loaded, budget/timeout completion) powers the D3 coverage report without conflating self-reports with observed execution.
+Exploration & coverage ledger note: `coverage_entries` + `findings` + `verifications` + `tool_calls` form the **Exploration & Coverage Ledger** ("what was tested, by which source, and with what evidence"), while `evidence` (including captured OpenAPI contracts) records what was observed on the target. Reconciling `agent_reported` closures against `check_observed` runtime facts (checks run, skills loaded, budget/timeout completion) keeps self-reports distinct from observed execution (see §17 Q10 for read-time surface vs. coverage comparison).
 
-Schema versioning: `PRAGMA user_version`; a store with an unknown version is refused with a
-clear error, never migrated destructively (§17). Migrations are additive only: the writer upgrades
-an older supported store in place, one version at a time inside a single transaction (new tables
-or columns; nothing rewritten or dropped), re-reading the version under the write lock. `mode=ro`
-readers cannot migrate, so they also accept the previous supported version and treat tables it
-lacks as empty (or columns, read as their default). Version 3 (#113) adds `web_research`; version 4
-(#65) adds `runs.write_requests_spent`. Older supported stores (2 and 3) are upgraded on their next
-writer open, and version 1 is still refused.
+Schema versioning: `PRAGMA user_version = 5`. Before 1.0 there are no migrations: any store with a `user_version` other than the current schema version is refused (`store-version`) with a clear error pointing at `partex export-bundle` / `partex show --format json` and `scripts/clean-state.sh` (#242), never migrated in place (§17 Q4).
 
 **Web research (#113).** A successful `web_search` writes its capped answer and `{url, title}`
 sources to `web_research` and its `tool_calls` audit row in one transaction, linked by `call_id`
@@ -875,8 +848,8 @@ The read tools `list_research(run)` and `lookup_research(research_id, run)` serv
 `agent --from`, and `run_code`; `partex show` (JSON and text) and `/report` include it.
 
 Export (`partex show <run-id> --format json [--out FILE]`) emits the run, its evidence, its
-findings, its verifications, its coverage ledger, its tool calls, and its summary (or `null`), with sorted keys and
-stable field order. **`secret_fields` are redacted to `<redacted>` by default**; `--include-secrets` opts
+findings, its verifications, its coverage ledger, and its tool calls, with sorted keys and
+stable field order (M4 will add `summary` when `summarize` ships). **`secret_fields` are redacted to `<redacted>` by default**; `--include-secrets` opts
 out and warns. Export excludes `created_at`, run IDs, and timestamps, so the repeatability
 experiment compares passive exports byte-for-byte (§13). Findings order: (severity rank desc,
 check_id, finding_id); evidence by registration order. `partex export-bundle <run-id>`
@@ -975,7 +948,7 @@ def build_agent(model: Model | str, skills: Sequence[Capability],
             ToolBudgets(refuse_repeats={'http_request', 'run_check', 'request_verification'}),
             DetectLoops(action='nudge'),
             SystemReminders(dynamic_reminders=[GoalReanchor()]),
-            build_audit_hooks(),  # records tool_calls + llm_usage to RunStore
+            build_audit_hooks(),  # records action tool_calls + run token totals to RunStore
             *skills,              # each skill wrapped with Capability(..., defer_loading=True)
         ],
     )
@@ -1010,7 +983,7 @@ def build_agent(model: Model | str, skills: Sequence[Capability],
 
     @agent.tool
     def list_surface(ctx: RunContext[AgentDeps]) -> list[dict[str, Any]]: ...
-        # read-only view of the run's SQLite Surface Graph (hosts, endpoints, params, roles)
+        # planned: read-only view of the run's surface (hosts, endpoints, params, roles) computed from evidence + OpenAPI specs (§17 Q10)
 
     @agent.tool
     def record_coverage(ctx: RunContext[AgentDeps], surface: str, risk_area: str,
@@ -1021,8 +994,8 @@ def build_agent(model: Model | str, skills: Sequence[Capability],
 
 Design rules:
 
-- **Role-based model routing & provider resilience (`models_config.py`)**: `--model` (and optional role overrides `--search-model`, plus future `--planner-model`, `--verifier-model`, `--summarizer-model`, `--judge-model` and CLAI2-style `PROVIDER[@PROFILE]:MODEL` or comma-separated fallback chains) resolve in `models_config.py`. Every model call logs token/cache/latency metrics to `llm_usage` (§7).
-- **Optional native-only web search (`search` role, `#111`)**: `partex agent --search-model MODEL` enables a `web_search(query)` tool on `partex_tester_agent` backed by an isolated one-shot `partex_search_agent` with `WebSearch(local=None)` and zero function tools, deps, DB, target-client, or file access. Only direct native-search providers (`anthropic:`, `google:`, `google-cloud:` via ADC, and `openai:` / `openai-responses:` on the Responses API, `#144`) are accepted — never `gateway/...`, bare gateway-route names, or local search fallbacks (preserving the `target.py`-only host-socket boundary). Queries are whitespace-collapsed, capped at 200 chars, limited to 20 per session (with Anthropic also passing `max_uses`; Google and OpenAI take no `max_uses`, so the session cap is their only bound), and rejected if they contain a registered capture secret, an `ev_`/`fn_` ID, or a URL with credentials or query strings. Refusals are audited without echoing secrets; successful calls audit query, provider/auth mode, source URLs, and `truncated` flag (never result bodies), record `llm_usage` with `role='search'`, emit a `partex.web_search` span, and return length-capped results (answer at most 4,000 chars; at most 20 sources in first-seen order, with `sources_total` recorded when more were found, `#146`) framed in `<partex_untrusted_data kind="web_search">`. Successful results are also persisted in `web_research` (§7, #113) and readable later through `list_research` / `lookup_research`. Off unless `--search-model` is set.
+- **Role-based model routing & provider resilience (`models_config.py`)**: `--model` (and optional role overrides `--search-model`, plus future `--planner-model`, `--verifier-model`, `--summarizer-model`, `--judge-model` and CLAI2-style `PROVIDER[@PROFILE]:MODEL` or comma-separated fallback chains) resolve in `models_config.py`. Per-call metrics (tokens, cache hits, latency) are recorded on spans; `runs` keeps aggregate totals (`model_calls`, `input_tokens`, `output_tokens`; §7).
+- **Optional native-only web search (`search` role, `#111`)**: `partex agent --search-model MODEL` enables a `web_search(query)` tool on `partex_tester_agent` backed by an isolated one-shot `partex_search_agent` with `WebSearch(local=None)` and zero function tools, deps, DB, target-client, or file access. Only direct native-search providers (`anthropic:`, `google:`, `google-cloud:` via ADC, and `openai:` / `openai-responses:` on the Responses API, `#144`) are accepted — never `gateway/...`, bare gateway-route names, or local search fallbacks (preserving the `target.py`-only host-socket boundary). Queries are whitespace-collapsed, capped at 200 chars, limited to 20 per session (with Anthropic also passing `max_uses`; Google and OpenAI take no `max_uses`, so the session cap is their only bound), and rejected if they contain a registered capture secret, an `ev_`/`fn_` ID, or a URL with credentials or query strings. Refusals are audited without echoing secrets; successful calls audit query, provider/auth mode, source URLs, and `truncated` flag (never result bodies), count search tokens toward the run's token totals, emit a `partex.web_search` span, and return length-capped results (answer at most 4,000 chars; at most 20 sources in first-seen order, with `sources_total` recorded when more were found, `#146`) framed in `<partex_untrusted_data kind="web_search">`. Successful results are also persisted in `web_research` (§7, #113) and readable later through `list_research` / `lookup_research`. Off unless `--search-model` is set.
 - **No plugins**: `load_plugins=False`; no coding tools, no filesystem access, no network
   except the scoped `http_request` tool.
 - **Explicit agent metadata, caching, and lifecycle**: every `Agent` (`partex_tester_agent`,
@@ -1068,7 +1041,7 @@ Design rules:
   `ctx.enqueue(priority='asap')` (including optional `TrajectoryJudge` or `goal_attempts >= 3`
   stuck resets). `StepPersistence(store=SqliteStepStore(...))` records continuable snapshots and
   tool-effect status (`started | completed | failed`). A `Hooks` capability (`wrap_tool_execute`)
-  records every tool invocation in `tool_calls` (§7) with secret arguments redacted.
+  records every target-affecting or state-changing invocation in `tool_calls` (§7) with secret arguments redacted.
 - **Progressive disclosure of skills (`defer_loading=True`)**: the adapter wraps each
   discovered skill (`SKILL.md` body and `reference/*.md`) as a deferred
   `Capability(id=skill.name, description=skill.description, instructions=skill.body, defer_loading=True)`.
@@ -1191,7 +1164,7 @@ exercises capture → active probe → verify → replay → export against the 
 
 ## 11. Summarization and observability
 
-Summarization is unchanged in shape from the earlier design:
+Summarization (M4, planned; its `summaries` table, `runs.summary_error` column, and `complete` state transition land with M4 per §7) is unchanged in shape from the earlier design:
 
 ```python
 async def summarize_run(run_id: str, store: RunStore, model: Model | str) -> ReviewSummary
@@ -1212,6 +1185,7 @@ async def summarize_run(run_id: str, store: RunStore, model: Model | str) -> Rev
 
 ### 11.1 Logfire observability and secret safety
 
+- **Database vs. log/Logfire split (§7, #238)**: SQLite is the engagement record (what was authorized, sent, captured, or concluded, plus run-level token totals and action `tool_calls` that partex reads back); the local JSONL log and opt-in Logfire hold diagnostic span data (model turns, prompts/completions under `--logfire-content` #238, per-call tokens and latency, and read-only tool lookups).
 - **Opt-in CLI setup and strict ordering**: when `--logfire` is passed (or `PARTEX_LOGFIRE=1`
   is set), `cli.py` calls `logfire.configure(service_name='partex', service_version=__version__)`
   **once at process startup before** `logfire.instrument_pydantic_ai()`. Without `--logfire`,
@@ -1337,7 +1311,7 @@ socket.
   secret-redacted `Evidence` to the model; out-of-scope calls raise `ToolFailed` (recorded with
   `outcome='failed'` without burning retry budget); an unknown `check_id` triggers `ModelRetry`
   while a valid `run_check` commits evidence-backed findings; a scripted model turn that tries
-  to emit a free-form finding cannot (no such tool). Every tool invocation lands in
+  to emit a free-form finding cannot (no such tool). Every target-affecting tool invocation lands in
   `tool_calls` via the `Hooks` capability (with secret args redacted). `--auto` terminates
   within `max_requests`.
 
@@ -1421,7 +1395,7 @@ No §13 experiment is recorded as passed here until its gate has evidence.
 | # | Milestone | Delivers | Gated by |
 |---|---|---|---|
 | M0 | Environment | package skeleton, uv project with locked PyPI dependencies, CI, network + model blocking fixtures | 13.1 |
-| M1 | Passive core | `models.py`, `bundle.py`, `ids.py`, `storage.py` (incl. `surface_nodes`/`surface_edges`/`coverage_entries`/`llm_usage`), `export.py`, `engine.py` (passive path), header-security check, bundle fixtures, `review`/`runs`/`show`/`checks` CLI | 13.3 (a–d) |
+| M1 | Passive core | `models.py`, `bundle.py`, `ids.py`, `storage.py` (incl. `coverage_entries`), `export.py`, `engine.py` (passive path), header-security check, bundle fixtures, `review`/`runs`/`show`/`checks` CLI | 13.3 (a–d) |
 | M2 | Registry and skill separation | `registry.py`, skills as data, entry-point loading, `banner-leak` fixture distribution, `--skill-dir` | 13.2 |
 | M3 | Live testing | `engagement.py`, `scope.py`, `target.py`, `verify.py` (incl. `counterevidence`), live engine path, per-check commits, fixture target app, `engage`/`test`/`verify`/`export-bundle` CLI, version-disclosure check | 13.3 (e), 13.4 (scope, authorization, capture, verification, budgets, redaction) |
 | M4 | Summarization | `summarize.py`, `summarize` CLI, retry/validation/timeout policy | 13.5 (references, timeout) |
@@ -1463,9 +1437,7 @@ No §13 experiment is recorded as passed here until its gate has evidence.
 3. **Exit code for findings (decided)**: `3` = completed with findings, `2` = usage error, `0`
    = completed with no findings. This departs from strix's `2` because argparse already owns `2`
    for usage errors; see §6.
-4. **Migration policy (decided, #113)**: additive migrations with `user_version` bumps (new tables or
-   columns, applied by the writer in one transaction; readers accept the previous version); unknown
-   or retired versions are still refused. See §7.
+4. **Migration policy (revised, #245)**: no migrations before 1.0; any store whose `user_version` does not match the current schema version is refused (`store-version`) with a message pointing at `export-bundle` / `show --format json` and `scripts/clean-state.sh` (#242). The additive migration policy from #113 is withdrawn. See §7.
 5. **HAR / proxy ingestion (decided)**: `partex import-har` ships in M3 as the
    passive-bundle producer for operator-exported captures — the replacement for the forks'
    MITM-proxy capture path, since §1 forbids interception. The scoped client stays the only
@@ -1491,6 +1463,7 @@ No §13 experiment is recorded as passed here until its gate has evidence.
    #65 (HTTP writes), #116 (websocket capture, then send), and #117 (gRPC discovery and
    invocation). Transport details (HTTP/2 for gRPC, frame/message evidence kinds) land with
    those issues.
+10. **Coverage report / surface computation**: compute the observed and declared surface from captured `evidence` plus any OpenAPI spec at read time and compare it against `coverage_entries` (replacing the removed `surface_nodes` / `surface_edges` tables and `surface()` check hook).
 
 ## 18. Defaults
 
