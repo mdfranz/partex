@@ -371,7 +371,9 @@ async def run_check(ctx: RunContext[TesterDeps], check_id: str) -> str:
     the only way to record a finding.
 
     Args:
-        check_id: A registered check ID (for example ``header-security`` or ``version-disclosure``).
+        check_id: A registered check ID (for example ``header-security`` or ``version-disclosure``), never a rule
+            or finding title: a rule such as ``error-page-disclosure`` is reported by its owning check
+            (``version-disclosure``), so run that.
     """
     session = ctx.deps.session
     try:
@@ -614,9 +616,10 @@ not CPython:
   is which. Nothing else is mounted, so do not walk / or probe for other directories.
 - Read tools return a string wrapped in <partex_untrusted_data kind=...> tags, not JSON. Strip the tags
   before json.loads.
+- Nothing is preloaded, not even Path: start with the imports you use (import re, json; from pathlib import Path).
+  Read a download with Path('/artifacts/<sha256>').read_text().
 - pathlib.Path is a subset: sort paths with key=str, and call read_text() with no arguments.
-- Import re, json, and the rest of the stdlib before use. On an error, read it and fix the snippet; do
-  not probe the sandbox.
+- On an error, read it and fix the snippet; do not probe the sandbox.
 
 The engagement scope, rate limit, and request budget are enforced by partex before anything is
 sent: a refused request reached nothing. Do not try to work around a refusal. You have no tool that
