@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<!-- Synthetic fixture: a -sV version pass over two of the sweep's up hosts; see tests/test_nmap.py -->
+<nmaprun scanner="nmap" args="nmap -vv -sV -oX version.xml 192.168.1.29 192.168.1.239" start="1795371008" startstr="Sun Nov 22 18:10:08 2026" version="7.98" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="4" services="80,443,8000,8080"/>
+<verbose level="2"/>
+<debugging level="0"/>
+<host><status state="up" reason="unknown-response" reason_ttl="0"/>
+<address addr="192.168.1.239" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><port protocol="tcp" portid="8000"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="http-alt?" method="table" conf="3"/></port>
+</ports>
+</host>
+<host><status state="up" reason="unknown-response" reason_ttl="0"/>
+<address addr="192.168.1.29" addrtype="ipv4"/>
+<address addr="2001:db8::5" addrtype="ipv6"/>
+<hostnames><hostname name="app.local" type="PTR"/></hostnames>
+<ports><port protocol="tcp" portid="80"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="http" product="nginx" version="1.27.0" method="probed" conf="10"/></port>
+<port protocol="tcp" portid="443"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="https" tunnel="ssl" method="probed" conf="10"/></port>
+<port protocol="tcp" portid="8080"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="http-alt" product=" Unicorn httpd" method="probed" conf="10"/></port>
+<port protocol="tcp" portid="8081"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="http" tunnel="ssl" method="probed" conf="10"/></port>
+</ports>
+</host>
+<runstats><finished time="1795371360" timestr="Sun Nov 22 18:16:00 2026" elapsed="352.00" summary="2 hosts scanned (2 up)"/><hosts up="2" down="0" total="2"/>
+</runstats>
+</nmaprun>

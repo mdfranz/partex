@@ -5,7 +5,7 @@
 #   ./partex.sh http://192.168.12.1/home      # asks who authorized the test
 #   ./partex.sh -a 'I own 192.168.12.1 and authorize this test, 2026-11-19' http://192.168.12.1/home
 #
-# Usage: ./partex.sh [options] <target-url> | -u URLS_FILE   |   ./partex.sh list [-d DB]       (flags override the environment variables in [])
+# Usage: ./partex.sh [options] <target-url> | -u URLS_FILE | -N NMAP_XML |   ./partex.sh list [-d DB]       (flags override the environment variables in [])
 #   -a, --attestation TEXT   who authorized testing the target [PARTEX_ATTESTATION]; prompted for if unset
 #   -m, --model NAME         model [PARTEX_MODEL, default zai-org/GLM-5.3]
 #   -r, --route NAME         gateway route for a bare model name [PARTEX_GATEWAY_ROUTE, default doubleword]. A
@@ -14,6 +14,12 @@
 #   -S, --search-model NAME  optional separate model for web_search [PARTEX_SEARCH_MODEL]: anthropic:<name>,
 #                            google:<name> (API key), google-cloud:<name> (ADC), or openai:<name>; off unless set. Queries
 #                            leave this machine and never go through the Gateway.
+#                            Gemini safety filters: partex disables the provider's configurable content filters by
+#                            default for google:/google-cloud: models (#218) — authorized testing carries exploit and
+#                            payload evidence they flag. Set PARTEX_GOOGLE_SAFETY_SETTINGS to change that: a preset
+#                            (off, high) or a JSON [{"category": "HARM_CATEGORY_…", "threshold": "BLOCK_…"}] list.
+#                            Startup prints the effective thresholds; the provider's non-configurable CSAM/PII filters
+#                            stay on. A non-Google model with the variable set refuses to start.
 #   -d, --db PATH            database [PARTEX_DB, default partex.db in the state directory]
 #                            Set PARTEX_STATE_DIR to override the state directory for all local files.
 #   -f, --from RUN_ID        let the new session read an earlier run [RUN_ID]
@@ -26,6 +32,12 @@
 #                            URL in the file is the baseline target; an explicit one must be listed.
 #       --recursive          with -u: treat every listed URL as a path prefix (http://foo/ allows all of foo)
 #                            [PARTEX_RECURSIVE=1]
+#   -N, --nmap-file PATH     import authorized targets from an `nmap -oX` scan file: its open HTTP(S) ports become the
+#                            authorized-URL list (one scheme://host:port/* entry each; everything else is reported and
+#                            skipped), so only scanned host:port targets can be requested [PARTEX_NMAP_FILE]. The session
+#                            opens with one initial GET per listed target, each captured as evidence and shown live on a
+#                            terminal (--max-requests is raised automatically when the import needs the room). Merges
+#                            with -u. <target-url> is then optional: the first imported entry is the baseline target.
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
 #   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000]
 #   -R, --max-rps N          requests per second [PARTEX_MAX_RPS, default 2; ceiling 64]
@@ -57,6 +69,7 @@ SEARCH_MODEL=${PARTEX_SEARCH_MODEL:-}
 DB=${PARTEX_DB:-}
 ATTESTATION=${PARTEX_ATTESTATION:-}
 URLS_FILE=${PARTEX_URLS_FILE:-}
+NMAP_FILE=${PARTEX_NMAP_FILE:-}
 RECURSIVE=${PARTEX_RECURSIVE:+1}
 LIST=
 INSECURE=${PARTEX_INSECURE:+1}
@@ -79,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     --resume) RESUME=1; shift; if [[ ${1:-} == run_* ]]; then RUN_ID=$1; shift; fi ;;
     --recursive) RECURSIVE=1; shift ;;
     -u|--urls-file) URLS_FILE=${2?$1 needs a value}; shift 2 ;;
+    -N|--nmap-file) NMAP_FILE=${2?$1 needs a value}; shift 2 ;;
     -k|--insecure) INSECURE=1; shift ;;
     -l|--list) LIST=1; shift ;;
     -n|--max-requests) MAX_REQUESTS=${2?$1 needs a value}; shift 2 ;;
@@ -125,6 +139,7 @@ fi
 DB=${DB:-$state_dir/partex.db}
 case $DB in /*) ;; *) DB=$PWD/$DB ;; esac  # absolute, before the cd below (BSD realpath has no -m)
 case $URLS_FILE in ''|/*) ;; *) URLS_FILE=$PWD/$URLS_FILE ;; esac  # likewise
+case $NMAP_FILE in ''|/*) ;; *) NMAP_FILE=$PWD/$NMAP_FILE ;; esac  # and likewise
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)  # absolute, resolved before the cd (works from any directory)
 cd "$SCRIPT_DIR"
 partex() { uv run --quiet partex "$@"; }
@@ -158,6 +173,38 @@ print(runs[-1]["id"] if runs else "")')
 fi
 
 [[ -z $URLS_FILE || -f $URLS_FILE ]] || { echo "URLs file not found: $URLS_FILE" >&2; exit 1; }
+[[ -z $NMAP_FILE || -f $NMAP_FILE ]] || { echo "nmap scan file not found: $NMAP_FILE" >&2; exit 1; }
+eng=$(mktemp -d "${TMPDIR:-/tmp}/partex-engagement.XXXXXX")
+nmap_urls=
+trap 'rc=$?; [[ -n $nmap_urls ]] && rm -f "$nmap_urls"; rm -rf "$eng"; exit $rc' EXIT  # keep the exit status (bash 3.2 would return the trap's)
+nmap_hosts= nmap_urls_count=
+if [[ -n $NMAP_FILE ]]; then  # -N: the scan's open HTTP(S) ports become the authorized-URL list (#215)
+  nmap_urls=$(mktemp "${TMPDIR:-/tmp}/partex-nmap-urls.XXXXXX")
+  partex nmap "$NMAP_FILE" --out "$nmap_urls" || exit 1  # prints the entries + skip notes for review
+  [[ -z $URLS_FILE ]] || cat "$URLS_FILE" >> "$nmap_urls"  # -u entries merge in after the scan's
+  URLS_FILE=$nmap_urls
+  read -r nmap_hosts nmap_urls_count <<<"$(python3 - "$nmap_urls" <<'PY'
+import sys
+from urllib.parse import urlsplit
+
+hosts, urls = set(), 0
+for line in open(sys.argv[1], encoding='utf-8'):
+    line = line.strip()
+    if not line or line.startswith('#'):
+        continue
+    urls += 1
+    hosts.add(urlsplit(line.removesuffix('/*') or '/').netloc)
+print(len(hosts), urls)
+PY
+)"
+  # The session opens with one initial GET per listed URL target (#215); make sure the budget
+  # covers the import plus working room, or the pass would stop at --max-requests.
+  if (( nmap_urls_count + 20 > MAX_REQUESTS )); then
+    MAX_REQUESTS=$((nmap_urls_count + 20))
+    (( MAX_REQUESTS > 100000 )) && MAX_REQUESTS=100000  # the engagement scope ceiling (E3)
+    echo "imported $nmap_urls_count URL target(s): raising --max-requests to $MAX_REQUESTS so the initial probe pass fits"
+  fi
+fi
 if [[ -z $TARGET_URL && -n $URLS_FILE ]]; then  # no <target-url>: the first URL in the file is the baseline target
   while IFS= read -r _line || [[ -n $_line ]]; do
     _line=${_line#"${_line%%[![:space:]]*}"}; _line=${_line%"${_line##*[![:space:]]}"}  # trim
@@ -168,10 +215,11 @@ if [[ -z $TARGET_URL && -n $URLS_FILE ]]; then  # no <target-url>: the first URL
   [[ -n $TARGET_URL ]] || { echo "no URLs in $URLS_FILE" >&2; exit 1; }
   echo "target: $TARGET_URL (first URL in $URLS_FILE)"
 fi
-[[ -n $TARGET_URL ]] || { echo "usage: $0 [options] [<target-url> | -u URLS_FILE]  (-h for options)" >&2; exit 2; }
+[[ -n $TARGET_URL ]] || { echo "usage: $0 [options] [<target-url> | -u URLS_FILE | -N NMAP_XML]  (-h for options)" >&2; exit 2; }
 if [[ -z $ATTESTATION ]]; then
   [[ -t 0 ]] || { echo "pass --attestation (or set PARTEX_ATTESTATION): who authorized testing $TARGET_URL" >&2; exit 1; }
   echo "Testing $TARGET_URL sends live requests; partex needs a written authorization on record."
+  [[ -z $nmap_urls ]] || echo "This session would request only $nmap_urls_count URL target(s) across $nmap_hosts host(s) imported from $NMAP_FILE — attest that the scanned range is authorized."
   read -r -p "Authorization (e.g. 'I own this host and authorize this test, $(date +%F)'): " ATTESTATION
   [[ -n $ATTESTATION ]] || { echo "no authorization given; nothing was sent" >&2; exit 1; }
 fi
@@ -181,8 +229,6 @@ host=${BASH_REMATCH[2]} port=${BASH_REMATCH[4]:-$([[ ${BASH_REMATCH[1]} == https
 json_str() { python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$1"; }
 
 TLS_JSON=; [[ -z $INSECURE ]] || TLS_JSON='"tls": {"verify": false},'
-eng=$(mktemp -d "${TMPDIR:-/tmp}/partex-engagement.XXXXXX")
-trap 'rc=$?; rm -rf "$eng"; exit $rc' EXIT  # keep the exit status (bash 3.2 would return the trap's)
 cat > "$eng/engagement.json" <<JSON
 {
   "schema_version": 1,

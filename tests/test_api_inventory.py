@@ -828,10 +828,18 @@ async def test_run_test_registers_live_openapi_and_roundtrips_through_export_bun
     )
     live_res = await run_test(spec_eng_dir, tmp_store, [CHECK_ID], authorized=True, urls_file=urls)
     assert live_res.state == 'checks_complete'
-    assert live_res.findings == ()
+    # The #215 initial probe pass GETs every listed entry, so /api/users/42 is captured — and its
+    # response's `password_hash` (disallowed by the contract response schema) is a real leak the
+    # old baseline-only capture silently missed. The pass is what makes the URL list meaningful.
+    (user_finding,) = live_res.findings
+    assert user_finding.check_id == CHECK_ID and user_finding.severity == 'high'
+    assert user_finding.subject == 'op:GET /api/users/{id}'
+    assert user_finding.title == 'Disallowed response fields on GET /api/users/{id}'
+    assert '$.password_hash' in user_finding.description
+    assert '$2b$12$secretvalue' not in user_finding.description  # observed values never appear in findings
     assert {(c.surface, c.outcome) for c in live_res.coverage} == {
         ('GET /api/users/me', 'needs_follow_up'),
-        ('GET /api/users/{id}', 'needs_follow_up'),
+        ('GET /api/users/{id}', 'reported'),  # observed by the probe pass, carrying the disallowed-field violation
         ('POST /api/items', 'needs_follow_up'),
     }
 
@@ -839,9 +847,10 @@ async def test_run_test_registers_live_openapi_and_roundtrips_through_export_bun
     await export_bundle(tmp_store, live_res.run_id, exported)
     replay = await run_review(exported, tmp_store, [CHECK_ID])
     assert replay.state == 'checks_complete'
-    assert replay.findings == ()
+    (replay_finding,) = replay.findings
+    assert replay_finding.subject == 'op:GET /api/users/{id}' and replay_finding.severity == 'high'
     assert {(c.surface, c.outcome) for c in await tmp_store.coverage(replay.run_id)} == {
         ('GET /api/users/me', 'needs_follow_up'),
-        ('GET /api/users/{id}', 'needs_follow_up'),
+        ('GET /api/users/{id}', 'reported'),
         ('POST /api/items', 'needs_follow_up'),
     }

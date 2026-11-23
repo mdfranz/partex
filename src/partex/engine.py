@@ -20,16 +20,19 @@ opens sockets only through the scoped target client.
 import hashlib
 import importlib.metadata
 import os
+import ssl
 import sys
-from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import anyio
 import anyio.to_thread
+import httpx2
 from pydantic import ValidationError
 
 from .bundle import MAX_CONTENT_BYTES, load_bundle
@@ -55,7 +58,7 @@ from .models import (
 from .openapi_resolver import derive_openapi_config_evidence
 from .probes import SeedPlan, plan_seed_probes
 from .roles import RoleHandle, role_handles
-from .scope import apply_urls, check_url, extend_scope, parse_urls_file, validate_scope
+from .scope import apply_urls, check_url, entry_url, extend_scope, parse_urls_file, validate_scope
 from .storage import RunState, RunStore, SurfaceKind, SurfaceRel, run_artifact_dir, surface_node_id
 from .target import DEFAULT_MAX_ASSET_BYTES, RequestBudget, ScopedHttpClient, tls_unverified
 
@@ -745,6 +748,27 @@ async def run_test(
     try:
         try:
             await client.request('GET', engagement.target.base_url)
+            # #215 initial probe pass: one GET per active URL-list entry (the baseline target
+            # itself is skipped), so checks review every imported host:port, not just base_url.
+            if engagement.scope.urls:
+                probe_outcomes: dict[str, str] = {}
+                # Rule 5: a probe pass cut short by the budget ends it cleanly, like active work.
+                budget_exhausted = (
+                    budget_exhausted
+                    or (
+                        await probe_url_entries(
+                            partial(client.request, 'GET'),
+                            entries=engagement.scope.urls,
+                            base_url=engagement.target.base_url,
+                            outcomes=probe_outcomes,
+                        )
+                    )[2]
+                    > 0
+                )
+                if probe_outcomes:
+                    await store.record_tool_call(
+                        run_id, 'initial_probe', {'total': len(probe_outcomes)}, {'outcomes': probe_outcomes}
+                    )
             # Seeded bundle-surface probes (#76): right after the baseline so active checks see
             # the seeded evidence. Candidates are pre-filtered with the same scope gate, so a
             # refusal here is a logic bug — counted, never a run failure (the #80 lesson).
@@ -905,6 +929,125 @@ async def _maybe_register_openapi(
 # ── Live session (issue #54; PLAN §9 operator-in-the-loop) ─────────────────────
 
 
+def _probe_key(url: str) -> tuple[str, str, int, str] | str:
+    """Normalize a probe URL so ``http://host:80/*`` and ``http://host/`` collapse to one key."""
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.hostname:
+        return url
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port
+    except ValueError:
+        return url
+    if port is None:
+        port = 443 if scheme == 'https' else 80
+    return scheme, parts.hostname.lower(), port, parts.path or '/'
+
+
+def _classify_probe_error(exc: PartexError) -> tuple[str, str]:
+    """Classify a failed startup probe into ``(outcome_code, terminal_label)``."""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack and len(chain) < 16:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        chain.append(current)
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        if current.__context__ is not None:
+            stack.append(current.__context__)
+
+    combined = ' '.join(str(item).lower() for item in chain)
+    if any(isinstance(item, ssl.SSLCertVerificationError) for item in chain) or (
+        'certificate_verify_failed' in combined or 'certificate verify failed' in combined
+    ):
+        return ('tls_verify_failed', 'tls error (cert verify failed — try -k)')
+    if any(isinstance(item, ssl.SSLError) for item in chain) or '[ssl:' in combined:
+        return ('tls_error', 'tls error (handshake failed)')
+    if (
+        any(isinstance(item, (httpx2.TimeoutException, TimeoutError)) for item in chain)
+        or 'timed out' in combined
+        or 'timeout' in combined
+    ):
+        return ('timeout', 'unreachable (timeout)')
+    return ('unreachable', 'unreachable')
+
+
+async def probe_url_entries(
+    request: Callable[[str], Awaitable[object]],
+    *,
+    entries: Sequence[str],
+    base_url: str,
+    verbose: bool | None = None,
+    outcomes: dict[str, str] | None = None,
+) -> tuple[int, int, int]:
+    """The #215 initial probe pass: one ``GET`` per active URL-list entry, before checks run.
+
+    Only at startup (``partex test`` / ``partex agent``): an operator-confirmed import is the
+    authorization, every probe is a safe method through the same scope gate and budget, and each
+    capture commits at capture time — so the passive checks then review banner and error-page
+    evidence from *every* imported host:port, not just the baseline target. ``request`` is a bound
+    ``GET`` (``LiveSession.request`` or ``ScopedHttpClient.request``); *entries* is the active
+    ``scope.urls``; *base_url* is skipped (the baseline capture already probed it), duplicates
+    collapse. A dead host (:class:`PartexError` on connect) is counted and probed past, never a
+    run failure; budget exhaustion stops the pass cleanly (PLAN §6). Returns
+    ``(probed, failed, unprobed)`` and prints one summary line to stderr. With *verbose* (or on a
+    TTY, the default) it also prints a live line per probe as it lands — the pass can take
+    minutes at the engagement's rate limit, and a blank terminal reads as a hang. When *outcomes*
+    is passed, it is populated with ``url -> 'ok' | 'tls_verify_failed' | 'tls_error' | 'timeout' |
+    'unreachable' | 'unprobed'`` per probed URL.
+    """
+    show = sys.stderr.isatty() if verbose is None else verbose
+    seen: set[tuple[str, str, int, str] | str] = {_probe_key(base_url)}
+    urls: list[str] = []
+    for entry in entries:
+        url = entry_url(entry)
+        key = _probe_key(url)
+        if key not in seen:
+            seen.add(key)
+            urls.append(url)
+    if show and urls:
+        print(f'partex: probing {len(urls)} URL-list target(s) …', file=sys.stderr)
+    probed = failed = tls_failed = 0
+    for index, url in enumerate(urls, start=1):
+        stopped = False
+        try:
+            await request(url)
+            probed += 1
+            outcome = 'ok'
+            if outcomes is not None:
+                outcomes[url] = 'ok'
+        except BudgetExhausted:
+            stopped = True
+            outcome = 'stopped (request budget)'
+            if outcomes is not None:
+                for remaining in urls[index - 1 :]:
+                    outcomes[remaining] = 'unprobed'
+        except PartexError as exc:
+            failed += 1
+            code, outcome = _classify_probe_error(exc)
+            if code in ('tls_verify_failed', 'tls_error'):
+                tls_failed += 1
+            if outcomes is not None:
+                outcomes[url] = code
+        if show:
+            print(f'  [{index}/{len(urls)}] {url} — {outcome}', file=sys.stderr)
+        if stopped:
+            break
+    unprobed = len(urls) - probed - failed
+    if urls:
+        tls_note = f' ({tls_failed} TLS — try -k)' if tls_failed else ''
+        print(
+            f'partex: initial probe of {len(urls) + 1} URL-list target(s): '
+            f'{probed} probed, {failed} unreachable, {unprobed} unprobed (request budget){tls_note}',
+            file=sys.stderr,
+        )
+    return probed, failed, unprobed
+
+
 class LiveSessionRefused(PartexError):
     """A live gate failed before any socket. The run row is recorded ``invalid`` (``run_id``) for audit."""
 
@@ -1033,6 +1176,55 @@ class LiveSession:
                     'hosts_after': after.hosts,
                     'ports_before': before.ports,
                     'ports_after': after.ports,
+                    'tls_verified': {host: not self.host_tls_unverified(host) for host in added_hosts},
+                },
+            )
+        except Exception as exc:
+            raise PartexError(
+                f'could not record the scope change, so the scope is unchanged: {exc}', rule_code='scope-persist'
+            ) from exc
+        self.client.set_scope(after)
+        self.engagement = self.engagement.model_copy(update={'scope': after})
+        return before, after
+
+    async def import_urls(
+        self, entries: Sequence[str], *, source: str, source_sha256: str | None, confirmed_by: str
+    ) -> tuple[Scope, Scope]:
+        """Add URL-list *entries* to this session's scope as one atomic amendment; ``(before, after)``.
+
+        Only an operator-confirmed call may reach this (``/scope nmap``; never a model tool).
+        The entries are #121 allowlist entries — host and port pinned per entry — so an import
+        never widens scope to a host:port pair the scan did not show. Activating or extending a
+        list narrows rule 3 for *every* request, so the caller keeps the engagement's
+        ``base_url`` covered (:func:`partex.nmap.ensure_base_url_entry`). The amendment is audited
+        as one ``scope_amend`` tool call recording the scan *source* and its sha256 (#215); the
+        snapshot and the audit row commit together before the scope takes effect (the same
+        ordering guarantee as :meth:`extend_scope`).
+        """
+        before = self.engagement.scope
+        after = apply_urls(before, [*before.urls, *entries])
+        problems = validate_scope(after)
+        if problems:
+            raise PartexError(f'imported scope is invalid: {"; ".join(problems)}', rule_code='scope-invalid')
+        added_hosts = [host for host in after.hosts if host not in before.hosts]
+        try:
+            await self._store.amend_scope(
+                self.run_id,
+                after,
+                args={
+                    'action': 'import',
+                    'specs': list(entries),
+                    'source': source,
+                    'source_sha256': source_sha256,
+                    'confirmed_by': confirmed_by,
+                },
+                result={
+                    'hosts_before': before.hosts,
+                    'hosts_after': after.hosts,
+                    'ports_before': before.ports,
+                    'ports_after': after.ports,
+                    'urls_before': len(before.urls),
+                    'urls_after': len(after.urls),
                     'tls_verified': {host: not self.host_tls_unverified(host) for host in added_hosts},
                 },
             )
@@ -1174,6 +1366,20 @@ async def live_session(
     session = LiveSession(run_id=run_id, engagement=engagement, registry=registry, store=store)
     try:
         await session.request('GET', engagement.target.base_url)
+        # #215 initial probe pass: one GET per active URL-list entry, before the checks, so
+        # passive review covers every imported host:port and active checks see all of it.
+        if engagement.scope.urls:
+            probe_outcomes: dict[str, str] = {}
+            await probe_url_entries(
+                partial(session.request, 'GET'),
+                entries=engagement.scope.urls,
+                base_url=engagement.target.base_url,
+                outcomes=probe_outcomes,
+            )
+            if probe_outcomes:
+                await store.record_tool_call(
+                    run_id, 'initial_probe', {'total': len(probe_outcomes)}, {'outcomes': probe_outcomes}
+                )
         active, passive = order_for_live_run(selected)
         for check in (*active, *passive):  # probes first, so passive checks also see their traffic
             if check.applies_to(session.captured):

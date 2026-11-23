@@ -23,6 +23,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, NativeToolCallPart
 from pydantic_ai.models import Model
 from pydantic_ai.models.anthropic import AnthropicModelSettings
 from pydantic_ai.models.openai import OpenAIResponsesModelSettings
+from pydantic_ai.settings import ModelSettings
 
 from ..errors import PartexError
 from ..models import REDACTED
@@ -206,8 +207,14 @@ def _search_settings(provider: SearchProvider) -> AnthropicModelSettings | OpenA
             return None
 
 
-def build_search_agent(model: Model | str, *, provider: SearchProvider) -> Agent[None, str]:
-    """Build the isolated one-shot search agent: native ``WebSearchTool`` only, no function tools or deps."""
+def build_search_agent(
+    model: Model | str, *, provider: SearchProvider, model_settings: ModelSettings | None = None
+) -> Agent[None, str]:
+    """Build the isolated one-shot search agent: native ``WebSearchTool`` only, no function tools or deps.
+
+    *model_settings* (the operator's Gemini content-filter opt-in, #218) overrides the per-provider
+    default for Google providers, where ``_search_settings`` has none to contribute.
+    """
     anthropic = provider == 'anthropic'
     return Agent(
         model,
@@ -217,7 +224,7 @@ def build_search_agent(model: Model | str, *, provider: SearchProvider) -> Agent
         instructions=SEARCH_AGENT_INSTRUCTIONS,
         tools=(),
         capabilities=[WebSearch(local=None, max_uses=SEARCH_ANTHROPIC_MAX_USES if anthropic else None)],
-        model_settings=_search_settings(provider),
+        model_settings=model_settings if model_settings is not None else _search_settings(provider),
         defer_model_check=True,
     )
 

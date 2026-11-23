@@ -197,6 +197,7 @@ the root where they already are:
       header_security.py   # header-security (passive)
       version_disclosure.py  # version-disclosure (active probe + verify_recipe)
     har.py                 # import-har: HAR file -> passive bundle, scope-filtered (M3)
+    nmap.py                # nmap -oX scan output -> authorized-URL-list entries (skip report + sha256; #215)
     browser.py             # M7 browser capture harness (Playwright; sanctioned socket exception)
     target.py              # scoped HTTP client (the only engine socket-opening module), capture
                            #   (httpx2, follow_redirects=False, pinned resolver + SNI)
@@ -363,6 +364,24 @@ tool — is validated immediately before send:
    A refusal carries its rule (`host`, `port`, `path`, `url-list`) so the model's advice to the operator fits it;
    with a list active, the operator's `/scope add <url>` (`…/*` for a prefix) adds a URL after `/scope confirm`, and a bare
    host is refused with that hint.
+   **nmap import (#215).** `partex nmap <scan.xml>…` converts `nmap -oX` output into URL-list entries —
+   `scheme://host:port/*`, the scanned IP (or, with `--use-hostnames`, the PTR name) — plus a skip report, and
+   never touches `scope.hosts`/`scope.ports` directly (an import of `a:443` + `b:8080` must not also authorize
+   `a:8080`). Deterministic parse rules: `<host>` up, TCP only, `state="open"` only; scheme from the `-sV`
+   service name (HTTP-family names import; `tunnel="ssl"` promotes an HTTP service to https but never makes a
+   non-HTTP one a target), else the {80, 443} defaults, else a skip note. Entity/external-DTD declarations are
+   refused (XXE / billion-laughs guard). `partex.sh -N/--nmap-file` converts and feeds the result to the
+   `--urls-file` path (first imported entry = the baseline target, the attestation prompt names the import
+   size); `/scope nmap <scan.xml>` stages the same batch in the live session and `/scope confirm` applies it
+   as one `scope_amend` audit row recording the scan path and its sha256 (the batch keeps
+   `target.base_url` covered; a run's `scope_snapshot` pins the exact entries).
+   **Initial probe pass.** A session with an active URL list (however it got there) opens with one
+   `GET` per listed entry — safe method, same scope gate and budget, captured at capture time —
+   before the checks run, so passive review covers banner and error-page evidence from every listed
+   host:port, not just the baseline target (whose own capture counts for it). A dead host is counted
+   and probed past, never a run failure; budget exhaustion ends the pass cleanly. Startup only: an
+   operator-confirmed `/scope nmap` widens scope but probes nothing (the operator asks in chat).
+   `partex.sh -N` raises `--max-requests` to cover the import (capped at the E3 ceiling).
 4. **Redirects**: never followed automatically; a redirect response is captured as evidence,
    and the new location is re-validated from rule 1 if the caller chooses to follow it.
 5. **Budgets**: a token-bucket limiter enforces `max_rps`; a run-level counter enforces
@@ -883,6 +902,7 @@ emits a passive-reviewable bundle from a live run's captures (redacted by defaul
 | `partex verify <run-id> <finding-id>` | (re)run verification for one finding in one run | `--authorized`, `--insecure`, `--user-agent`, `--db` |
 | `partex export-bundle <run-id>` | write a passive bundle from a live run's captures | `--out DIR`, `--include-secrets`, `--db` |
 | `partex import-har <file.har>` | build a passive-reviewable bundle from an operator-exported HAR (M3; the MITM-free capture path) | `--out DIR`, `--target` |
+| `partex nmap <scan.xml>…` | convert nmap `-oX` output into authorized-URL-list entries (pure conversion, review before use; #215) | `--out PATH`, `--use-hostnames`, `--json` |
 | `partex runs` | list runs (id, state, input, findings count) | `--db`, `--json` |
 | `partex report` | cross-run rollup of findings, model spend, and tool calls | `--db`, `--json` |
 | `partex show <run-id>` | export a run | `--format json\|text`, `--include-secrets`, `--out`, `--db` |
