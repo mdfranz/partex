@@ -214,9 +214,10 @@ async def run_agent(
                     {'bundle': str(bundle), 'candidates': len(lines)},
                     {'paths': list(lines)},
                 )
-            # Record every model turn (briefing, chat) and every read-tool call to this run (§7, #54),
-            # so the run is auditable offline, not only through the gateway/Logfire.
+            # Record model token/call totals on the run (§7, #54, #245), so the run is auditable offline,
+            # not only through the gateway/Logfire.
             recorded = UsageRecordingModel(model, store=store, run_id=session.run_id, role='tester')
+            await store.set_model(session.run_id, recorded.model_name)
             searcher: WebSearcher | None = None
             if search_model is not None:
                 console.print(f'[dim]web search: {search_model.startup_summary()}[/]')
@@ -230,15 +231,11 @@ async def run_agent(
                     ),
                 )
 
-            async def audit(tool: str, args: dict[str, object], result: dict[str, object]) -> None:
-                await store.record_tool_call(session.run_id, tool, args, result)
-
             write_gate = WriteGate()
             deps = TesterDeps(
                 run_id=session.run_id,
                 reader=store,
                 previous_run_id=from_run,
-                audit=audit,
                 session=session,
                 store=store,
                 seed_surface=seed_lines(seed_plan) if seed_plan is not None else (),

@@ -608,11 +608,11 @@ def _render_text(payload: dict[str, Any], run_id: str) -> str:
         lines.append(f'requests spent: {run["requests_spent"]}  authorized: {run["authorized"]}')
     if run['error']:
         lines.append(f'error: {run["error"]}')
-    usage: list[dict[str, Any]] = payload['llm_usage']
-    if usage:
-        in_tok = sum(u['input_tokens'] for u in usage)
-        out_tok = sum(u['output_tokens'] for u in usage)
-        lines.append(f'model turns: {len(usage)}  tokens in/out: {in_tok}/{out_tok}')
+    model_calls: int = run.get('model_calls', 0)
+    in_tok: int = run.get('input_tokens', 0)
+    out_tok: int = run.get('output_tokens', 0)
+    if model_calls or in_tok or out_tok:
+        lines.append(f'model calls: {model_calls}  tokens in/out: {in_tok}/{out_tok}')
     findings: list[dict[str, Any]] = payload['findings']
     lines.append(f'findings: {len(findings)}')
     for finding in findings:
@@ -627,9 +627,6 @@ def _render_text(payload: dict[str, Any], run_id: str) -> str:
         for entry in research:
             truncated = ', truncated' if entry['truncated'] else ''
             lines.append(f'  {entry["query"]} ({entry["provider"]}, {len(entry["sources"])} sources{truncated})')
-    if payload['summary'] is not None:
-        lines.append('summary:')
-        lines.append(f'  {payload["summary"]["narrative"]}')
     return '\n'.join(lines) + '\n'
 
 

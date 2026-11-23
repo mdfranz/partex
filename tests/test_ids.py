@@ -12,6 +12,7 @@ from partex.ids import (
     engagement_id,
     evidence_id,
     finding_id,
+    finding_key,
     normalized_operation_key,
     sha256_hex,
     verification_id,
@@ -179,6 +180,17 @@ def test_finding_id_differs_on_evidence():
     a = finding_id('check', 'subject', 'title', ['ev_01'])
     b = finding_id('check', 'subject', 'title', ['ev_01', 'ev_02'])
     assert a != b
+
+
+def test_finding_key_is_stable_across_evidence():
+    k1 = finding_key('check', 'subject', 'title')
+    assert k1.startswith('fk_')
+    assert len(k1) == 3 + 16
+    assert k1 == finding_key('check', 'subject', 'title')
+    assert k1 != finding_key('check-2', 'subject', 'title')
+    assert k1 != finding_key('check', 'subject-2', 'title')
+    assert k1 != finding_key('check', 'subject', 'title-2')
+    assert finding_key('c', 'ab', 'c') != finding_key('c', 'a', 'bc')
 
 
 # ── verification_id ───────────────────────────────────────────────────────────

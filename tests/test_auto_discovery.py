@@ -100,13 +100,13 @@ async def test_downloaded_asset_is_analyzed_without_any_model_call_or_traffic(
         assert update is not None
         assert 'js-analysis' in update.checks
         assert update.failed == ()
-        assert update.new_surface_nodes > 0
-        assert update.surface_nodes == len((await tmp_store.surface(session.run_id))[0])
+        assert update.new_findings > 0
         assert session.requests_spent == spent and server.hits == hits  # passive: no budget, no traffic
-        # Nothing arrived since, so the next call does nothing; a forced re-run does not duplicate nodes.
+        # Nothing arrived since, so the next call does nothing; a forced re-run does not duplicate findings.
         assert await session.refresh_discovery() is None
+        findings_count = len(await tmp_store.findings(session.run_id))
         await session.run_check('js-analysis')
-        assert len((await tmp_store.surface(session.run_id))[0]) == update.surface_nodes
+        assert len(await tmp_store.findings(session.run_id)) == findings_count
 
 
 async def test_agent_is_told_about_discovery_on_its_next_result(

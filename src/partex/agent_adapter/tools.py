@@ -6,10 +6,12 @@ finding descriptions), so every return is framed as untrusted data with :mod:`py
 which escapes any copy of the tag inside the body. Evidence is secret-redacted before it is framed.
 IDs that are unknown, or that belong to another run, fail the call with ``ToolFailed`` so the model
 adapts instead of retrying.
+
+Read-only lookups are recorded as trace spans (local JSONL log and opt-in Logfire), never written as
+``tool_calls`` rows in SQLite (§7, #245).
 """
 
 import json
-from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from typing import Any, cast
 
@@ -33,10 +35,6 @@ type RunReads = RunReader | RunStore
 type RunChoice = str
 """``current``, ``previous`` (the ``--from`` run), or the ID (``run_…``) of an earlier run against the same target."""
 
-type AuditHook = Callable[[str, dict[str, Any], dict[str, Any]], Awaitable[None]]
-"""Records one read-tool call (``tool, args, compact result``). ``agent`` sets it; ``chat`` leaves it None,
-so the reviewer stays fully read-only."""
-
 
 @dataclass(frozen=True, slots=True)
 class ReviewDeps:
@@ -46,22 +44,23 @@ class ReviewDeps:
     reader: RunReads
     previous_run_id: str | None = None
     """The run an ``agent`` session continues from (``--from``); ``None`` for ``chat``."""
-    audit: AuditHook | None = None
-    """Set by ``agent`` to log read-tool calls to the session run; ``None`` for the read-only ``chat``."""
 
 
-def _target_key(run: RunRecord) -> tuple[frozenset[str], frozenset[int]] | None:
-    """A run's target identity: the hosts and ports of its scope snapshot (``None`` if it has none)."""
+def _target_key(run: RunRecord) -> str | tuple[frozenset[str], frozenset[int]] | None:
+    """A run's target identity: ``engagement_id`` when present, else the scope snapshot's ``(hosts, ports)``."""
+    if run.engagement_id is not None:
+        return run.engagement_id
     scope = run.scope_snapshot
     return None if scope is None else (frozenset(scope.hosts), frozenset(scope.ports))
 
 
 async def _same_target_runs(deps: ReviewDeps) -> list[RunRecord]:
-    """Runs in the store against the same target (hosts and ports) as the current run, oldest first.
+    """Runs in the store against the same engagement/target as the current run, oldest first.
 
     Runs of other targets or engagements in the same database are never exposed to the model.
     """
-    key = _target_key(await deps.reader.get_run(deps.run_id))
+    current = await deps.reader.get_run(deps.run_id)
+    key = _target_key(current)
     if key is None:
         return []
     return [run for run in await deps.reader.list_runs() if _target_key(run) == key]
@@ -84,11 +83,6 @@ def frame_untrusted(kind: str, payload: Any) -> str:
     return wrap(UNTRUSTED_TAG, json.dumps(payload, indent=2, sort_keys=True), kind=kind)
 
 
-async def _audit_read(deps: ReviewDeps, tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
-    if deps.audit is not None:
-        await deps.audit(tool, args, result)
-
-
 def _finding_summary(finding: Finding) -> dict[str, Any]:
     return {
         'id': finding.id,
@@ -108,7 +102,6 @@ async def list_runs(ctx: RunContext[ReviewDeps]) -> str:
     findings and evidence. Runs against other targets are not listed.
     """
     runs = await _same_target_runs(ctx.deps)
-    await _audit_read(ctx.deps, 'list_runs', {}, {'count': len(runs)})
     return frame_untrusted(
         'runs',
         [
@@ -135,7 +128,6 @@ async def list_findings(ctx: RunContext[ReviewDeps], run: RunChoice = 'current')
             ``list_runs``.
     """
     findings = await ctx.deps.reader.findings(await _run_id(ctx.deps, run))
-    await _audit_read(ctx.deps, 'list_findings', {'run': run}, {'count': len(findings)})
     return frame_untrusted('findings', [_finding_summary(finding) for finding in findings])
 
 
@@ -175,7 +167,6 @@ async def list_coverage(ctx: RunContext[ReviewDeps], run: RunChoice = 'current')
         run: ``current`` (default), ``previous``, or a run ID from ``list_runs``.
     """
     entries = await ctx.deps.reader.coverage(await _run_id(ctx.deps, run))
-    await _audit_read(ctx.deps, 'list_coverage', {'run': run}, {'count': len(entries)})
     return frame_untrusted('coverage', [entry.model_dump(mode='json') for entry in entries])
 
 
@@ -190,7 +181,6 @@ async def list_evidence(ctx: RunContext[ReviewDeps], run: RunChoice = 'current')
             ``list_runs``.
     """
     evidence = await ctx.deps.reader.evidence(await _run_id(ctx.deps, run))
-    await _audit_read(ctx.deps, 'list_evidence', {'run': run}, {'count': len(evidence)})
     return frame_untrusted('evidence_list', [_evidence_summary(item) for item in evidence])
 
 
@@ -203,7 +193,6 @@ async def get_finding(ctx: RunContext[ReviewDeps], finding_id: str, run: RunChoi
             ``list_runs``.
     """
     finding = await ctx.deps.reader.get_finding(await _run_id(ctx.deps, run), finding_id)
-    await _audit_read(ctx.deps, 'get_finding', {'finding_id': finding_id, 'run': run}, {'found': finding is not None})
     if finding is None:
         raise ToolFailed(f'no finding {finding_id!r} in this run; call list_findings for valid IDs')
     return frame_untrusted('finding', finding.model_dump(mode='json'))
@@ -218,9 +207,6 @@ async def lookup_evidence(ctx: RunContext[ReviewDeps], evidence_id: str, run: Ru
             ``list_runs``.
     """
     evidence = await ctx.deps.reader.get_evidence(await _run_id(ctx.deps, run), evidence_id)
-    await _audit_read(
-        ctx.deps, 'lookup_evidence', {'evidence_id': evidence_id, 'run': run}, {'found': evidence is not None}
-    )
     if evidence is None:
         raise ToolFailed(f'no evidence {evidence_id!r} in this run; use evidence_ids from list_findings')
     return frame_untrusted('evidence', json.loads(canonical_json(redact(evidence).model_dump(mode='json'))))
@@ -249,7 +235,6 @@ async def list_research(ctx: RunContext[ReviewDeps], run: RunChoice = 'current')
             ``list_runs``.
     """
     entries = await ctx.deps.reader.web_research(await _run_id(ctx.deps, run))
-    await _audit_read(ctx.deps, 'list_research', {'run': run}, {'count': len(entries)})
     return frame_untrusted('web_search', [_research_summary(entry) for entry in entries])
 
 
@@ -264,9 +249,6 @@ async def lookup_research(ctx: RunContext[ReviewDeps], research_id: str, run: Ru
             ``list_runs``.
     """
     entry = await ctx.deps.reader.get_web_research(await _run_id(ctx.deps, run), research_id)
-    await _audit_read(
-        ctx.deps, 'lookup_research', {'research_id': research_id, 'run': run}, {'found': entry is not None}
-    )
     if entry is None:
         raise ToolFailed(f'no web research {research_id!r} in this run; call list_research for valid IDs')
     return frame_untrusted(
@@ -290,29 +272,22 @@ def _report_run_id(deps: ReviewDeps, run: str) -> str:
 async def list_reports(ctx: RunContext[ReviewDeps], run: str = 'current') -> str:
     """List saved Markdown reports and their handles. Use current or the --from run (previous or its ID)."""
     deps = ctx.deps
-    args = {'run': run}
     try:
         run_id = _report_run_id(deps, run)
         reports = await run_sync(storage.list_reports, deps.reader.path, run_id)
     except StoreError as exc:
-        await _audit_read(deps, 'list_reports', args, {'error': exc.rule_code})
         raise ToolFailed(str(exc)) from exc
-    await _audit_read(deps, 'list_reports', {'run': run_id}, {'count': len(reports)})
     return frame_untrusted('reports', [asdict(report) for report in reports])
 
 
 async def read_report(ctx: RunContext[ReviewDeps], name: str, run: str = 'current') -> str:
     """Read a report by its name from list_reports. Use current or the --from run (previous or its ID)."""
     deps = ctx.deps
-    args = {'name': name, 'run': run}
     try:
         run_id = _report_run_id(deps, run)
-        args['run'] = run_id
         content = await run_sync(storage.read_report, deps.reader.path, run_id, name)
     except StoreError as exc:
-        await _audit_read(deps, 'read_report', args, {'error': exc.rule_code})
         raise ToolFailed(str(exc)) from exc
-    await _audit_read(deps, 'read_report', args, {'found': True})
     return frame_untrusted('report', {'run_id': run_id, 'name': name, 'content': content})
 
 

@@ -126,8 +126,6 @@ async def _discovery_note(ctx: RunContext[TesterDeps]) -> str:
             'checks': list(update.checks),
             'failed': list(update.failed),
             'new_findings': update.new_findings,
-            'new_surface_nodes': update.new_surface_nodes,
-            'surface_nodes': update.surface_nodes,
         },
     )
     return update.note() + '\n\n'

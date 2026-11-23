@@ -6,18 +6,10 @@ blocking SQLite calls run in worker threads via :func:`anyio.to_thread.run_sync`
 connection per object.
 
 Every model is re-validated on read, so schema drift between engine versions surfaces as a
-``store-load`` error instead of silently wrong data. A database whose ``PRAGMA user_version`` is not
-:data:`SCHEMA_VERSION` is refused (``store-version``); it is never migrated in place.
-
-Schema version 2 adds ``findings.subject`` (#39); a version-1 store is refused like any unknown version.
-Schema version 3 adds ``web_research`` (#113). Migrations are additive only (PLAN §17): the writer upgrades a
-version-2 store in place inside one transaction (new tables, nothing rewritten or dropped); readers, which open
-``mode=ro`` and cannot migrate, also accept version 2 and see no web research there.
-
-Deviations from the PLAN §7 DDL, both required by existing contracts:
-
-- ``evidence.seq`` records registration order (export lists evidence "by registration order").
-- ``findings.verification_id`` persists ``Finding.verification_id``.
+``store-load`` error instead of silently wrong data. Before 1.0 there are no migrations (PLAN §7, #245):
+a database whose ``PRAGMA user_version`` is not :data:`SCHEMA_VERSION` is refused (``store-version``)
+with a message pointing at ``partex export-bundle`` / ``partex show --format json`` and
+``scripts/clean-state.sh`` (#242).
 """
 
 import json
@@ -39,7 +31,7 @@ import anyio.to_thread
 from pydantic import TypeAdapter, ValidationError
 
 from .errors import PartexError
-from .ids import canonical_json, engagement_id, sha256_hex
+from .ids import canonical_json, engagement_id, finding_key, sha256_hex
 from .models import (
     SAFE_METHODS,
     CoverageEntry,
@@ -48,25 +40,20 @@ from .models import (
     EvidenceAdapter,
     Finding,
     HttpEvidence,
-    ReviewSummary,
     Scope,
     Verification,
 )
 from .paths import mkdir_private
 
-SCHEMA_VERSION = 4  # 2: findings.subject (#39); 3: web_research (#113); 4: runs.write_requests_spent (#65)
-READABLE_VERSIONS = frozenset({2, 3, 4})
-"""Versions a ``mode=ro`` reader accepts: the current one, and older ones the writer can migrate additively."""
+SCHEMA_VERSION = 5  # v5 (#245): engagement record only, no migrations before 1.0
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 
 type RunState = Literal['created', 'invalid', 'checks_complete', 'checks_failed', 'complete']
 type InputKind = Literal['bundle', 'engagement']
 type FindingStatus = Literal['reported', 'verified', 'verification_failed']
-type SurfaceKind = Literal['host', 'endpoint', 'parameter', 'role', 'tech_banner']
-type SurfaceRel = Literal['exposes_endpoint', 'accepts_param', 'authenticated_as', 'redirects_to']
 type LlmRole = Literal['tester', 'verifier', 'summarizer', 'reviewer', 'judge', 'search']
 
-# Run states only move forward (§6). ``checks_complete -> complete`` happens when a summary lands.
+# Run states only move forward (§6). ``checks_complete -> complete`` is reserved for M4 summarization.
 _TRANSITIONS: dict[str, frozenset[str]] = {
     'created': frozenset({'invalid', 'checks_complete', 'checks_failed'}),
     'checks_complete': frozenset({'complete'}),
@@ -88,19 +75,23 @@ CREATE TABLE engagements (
 CREATE TABLE runs (
   id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL,
+  ended_at TEXT,
   state TEXT NOT NULL,
   input_kind TEXT NOT NULL,
   input_ref TEXT NOT NULL,
   input_sha256 TEXT NOT NULL,
+  engagement_id TEXT REFERENCES engagements,
   engine_version TEXT NOT NULL,
   selected_checks TEXT NOT NULL,
   authorized_flag INTEGER NOT NULL DEFAULT 0,
   model TEXT,
+  model_calls INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
   requests_spent INTEGER NOT NULL DEFAULT 0,
   write_requests_spent INTEGER NOT NULL DEFAULT 0,
   scope_snapshot TEXT,
-  error TEXT,
-  summary_error TEXT
+  error TEXT
 );
 CREATE TABLE evidence (
   run_id TEXT NOT NULL REFERENCES runs,
@@ -114,6 +105,7 @@ CREATE TABLE evidence (
 CREATE TABLE findings (
   run_id TEXT NOT NULL REFERENCES runs,
   finding_id TEXT NOT NULL,
+  finding_key TEXT NOT NULL,
   check_id TEXT NOT NULL,
   check_version TEXT NOT NULL,
   severity TEXT NOT NULL,
@@ -126,6 +118,7 @@ CREATE TABLE findings (
   verification_id TEXT,
   PRIMARY KEY (run_id, finding_id)
 );
+CREATE INDEX idx_findings_finding_key ON findings (finding_key);
 CREATE TABLE verifications (
   run_id TEXT NOT NULL REFERENCES runs,
   verification_id TEXT NOT NULL,
@@ -144,29 +137,6 @@ CREATE TABLE tool_calls (
   created_at TEXT NOT NULL,
   PRIMARY KEY (run_id, call_id)
 );
-CREATE TABLE summaries (
-  run_id TEXT PRIMARY KEY REFERENCES runs,
-  content TEXT NOT NULL,
-  model TEXT NOT NULL,
-  generated_at TEXT NOT NULL
-);
-CREATE TABLE surface_nodes (
-  run_id TEXT NOT NULL REFERENCES runs,
-  node_id TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  key TEXT NOT NULL,
-  metadata TEXT NOT NULL,
-  evidence_ids TEXT NOT NULL,
-  PRIMARY KEY (run_id, node_id)
-);
-CREATE TABLE surface_edges (
-  run_id TEXT NOT NULL REFERENCES runs,
-  src_id TEXT NOT NULL,
-  dst_id TEXT NOT NULL,
-  rel TEXT NOT NULL,
-  evidence_id TEXT,
-  PRIMARY KEY (run_id, src_id, dst_id, rel)
-);
 CREATE TABLE coverage_entries (
   run_id TEXT NOT NULL REFERENCES runs,
   surface TEXT NOT NULL,
@@ -178,19 +148,6 @@ CREATE TABLE coverage_entries (
   goal_attempts INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (run_id, surface, risk_area)
-);
-CREATE TABLE llm_usage (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT NOT NULL REFERENCES runs,
-  role TEXT NOT NULL,
-  model TEXT NOT NULL,
-  input_tokens INTEGER NOT NULL DEFAULT 0,
-  output_tokens INTEGER NOT NULL DEFAULT 0,
-  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-  latency_ms INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL,
-  created_at TEXT NOT NULL
 );
 CREATE TABLE web_research (
   run_id TEXT NOT NULL REFERENCES runs,
@@ -207,27 +164,6 @@ CREATE TABLE web_research (
   PRIMARY KEY (run_id, research_id)
 );
 """
-
-_MIGRATIONS: dict[int, tuple[str, ...]] = {
-    # version -> additive statements that take a store from that version to the next (PLAN §17).
-    2: (
-        """CREATE TABLE web_research (
-  run_id TEXT NOT NULL REFERENCES runs,
-  research_id TEXT NOT NULL,
-  call_id TEXT,
-  query TEXT NOT NULL,
-  provider TEXT NOT NULL,
-  model TEXT NOT NULL,
-  auth_mode TEXT NOT NULL,
-  answer TEXT NOT NULL,
-  sources TEXT NOT NULL,
-  truncated INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (run_id, research_id)
-)""",
-    ),
-    3: ('ALTER TABLE runs ADD COLUMN write_requests_spent INTEGER NOT NULL DEFAULT 0',),
-}
 
 _string_list = TypeAdapter(list[str])
 
@@ -266,10 +202,14 @@ class RunRecord:
     requests_spent: int
     scope_snapshot: Scope | None
     error: str | None
-    summary_error: str | None
     findings_count: int
+    ended_at: str | None = None
+    engagement_id: str | None = None
+    model_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
     write_requests_spent: int = 0
-    """State-changing sends this run made (``max_write_requests``, #65); 0 on stores older than v4."""
+    """State-changing sends this run made (``max_write_requests``, #65)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,21 +220,6 @@ class ToolCallRecord:
     tool: str
     args: Any
     result: Any
-    created_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class LlmUsageRecord:
-    """One ``llm_usage`` row: a single model turn's role, model, token counts, latency, and status."""
-
-    role: str
-    model: str
-    input_tokens: int
-    output_tokens: int
-    cache_read_tokens: int
-    cache_write_tokens: int
-    latency_ms: int
-    status: str
     created_at: str
 
 
@@ -313,32 +238,6 @@ class WebResearchRecord:
     """``{"url": ..., "title": ...}`` per source; ``title`` may be ``None``."""
     truncated: bool
     created_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class SurfaceNode:
-    """One ``surface_nodes`` row."""
-
-    node_id: str
-    kind: SurfaceKind
-    key: str
-    metadata: dict[str, Any]
-    evidence_ids: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class SurfaceEdge:
-    """One ``surface_edges`` row."""
-
-    src_id: str
-    dst_id: str
-    rel: SurfaceRel
-    evidence_id: str | None
-
-
-def surface_node_id(kind: SurfaceKind, key: str) -> str:
-    """Deterministic node ID: ``sn_`` + sha256 over ``kind`` and normalized ``key``."""
-    return 'sn_' + sha256_hex(f'{kind}\0{key}'.encode())[:16]
 
 
 def artifact_dir(db_path: Path) -> Path:
@@ -536,19 +435,15 @@ def _apply_pragmas(conn: sqlite3.Connection, busy_timeout_ms: int) -> None:
     conn.execute('PRAGMA synchronous = NORMAL')
 
 
-def _check_version(
-    conn: sqlite3.Connection, path: Path, accepted: frozenset[int] = frozenset({SCHEMA_VERSION})
-) -> None:
+def _check_version(conn: sqlite3.Connection, path: Path) -> None:
     (version,) = conn.execute('PRAGMA user_version').fetchone()
-    if version not in accepted:
+    if version != SCHEMA_VERSION:
         raise StoreError(
-            f'{path}: schema version {version} is not supported (expected {SCHEMA_VERSION}); refusing to open',
+            f'{path}: schema version {version} is not supported (expected {SCHEMA_VERSION}); '
+            'before 1.0 there are no migrations — export with partex export-bundle / partex show --format json '
+            'or remove old stores with scripts/clean-state.sh',
             rule_code='store-version',
         )
-
-
-def _has_table(conn: sqlite3.Connection, name: str) -> bool:
-    return conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone() is not None
 
 
 # ── Reads (shared by reader and writer) ───────────────────────────────────────
@@ -560,7 +455,7 @@ class _Reads:
     async def list_runs(self) -> list[RunRecord]:
         """All runs, oldest first."""
         return await self._db.run(
-            lambda conn: [_run_from_row(r) for r in conn.execute(_run_select(conn) + ' ORDER BY r.created_at, r.id')]
+            lambda conn: [_run_from_row(r) for r in conn.execute(_RUN_SELECT + ' ORDER BY r.created_at, r.id')]
         )
 
     async def get_run(self, run_id: str) -> RunRecord:
@@ -614,14 +509,6 @@ class _Reads:
 
         return await self._db.run(read)
 
-    async def summary(self, run_id: str) -> ReviewSummary | None:
-        def read(conn: sqlite3.Connection) -> ReviewSummary | None:
-            _get_run(conn, run_id)
-            row = conn.execute('SELECT content FROM summaries WHERE run_id = ?', (run_id,)).fetchone()
-            return None if row is None else _load(ReviewSummary.model_validate_json, row[0])
-
-        return await self._db.run(read)
-
     async def coverage(self, run_id: str) -> list[CoverageEntry]:
         def read(conn: sqlite3.Connection) -> list[CoverageEntry]:
             _get_run(conn, run_id)
@@ -659,27 +546,11 @@ class _Reads:
 
         return await self._db.run(read)
 
-    async def llm_usage(self, run_id: str) -> list[LlmUsageRecord]:
-        """The run's recorded model turns, in the order they were recorded."""
-
-        def read(conn: sqlite3.Connection) -> list[LlmUsageRecord]:
-            _get_run(conn, run_id)
-            rows = conn.execute(
-                'SELECT role, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, '
-                'latency_ms, status, created_at FROM llm_usage WHERE run_id = ? ORDER BY id',
-                (run_id,),
-            )
-            return [LlmUsageRecord(*row) for row in rows]
-
-        return await self._db.run(read)
-
     async def web_research(self, run_id: str) -> list[WebResearchRecord]:
-        """The run's persisted web research, in the order it was saved (empty on a version-2 store)."""
+        """The run's persisted web research, in the order it was saved."""
 
         def read(conn: sqlite3.Connection) -> list[WebResearchRecord]:
             _get_run(conn, run_id)
-            if not _has_table(conn, 'web_research'):
-                return []
             rows = conn.execute(_RESEARCH_SELECT + ' WHERE run_id = ? ORDER BY rowid', (run_id,))
             return [_research_from_row(row) for row in rows]
 
@@ -689,8 +560,6 @@ class _Reads:
         """One web research entry of *run_id*, or ``None`` (cross-run IDs never resolve)."""
 
         def read(conn: sqlite3.Connection) -> WebResearchRecord | None:
-            if not _has_table(conn, 'web_research'):
-                return None
             row = conn.execute(
                 _RESEARCH_SELECT + ' WHERE run_id = ? AND research_id = ?', (run_id, research_id)
             ).fetchone()
@@ -698,42 +567,13 @@ class _Reads:
 
         return await self._db.run(read)
 
-    async def surface(self, run_id: str) -> tuple[list[SurfaceNode], list[SurfaceEdge]]:
-        def read(conn: sqlite3.Connection) -> tuple[list[SurfaceNode], list[SurfaceEdge]]:
-            _get_run(conn, run_id)
-            nodes = [
-                SurfaceNode(n, k, key, json.loads(meta), tuple(json.loads(ev)))  # pyright: ignore[reportArgumentType]
-                for n, k, key, meta, ev in conn.execute(
-                    'SELECT node_id, kind, key, metadata, evidence_ids FROM surface_nodes WHERE run_id = ? '
-                    'ORDER BY kind, key',
-                    (run_id,),
-                )
-            ]
-            edges = [
-                SurfaceEdge(s, d, rel, ev)  # pyright: ignore[reportArgumentType]
-                for s, d, rel, ev in conn.execute(
-                    'SELECT src_id, dst_id, rel, evidence_id FROM surface_edges WHERE run_id = ? '
-                    'ORDER BY src_id, dst_id, rel',
-                    (run_id,),
-                )
-            ]
-            return nodes, edges
-
-        return await self._db.run(read)
-
 
 _RUN_SELECT = (
-    'SELECT r.id, r.created_at, r.state, r.input_kind, r.input_ref, r.input_sha256, r.engine_version, '
-    'r.selected_checks, r.authorized_flag, r.model, r.requests_spent, r.scope_snapshot, r.error, r.summary_error, '
-    '(SELECT COUNT(*) FROM findings f WHERE f.run_id = r.id), {writes} FROM runs r'
+    'SELECT r.id, r.created_at, r.ended_at, r.state, r.input_kind, r.input_ref, r.input_sha256, r.engagement_id, '
+    'r.engine_version, r.selected_checks, r.authorized_flag, r.model, r.model_calls, r.input_tokens, r.output_tokens, '
+    'r.requests_spent, r.write_requests_spent, r.scope_snapshot, r.error, '
+    '(SELECT COUNT(*) FROM findings f WHERE f.run_id = r.id) FROM runs r'
 )
-
-
-def _run_select(conn: sqlite3.Connection) -> str:
-    """The runs query for this store: a read-only v2/v3 store has no ``write_requests_spent`` column, so it reads 0."""
-    (version,) = conn.execute('PRAGMA user_version').fetchone()
-    return _RUN_SELECT.format(writes='r.write_requests_spent' if version >= 4 else '0')
-
 
 _FINDING_SELECT = (
     'SELECT finding_id, check_id, check_version, severity, subject, title, description, evidence_ids, remediation, status, '
@@ -769,7 +609,7 @@ def _load[T](validate: Callable[[Any], T], raw: Any) -> T:
 
 
 def _get_run(conn: sqlite3.Connection, run_id: str) -> RunRecord:
-    row = conn.execute(_run_select(conn) + ' WHERE r.id = ?', (run_id,)).fetchone()
+    row = conn.execute(_RUN_SELECT + ' WHERE r.id = ?', (run_id,)).fetchone()
     if row is None:
         raise StoreError(f'run {run_id!r} not found', rule_code='run-not-found')
     return _run_from_row(row)
@@ -779,38 +619,46 @@ def _run_from_row(row: tuple[Any, ...]) -> RunRecord:
     (
         rid,
         created,
+        ended,
         state,
         kind,
         ref,
         sha,
+        eng_id,
         engine,
         checks,
         authorized,
         model,
+        model_calls,
+        in_tok,
+        out_tok,
         spent,
+        writes,
         scope,
         error,
-        summary_error,
         count,
-        writes,
     ) = row
     return RunRecord(
         id=rid,
         created_at=created,
+        ended_at=ended,
         state=state,
         input_kind=kind,
         input_ref=ref,
         input_sha256=sha,
+        engagement_id=eng_id,
         engine_version=engine,
         selected_checks=tuple(_load(_string_list.validate_json, checks)),
         authorized=bool(authorized),
         model=model,
+        model_calls=model_calls,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
         requests_spent=spent,
+        write_requests_spent=writes,
         scope_snapshot=None if scope is None else _load(Scope.model_validate_json, scope),
         error=error,
-        summary_error=summary_error,
         findings_count=count,
-        write_requests_spent=writes,
     )
 
 
@@ -856,7 +704,7 @@ class RunReader(_Reads):
             )
             try:
                 _apply_pragmas(conn, busy_timeout_ms)
-                _check_version(conn, db_path, READABLE_VERSIONS)
+                _check_version(conn, db_path)
             except BaseException:
                 conn.close()
                 raise
@@ -928,22 +776,34 @@ class RunStore(_Reads):
         authorized: bool = False,
         model: str | None = None,
         scope_snapshot: Scope | None = None,
+        engagement: Engagement | None = None,
+        engagement_id_val: str | None = None,
     ) -> str:
-        """Open a run row in state ``created`` and return its ID (``run_`` + uuid4)."""
+        """Open a run row in state ``created`` and return its ID (``run_`` + uuid4).
+
+        When *engagement* is supplied, its ``engagements`` row is recorded in the same transaction and
+        linked via ``runs.engagement_id``.
+        """
         run_id = 'run_' + uuid.uuid4().hex
         scope = None if scope_snapshot is None else scope_snapshot.model_dump_json()
+        eng_id = engagement_id(engagement) if engagement is not None else engagement_id_val
 
         def write(conn: sqlite3.Connection) -> None:
+            now = _now()
+            if engagement is not None and eng_id is not None:
+                _insert_engagement_row(conn, eng_id, engagement, now)
             conn.execute(
-                'INSERT INTO runs (id, created_at, state, input_kind, input_ref, input_sha256, engine_version, '
-                'selected_checks, authorized_flag, model, scope_snapshot) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'INSERT INTO runs (id, created_at, state, input_kind, input_ref, input_sha256, engagement_id, '
+                'engine_version, selected_checks, authorized_flag, model, scope_snapshot) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (
                     run_id,
-                    _now(),
+                    now,
                     'created',
                     input_kind,
                     input_ref,
                     input_sha256,
+                    eng_id,
                     engine_version,
                     _json(list(selected_checks)),
                     int(authorized),
@@ -958,6 +818,15 @@ class RunStore(_Reads):
     async def set_state(self, run_id: str, state: RunState, *, error: str | None = None) -> None:
         """Move *run_id* to *state* (forward only), optionally recording an error diagnostic."""
         await self._db.run(lambda conn: _transaction(conn, lambda c: _set_state(c, run_id, state, error)))
+
+    async def set_model(self, run_id: str, model: str) -> None:
+        """Set ``runs.model`` on *run_id*."""
+
+        def write(conn: sqlite3.Connection) -> None:
+            _get_run(conn, run_id)
+            conn.execute('UPDATE runs SET model = ? WHERE id = ?', (model, run_id))
+
+        await self._db.run(lambda conn: _transaction(conn, write))
 
     async def add_requests_spent(self, run_id: str, count: int = 1) -> None:
         def write(conn: sqlite3.Connection) -> None:
@@ -994,10 +863,8 @@ class RunStore(_Reads):
         findings: Sequence[Finding],
         *,
         coverage: Sequence[CoverageEntry] = (),
-        surface_nodes: Sequence[tuple[SurfaceKind, str, dict[str, Any], Sequence[str]]] = (),
-        surface_edges: Sequence[tuple[str, str, SurfaceRel, str | None]] = (),
     ) -> None:
-        """Persist a passive run's evidence, findings, coverage, and surface atomically.
+        """Persist a passive run's evidence, findings, and coverage atomically.
 
         Either everything lands or nothing does: a failure leaves the run ``created`` with no rows.
         """
@@ -1009,10 +876,6 @@ class RunStore(_Reads):
             _insert_findings(conn, run_id, findings)
             if coverage:
                 _upsert_coverage_rows(conn, run_id, coverage)
-            for kind, key, metadata, ev_ids in surface_nodes:
-                _upsert_surface_node_row(conn, run_id, kind, key, metadata, ev_ids)
-            for src_id, dst_id, rel, ev_id in surface_edges:
-                _add_surface_edge_row(conn, run_id, src_id, dst_id, rel, ev_id)
             _set_state(conn, run_id, 'checks_complete', None)
 
         await self._db.run(lambda conn: _transaction(conn, write))
@@ -1096,56 +959,20 @@ class RunStore(_Reads):
 
         await self._db.run(lambda conn: _transaction(conn, write))
 
-    # ── summaries ──
-
-    async def save_summary(self, run_id: str, summary: ReviewSummary, model: str) -> None:
-        """Store (or replace) the summary and mark the run ``complete``; clears ``summary_error``."""
-
-        def write(conn: sqlite3.Connection) -> None:
-            run = _require_state(conn, run_id, {'checks_complete', 'complete'})
-            conn.execute(
-                'INSERT OR REPLACE INTO summaries (run_id, content, model, generated_at) VALUES (?, ?, ?, ?)',
-                (run_id, summary.model_dump_json(), model, _now()),
-            )
-            conn.execute('UPDATE runs SET summary_error = NULL WHERE id = ?', (run_id,))
-            if run.state != 'complete':
-                _set_state(conn, run_id, 'complete', None)
-
-        await self._db.run(lambda conn: _transaction(conn, write))
-
-    async def set_summary_error(self, run_id: str, error: str) -> None:
-        def write(conn: sqlite3.Connection) -> None:
-            _get_run(conn, run_id)
-            conn.execute('UPDATE runs SET summary_error = ? WHERE id = ?', (error, run_id))
-
-        await self._db.run(lambda conn: _transaction(conn, write))
-
-    # ── engagements, audit, coverage, surface ──
+    # ── engagements, audit, coverage, model usage totals ──
 
     async def record_engagement(self, engagement: Engagement) -> str:
         """Store *engagement* (idempotent) and return its ``eng_`` ID."""
         eng_id = engagement_id(engagement)
 
         def write(conn: sqlite3.Connection) -> None:
-            conn.execute(
-                'INSERT OR IGNORE INTO engagements (id, name, base_url, scope, attestation, operator, created_at) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?)',
-                (
-                    eng_id,
-                    engagement.target.name,
-                    engagement.target.base_url,
-                    engagement.scope.model_dump_json(),
-                    engagement.authorization.attestation,
-                    engagement.authorization.operator,
-                    _now(),
-                ),
-            )
+            _insert_engagement_row(conn, eng_id, engagement, _now())
 
         await self._db.run(lambda conn: _transaction(conn, write))
         return eng_id
 
     async def record_tool_call(self, run_id: str, tool: str, args: Any, result: Any) -> str:
-        """Append a tool invocation to the audit log. Callers redact secrets first."""
+        """Append an action tool invocation to the audit log. Callers redact secrets first."""
         call_id = 'tc_' + uuid.uuid4().hex
 
         def write(conn: sqlite3.Connection) -> None:
@@ -1217,52 +1044,26 @@ class RunStore(_Reads):
         await self._db.run(lambda conn: _transaction(conn, write))
         return research_id
 
-    async def record_llm_usage(
+    async def record_model_usage(
         self,
         run_id: str,
         *,
-        role: LlmRole,
-        model: str,
-        status: Literal['ok', 'error'],
+        model: str | None = None,
         input_tokens: int = 0,
         output_tokens: int = 0,
-        cache_read_tokens: int = 0,
-        cache_write_tokens: int = 0,
-        latency_ms: int = 0,
+        calls: int = 1,
     ) -> None:
+        """Accumulate model call and token totals onto ``runs`` (and set ``runs.model`` if still unset)."""
+
         def write(conn: sqlite3.Connection) -> None:
             _get_run(conn, run_id)
             conn.execute(
-                'INSERT INTO llm_usage (run_id, role, model, input_tokens, output_tokens, cache_read_tokens, '
-                'cache_write_tokens, latency_ms, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                (
-                    run_id,
-                    role,
-                    model,
-                    input_tokens,
-                    output_tokens,
-                    cache_read_tokens,
-                    cache_write_tokens,
-                    latency_ms,
-                    status,
-                    _now(),
-                ),
+                'UPDATE runs SET model_calls = model_calls + ?, input_tokens = input_tokens + ?, '
+                'output_tokens = output_tokens + ?, model = COALESCE(model, ?) WHERE id = ?',
+                (calls, input_tokens, output_tokens, model, run_id),
             )
 
         await self._db.run(lambda conn: _transaction(conn, write))
-
-    async def llm_usage_totals(self, run_id: str) -> dict[str, int]:
-        """Summed token counts and call count for *run_id*."""
-
-        def read(conn: sqlite3.Connection) -> dict[str, int]:
-            row = conn.execute(
-                'SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0) '
-                'FROM llm_usage WHERE run_id = ?',
-                (run_id,),
-            ).fetchone()
-            return {'calls': row[0], 'input_tokens': row[1], 'output_tokens': row[2]}
-
-        return await self._db.run(read)
 
     async def upsert_coverage(self, run_id: str, entries: Iterable[CoverageEntry]) -> None:
         """Insert or replace coverage entries keyed by ``(surface, risk_area)``."""
@@ -1271,32 +1072,6 @@ class RunStore(_Reads):
         def write(conn: sqlite3.Connection) -> None:
             _get_run(conn, run_id)
             _upsert_coverage_rows(conn, run_id, rows)
-
-        await self._db.run(lambda conn: _transaction(conn, write))
-
-    async def upsert_surface_node(
-        self,
-        run_id: str,
-        kind: SurfaceKind,
-        key: str,
-        *,
-        metadata: dict[str, Any] | None = None,
-        evidence_ids: Sequence[str] = (),
-    ) -> str:
-        """Insert a surface node or merge *evidence_ids* / *metadata* into the existing one. Returns its ID."""
-
-        def write(conn: sqlite3.Connection) -> str:
-            _get_run(conn, run_id)
-            return _upsert_surface_node_row(conn, run_id, kind, key, metadata, evidence_ids)
-
-        return await self._db.run(lambda conn: _transaction(conn, write))
-
-    async def add_surface_edge(
-        self, run_id: str, src_id: str, dst_id: str, rel: SurfaceRel, evidence_id: str | None = None
-    ) -> None:
-        def write(conn: sqlite3.Connection) -> None:
-            _get_run(conn, run_id)
-            _add_surface_edge_row(conn, run_id, src_id, dst_id, rel, evidence_id)
 
         await self._db.run(lambda conn: _transaction(conn, write))
 
@@ -1322,29 +1097,23 @@ def _initialize(conn: sqlite3.Connection, path: Path) -> None:
 
         _transaction(conn, create)
         return
-    if version in _MIGRATIONS:
-        _migrate(conn, path)
     _check_version(conn, path)
 
 
-def _migrate(conn: sqlite3.Connection, path: Path) -> None:
-    """Upgrade an older store additively, one version at a time, in a single transaction (PLAN §17).
-
-    The version is re-read under the write lock, so two writers opening the same old store migrate it once.
-    """
-
-    def upgrade(c: sqlite3.Connection) -> None:
-        (version,) = c.execute('PRAGMA user_version').fetchone()
-        while version in _MIGRATIONS:
-            for statement in _MIGRATIONS[version]:
-                c.execute(statement)
-            version += 1
-            c.execute(f'PRAGMA user_version = {version}')
-
-    try:
-        _transaction(conn, upgrade)
-    except sqlite3.DatabaseError as exc:
-        raise StoreError(f'{path}: could not upgrade the store schema: {exc}', rule_code='store-version') from exc
+def _insert_engagement_row(conn: sqlite3.Connection, eng_id: str, engagement: Engagement, now: str) -> None:
+    conn.execute(
+        'INSERT OR IGNORE INTO engagements (id, name, base_url, scope, attestation, operator, created_at) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (
+            eng_id,
+            engagement.target.name,
+            engagement.target.base_url,
+            engagement.scope.model_dump_json(),
+            engagement.authorization.attestation,
+            engagement.authorization.operator,
+            now,
+        ),
+    )
 
 
 def _require_state(conn: sqlite3.Connection, run_id: str, allowed: set[str]) -> RunRecord:
@@ -1358,7 +1127,10 @@ def _set_state(conn: sqlite3.Connection, run_id: str, state: RunState, error: st
     run = _get_run(conn, run_id)
     if state not in _TRANSITIONS[run.state]:
         raise StoreError(f'run {run_id}: cannot move from {run.state} to {state}', rule_code='run-state')
-    conn.execute('UPDATE runs SET state = ?, error = COALESCE(?, error) WHERE id = ?', (state, error, run_id))
+    conn.execute(
+        'UPDATE runs SET state = ?, ended_at = COALESCE(ended_at, ?), error = COALESCE(?, error) WHERE id = ?',
+        (state, _now(), error, run_id),
+    )
 
 
 def _insert_evidence(conn: sqlite3.Connection, run_id: str, item: Evidence) -> bool:
@@ -1390,12 +1162,15 @@ def _insert_findings(conn: sqlite3.Connection, run_id: str, findings: Sequence[F
     _get_run(conn, run_id)
     for finding in findings:
         _require_evidence(conn, run_id, finding.evidence_ids, f'finding {finding.id}')
+        fkey = finding_key(finding.check_id, finding.subject, finding.title)
         conn.execute(
-            'INSERT INTO findings (run_id, finding_id, check_id, check_version, severity, subject, title, '
-            'description, evidence_ids, remediation, status, verification_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO findings (run_id, finding_id, finding_key, check_id, check_version, severity, subject, title, '
+            'description, evidence_ids, remediation, status, verification_id) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             (
                 run_id,
                 finding.id,
+                fkey,
                 finding.check_id,
                 finding.check_version,
                 finding.severity,
@@ -1429,40 +1204,3 @@ def _upsert_coverage_rows(conn: sqlite3.Connection, run_id: str, rows: Sequence[
                 _now(),
             ),
         )
-
-
-def _upsert_surface_node_row(
-    conn: sqlite3.Connection,
-    run_id: str,
-    kind: SurfaceKind,
-    key: str,
-    metadata: dict[str, Any] | None,
-    evidence_ids: Sequence[str],
-) -> str:
-    node_id = surface_node_id(kind, key)
-    if evidence_ids:
-        _require_evidence(conn, run_id, evidence_ids, f'surface node {kind} {key}')
-    row = conn.execute(
-        'SELECT metadata, evidence_ids FROM surface_nodes WHERE run_id = ? AND node_id = ?', (run_id, node_id)
-    ).fetchone()
-    merged_meta: dict[str, Any] = {} if row is None else json.loads(row[0])
-    merged_meta.update(metadata or {})
-    existing: list[str] = [] if row is None else _string_list.validate_json(row[1])
-    merged_ev = sorted({*existing, *evidence_ids})
-    conn.execute(
-        'INSERT OR REPLACE INTO surface_nodes (run_id, node_id, kind, key, metadata, evidence_ids) '
-        'VALUES (?, ?, ?, ?, ?, ?)',
-        (run_id, node_id, kind, key, _json(merged_meta), _json(merged_ev)),
-    )
-    return node_id
-
-
-def _add_surface_edge_row(
-    conn: sqlite3.Connection, run_id: str, src_id: str, dst_id: str, rel: SurfaceRel, evidence_id: str | None
-) -> None:
-    if evidence_id is not None:
-        _require_evidence(conn, run_id, [evidence_id], f'surface edge {rel}')
-    conn.execute(
-        'INSERT OR IGNORE INTO surface_edges (run_id, src_id, dst_id, rel, evidence_id) VALUES (?, ?, ?, ?, ?)',
-        (run_id, src_id, dst_id, rel, evidence_id),
-    )

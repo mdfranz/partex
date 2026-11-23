@@ -144,7 +144,6 @@ def _run_record(
         requests_spent=spent,
         scope_snapshot=scope,
         error=None,
-        summary_error=None,
         findings_count=0,
     )
 

@@ -513,10 +513,10 @@ def test_show_unknown_run_exits_1(capsys: pytest.CaptureFixture[str], db: Path) 
     assert 'run-not-found' in err
 
 
-def test_show_text_includes_error_verifications_and_summary() -> None:
+def test_show_text_includes_error_verifications_and_model_usage() -> None:
     payload: dict[str, Any] = {
         'run': {
-            'state': 'complete',
+            'state': 'checks_complete',
             'input_kind': 'engagement',
             'input_ref': 'eng_x',
             'engine_version': '0.1.0',
@@ -524,18 +524,19 @@ def test_show_text_includes_error_verifications_and_summary() -> None:
             'requests_spent': 3,
             'authorized': True,
             'error': 'earlier diagnostic',
+            'model_calls': 2,
+            'input_tokens': 100,
+            'output_tokens': 25,
         },
         'evidence': [],
         'findings': [],
-        'llm_usage': [],
         'verifications': [{'id': 'vf_1', 'verdict': 'confirmed', 'finding_id': 'fn_1'}],
-        'summary': {'narrative': 'All good.'},
     }
     text = cli._render_text(payload, 'run_x')  # pyright: ignore[reportPrivateUsage]
     assert 'requests spent: 3  authorized: True' in text
     assert 'error: earlier diagnostic' in text
+    assert 'model calls: 2  tokens in/out: 100/25' in text
     assert 'verification vf_1: confirmed for fn_1' in text
-    assert text.endswith('summary:\n  All good.\n')
 
 
 # ── checks ────────────────────────────────────────────────────────────────────

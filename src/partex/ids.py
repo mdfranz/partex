@@ -43,6 +43,15 @@ def evidence_id(evidence: Evidence) -> str:
     return 'ev_' + sha256_hex(canonical_json(d))[:16]
 
 
+def finding_key(check_id: str, subject: str, title: str) -> str:
+    """Return ``fk_`` + sha256 over ``check_id``, ``subject``, and ``title`` (NUL-separated).
+
+    Stable identity of an issue across runs, independent of ``evidence_ids`` (#245).
+    """
+    payload = check_id + '\0' + subject + '\0' + title
+    return 'fk_' + sha256_hex(payload.encode())[:16]
+
+
 def finding_id(check_id: str, subject: str, title: str, evidence_ids: list[str]) -> str:
     """Return ``fn_`` + sha256 over ``check_id``, ``subject``, ``title``, and sorted evidence IDs.
 

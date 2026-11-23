@@ -17,15 +17,11 @@ Reconciles captured ``HttpEvidence`` exchanges against ``ConfigEvidence`` items 
   - Finding-bearing operations -> ``reported``
   - Unobserved declared operations -> ``needs_follow_up`` (not findings)
   - No contract in bundle / unresolvable external ``$ref`` -> ``not_applicable`` (insufficient evidence)
-- Surface graph (``surface(evidence)``):
-  - Populates deterministic ``host`` and ``endpoint`` nodes (``surface_nodes.key``) and
-    ``exposes_endpoint`` edges for downstream S2 ``authorization-testing`` (#27).
 """
 
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from ..ids import normalized_operation_key
@@ -564,99 +560,6 @@ class ApiContractConformanceCheck:
             )
 
         return entries
-
-    def surface(self, evidence: Sequence[Evidence]) -> dict[str, list[dict[str, Any]]]:
-        """Surface graph rows (``nodes`` and ``edges``) using normalized operation keys (PLAN §7, §12)."""
-        analysis = build_operation_inventory(evidence)
-        nodes: list[dict[str, Any]] = []
-        edges: list[dict[str, Any]] = []
-        host_evidence: dict[str, set[str]] = {}
-
-        for op in analysis.declared_operations:
-            matched = analysis.matched.get(op.key)
-            if matched is None:
-                nodes.append(
-                    {
-                        'kind': 'endpoint',
-                        'key': op.key,
-                        'metadata': {
-                            'contract_path': op.contract_path,
-                            'deprecated': op.deprecated,
-                            'path_params': list(op.path_params),
-                            'provenance': 'declared',
-                            'query_params': list(op.query_params),
-                            'revision': op.revision,
-                        },
-                        'evidence_ids': [op.contract_evidence_id],
-                    }
-                )
-            else:
-                merged_qparams = sorted({*op.query_params, *matched.observed_query_params})
-                ev_ids = sorted({op.contract_evidence_id, *matched.evidence_ids})
-                nodes.append(
-                    {
-                        'kind': 'endpoint',
-                        'key': op.key,
-                        'metadata': {
-                            'contract_path': op.contract_path,
-                            'deprecated': op.deprecated,
-                            'path_params': list(op.path_params),
-                            'provenance': 'declared+observed',
-                            'query_params': merged_qparams,
-                            'revision': op.revision,
-                        },
-                        'evidence_ids': ev_ids,
-                    }
-                )
-                for host in matched.hosts:
-                    host_evidence.setdefault(host, set()).update(matched.evidence_ids)
-                    edges.append(
-                        {
-                            'src_kind': 'host',
-                            'src_key': host,
-                            'dst_kind': 'endpoint',
-                            'dst_key': op.key,
-                            'rel': 'exposes_endpoint',
-                            'evidence_id': matched.evidence_ids[0],
-                        }
-                    )
-
-        for shadow in (*analysis.shadows, *analysis.observed_without_contract):
-            nodes.append(
-                {
-                    'kind': 'endpoint',
-                    'key': shadow.key,
-                    'metadata': {
-                        'provenance': 'observed',
-                        'query_params': list(shadow.query_params),
-                    },
-                    'evidence_ids': sorted(shadow.evidence_ids),
-                }
-            )
-            for host in shadow.hosts:
-                host_evidence.setdefault(host, set()).update(shadow.evidence_ids)
-                edges.append(
-                    {
-                        'src_kind': 'host',
-                        'src_key': host,
-                        'dst_kind': 'endpoint',
-                        'dst_key': shadow.key,
-                        'rel': 'exposes_endpoint',
-                        'evidence_id': shadow.evidence_ids[0],
-                    }
-                )
-
-        for host in sorted(host_evidence):
-            nodes.append(
-                {
-                    'kind': 'host',
-                    'key': host,
-                    'metadata': {},
-                    'evidence_ids': sorted(host_evidence[host]),
-                }
-            )
-
-        return {'nodes': nodes, 'edges': edges}
 
 
 api_contract_conformance_check = ApiContractConformanceCheck()

@@ -8,7 +8,7 @@ from pathlib import Path
 import anyio
 import pytest
 
-from partex.ids import evidence_id, finding_id, verification_id
+from partex.ids import evidence_id, finding_id, finding_key, verification_id
 from partex.models import (
     Authorization,
     ConfigEvidence,
@@ -22,12 +22,11 @@ from partex.models import (
     HttpExchange,
     HttpRequest,
     HttpResponse,
-    ReviewSummary,
     Scope,
     Verification,
     get_header,
 )
-from partex.storage import SCHEMA_VERSION, RunReader, RunStore, StoreError, surface_node_id
+from partex.storage import SCHEMA_VERSION, RunReader, RunStore, StoreError
 
 # ── builders ──────────────────────────────────────────────────────────────────
 
@@ -110,23 +109,23 @@ def _execute(path: Path, sql: str) -> None:
 
 async def test_open_creates_versioned_wal_database(tmp_store: RunStore, tmp_store_path: Path):
     assert tmp_store_path.is_file()
+    assert SCHEMA_VERSION == 5
     with closing(sqlite3.connect(tmp_store_path)) as conn:
         assert conn.execute('PRAGMA user_version').fetchone() == (SCHEMA_VERSION,)
         assert conn.execute('PRAGMA journal_mode').fetchone() == ('wal',)
         tables = {name for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert {
+        indexes = {name for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert tables == {
         'engagements',
         'runs',
         'evidence',
         'findings',
         'verifications',
         'tool_calls',
-        'summaries',
-        'surface_nodes',
-        'surface_edges',
         'coverage_entries',
-        'llm_usage',
-    } <= tables
+        'web_research',
+    }
+    assert 'idx_findings_finding_key' in indexes
 
 
 async def test_connection_pragmas(tmp_store: RunStore):
@@ -156,13 +155,16 @@ async def test_reopen_keeps_data(tmp_store_path: Path):
 
 
 @pytest.mark.parametrize('opener', [RunStore.open, RunReader.open])
-async def test_unknown_schema_version_refused(tmp_store_path: Path, opener: object):
+@pytest.mark.parametrize('bad_version', [1, 2, 3, 4, 99])
+async def test_unknown_or_older_schema_version_refused(tmp_store_path: Path, opener: object, bad_version: int):
     async with await RunStore.open(tmp_store_path):
         pass
-    _execute(tmp_store_path, 'PRAGMA user_version = 99')
+    _execute(tmp_store_path, f'PRAGMA user_version = {bad_version}')
     with pytest.raises(StoreError) as exc:
         await opener(tmp_store_path)  # pyright: ignore[reportUnknownVariableType, reportCallIssue]
     assert exc.value.rule_code == 'store-version'
+    assert 'clean-state.sh' in str(exc.value)
+    assert 'export-bundle' in str(exc.value)
 
 
 async def test_foreign_database_refused(tmp_store_path: Path):
@@ -235,9 +237,20 @@ async def test_concurrent_calls_serialize_on_one_connection(tmp_store: RunStore)
 
 async def test_create_and_list_runs(tmp_store: RunStore):
     scope = Scope(hosts=['app.example.test'], ports=[443])
+    eng = Engagement(
+        target=EngagementTarget(name='app', base_url='https://app.example.test'),
+        scope=scope,
+        authorization=Authorization(attestation='SOW-1', operator='op'),
+    )
     first = await _run(tmp_store)
     second = await _run(
-        tmp_store, input_kind='engagement', input_ref='eng_x', authorized=True, model='m', scope_snapshot=scope
+        tmp_store,
+        input_kind='engagement',
+        input_ref='eng_x',
+        authorized=True,
+        model='m',
+        scope_snapshot=scope,
+        engagement=eng,
     )
 
     runs = await tmp_store.list_runs()
@@ -245,10 +258,26 @@ async def test_create_and_list_runs(tmp_store: RunStore):
     run = runs[1]
     assert run.id.startswith('run_')
     assert (run.state, run.input_kind, run.authorized, run.model) == ('created', 'engagement', True, 'm')
+    assert run.ended_at is None
+    assert run.engagement_id is not None and run.engagement_id.startswith('eng_')
     assert run.selected_checks == ('header-security',)
     assert run.scope_snapshot == scope
-    assert (run.requests_spent, run.findings_count, run.error, run.summary_error) == (0, 0, None, None)
-    assert runs[0].scope_snapshot is None
+    assert (
+        run.requests_spent,
+        run.findings_count,
+        run.error,
+        run.model_calls,
+        run.input_tokens,
+        run.output_tokens,
+    ) == (
+        0,
+        0,
+        None,
+        0,
+        0,
+        0,
+    )
+    assert runs[0].scope_snapshot is None and runs[0].engagement_id is None
 
 
 @pytest.mark.parametrize(
@@ -280,8 +309,11 @@ async def test_state_transitions_are_monotonic(tmp_store: RunStore, path: list[s
 
 async def test_failure_state_records_error(tmp_store: RunStore):
     run_id = await _run(tmp_store)
+    assert (await tmp_store.get_run(run_id)).ended_at is None
     await tmp_store.set_state(run_id, 'checks_failed', error='header-security raised KeyError')
-    assert (await tmp_store.get_run(run_id)).error == 'header-security raised KeyError'
+    run = await tmp_store.get_run(run_id)
+    assert run.error == 'header-security raised KeyError'
+    assert run.ended_at is not None
 
 
 async def test_requests_spent(tmp_store: RunStore):
@@ -298,20 +330,17 @@ async def test_requests_spent(tmp_store: RunStore):
         lambda s: s.evidence('run_nope'),
         lambda s: s.findings('run_nope'),
         lambda s: s.verifications('run_nope'),
-        lambda s: s.summary('run_nope'),
         lambda s: s.coverage('run_nope'),
         lambda s: s.tool_calls('run_nope'),
-        lambda s: s.surface('run_nope'),
+        lambda s: s.web_research('run_nope'),
         lambda s: s.set_state('run_nope', 'invalid'),
+        lambda s: s.set_model('run_nope', 'm'),
         lambda s: s.add_requests_spent('run_nope'),
         lambda s: s.add_evidence('run_nope', _http()),
         lambda s: s.commit_findings('run_nope', []),
-        lambda s: s.set_summary_error('run_nope', 'x'),
         lambda s: s.record_tool_call('run_nope', 't', {}, {}),
-        lambda s: s.record_llm_usage('run_nope', role='tester', model='m', status='ok'),
+        lambda s: s.record_model_usage('run_nope', model='m', input_tokens=1, output_tokens=1),
         lambda s: s.upsert_coverage('run_nope', []),
-        lambda s: s.upsert_surface_node('run_nope', 'host', 'h'),
-        lambda s: s.add_surface_edge('run_nope', 'a', 'b', 'redirects_to'),
     ],
 )
 async def test_unknown_run_id(tmp_store: RunStore, call: object):
@@ -334,6 +363,13 @@ async def test_commit_passive_is_atomic_and_ordered(tmp_store: RunStore):
     assert await tmp_store.findings(run_id) == findings
     run = await tmp_store.get_run(run_id)
     assert (run.state, run.findings_count) == ('checks_complete', 2)
+    assert run.ended_at is not None
+    stored_keys = await tmp_store._db.run(  # pyright: ignore[reportPrivateUsage]
+        lambda c: [
+            k for (k,) in c.execute('SELECT finding_key FROM findings WHERE run_id = ? ORDER BY rowid', (run_id,))
+        ]
+    )
+    assert stored_keys == [finding_key(f.check_id, f.subject, f.title) for f in findings]
 
 
 async def test_commit_passive_rolls_back_everything_on_bad_finding(tmp_store: RunStore):
@@ -519,34 +555,7 @@ async def test_no_verification_on_invalid_run(tmp_store: RunStore):
     assert exc.value.rule_code == 'run-state'
 
 
-# ── summaries ─────────────────────────────────────────────────────────────────
-
-
-async def test_summary_lifecycle(tmp_store: RunStore):
-    run_id = await _run(tmp_store)
-    item = _http()
-    finding = _finding(item)
-    with pytest.raises(StoreError):
-        await tmp_store.save_summary(run_id, ReviewSummary(narrative='early', finding_ids=[]), 'm')
-
-    await tmp_store.commit_passive(run_id, [item], [finding])
-    assert await tmp_store.summary(run_id) is None
-
-    await tmp_store.set_summary_error(run_id, 'timed out after 60s')
-    assert (await tmp_store.get_run(run_id)).summary_error == 'timed out after 60s'
-
-    first = ReviewSummary(narrative='one finding', finding_ids=[finding.id])
-    await tmp_store.save_summary(run_id, first, 'test-model')
-    run = await tmp_store.get_run(run_id)
-    assert (run.state, run.summary_error) == ('complete', None)
-    assert await tmp_store.summary(run_id) == first
-
-    second = ReviewSummary(narrative='regenerated', finding_ids=[finding.id])
-    await tmp_store.save_summary(run_id, second, 'test-model')
-    assert await tmp_store.summary(run_id) == second
-
-
-# ── engagements, audit, coverage, surface ─────────────────────────────────────
+# ── engagements, audit, coverage, model usage totals ──────────────────────────
 
 
 async def test_record_engagement_is_idempotent(tmp_store: RunStore):
@@ -562,7 +571,7 @@ async def test_record_engagement_is_idempotent(tmp_store: RunStore):
     assert rows == [(first, 'op')]
 
 
-async def test_tool_calls_and_llm_usage(tmp_store: RunStore):
+async def test_tool_calls_and_run_model_usage(tmp_store: RunStore):
     run_id = await _run(tmp_store)
     call_id = await tmp_store.record_tool_call(
         run_id, 'http_request', {'path': '/', 'headers': {'Cookie': '<redacted>'}}, {'ok': True}
@@ -575,10 +584,14 @@ async def test_tool_calls_and_llm_usage(tmp_store: RunStore):
         {'ok': True},
     )
 
-    assert await tmp_store.llm_usage_totals(run_id) == {'calls': 0, 'input_tokens': 0, 'output_tokens': 0}
-    await tmp_store.record_llm_usage(run_id, role='tester', model='m', status='ok', input_tokens=10, output_tokens=3)
-    await tmp_store.record_llm_usage(run_id, role='judge', model='m', status='error', input_tokens=5, latency_ms=12)
-    assert await tmp_store.llm_usage_totals(run_id) == {'calls': 2, 'input_tokens': 15, 'output_tokens': 3}
+    run = await tmp_store.get_run(run_id)
+    assert (run.model, run.model_calls, run.input_tokens, run.output_tokens) == (None, 0, 0, 0)
+    await tmp_store.record_model_usage(run_id, model='m', input_tokens=10, output_tokens=3)
+    await tmp_store.record_model_usage(run_id, model=None, input_tokens=5, output_tokens=0)
+    run = await tmp_store.get_run(run_id)
+    assert (run.model, run.model_calls, run.input_tokens, run.output_tokens) == ('m', 2, 15, 3)
+    await tmp_store.set_model(run_id, 'm2')
+    assert (await tmp_store.get_run(run_id)).model == 'm2'
 
 
 async def test_coverage_upsert(tmp_store: RunStore):
@@ -619,38 +632,6 @@ async def test_coverage_upsert(tmp_store: RunStore):
             ],
         )
     assert exc.value.rule_code == 'dangling-evidence'
-
-
-async def test_surface_graph(tmp_store: RunStore):
-    run_id = await _run(tmp_store)
-    a, b = _http('/a'), _http('/b')
-    await tmp_store.add_evidence(run_id, a)
-    await tmp_store.add_evidence(run_id, b)
-
-    host = await tmp_store.upsert_surface_node(run_id, 'host', 'app.example.test', metadata={'scheme': 'https'})
-    ep = await tmp_store.upsert_surface_node(run_id, 'endpoint', 'GET /a', evidence_ids=[a.id])
-    assert ep == await tmp_store.upsert_surface_node(
-        run_id, 'endpoint', 'GET /a', metadata={'seen': 2}, evidence_ids=[b.id]
-    )
-    assert ep == surface_node_id('endpoint', 'GET /a') != surface_node_id('host', 'GET /a')
-    await tmp_store.add_surface_edge(run_id, host, ep, 'exposes_endpoint', a.id)
-    await tmp_store.add_surface_edge(run_id, host, ep, 'exposes_endpoint', a.id)
-
-    nodes, edges = await tmp_store.surface(run_id)
-    by_kind = {n.kind: n for n in nodes}
-    assert by_kind['endpoint'].metadata == {'seen': 2}
-    assert by_kind['endpoint'].evidence_ids == tuple(sorted([a.id, b.id]))
-    assert by_kind['host'].metadata == {'scheme': 'https'} and by_kind['host'].evidence_ids == ()
-    assert [(e.src_id, e.dst_id, e.rel, e.evidence_id) for e in edges] == [(host, ep, 'exposes_endpoint', a.id)]
-
-    for call in (
-        tmp_store.upsert_surface_node(run_id, 'endpoint', 'GET /z', evidence_ids=['ev_missing']),
-        tmp_store.add_surface_edge(run_id, host, ep, 'redirects_to', 'ev_missing'),
-    ):
-        with pytest.raises(StoreError) as exc:
-            await call
-        assert exc.value.rule_code == 'dangling-evidence'
-    await tmp_store.add_surface_edge(run_id, ep, host, 'redirects_to')
 
 
 # ── re-validation on read ─────────────────────────────────────────────────────
@@ -761,73 +742,3 @@ async def test_web_research_ids_never_resolve_across_runs(tmp_store: RunStore):
     research_id = await tmp_store.add_web_research(first, **_research_kwargs())  # pyright: ignore[reportArgumentType]
     assert await tmp_store.get_web_research(second, research_id) is None
     assert await tmp_store.web_research(second) == []
-
-
-def _downgrade_to_v3(path: Path) -> None:
-    """Make a fresh store look like a version-3 one: v4 only added ``runs.write_requests_spent`` (#65)."""
-    _execute(path, 'ALTER TABLE runs DROP COLUMN write_requests_spent')
-    _execute(path, 'PRAGMA user_version = 3')
-
-
-def _downgrade_to_v2(path: Path) -> None:
-    """Make a fresh store look like a version-2 one: v3 only added ``web_research``."""
-    _downgrade_to_v3(path)
-    _execute(path, 'DROP TABLE web_research')
-    _execute(path, 'PRAGMA user_version = 2')
-
-
-async def test_writer_migrates_a_version_2_store_additively(tmp_store_path: Path):
-    async with await RunStore.open(tmp_store_path) as store:
-        run_id = await _run(store)
-        await store.add_evidence(run_id, _http())
-    _downgrade_to_v2(tmp_store_path)
-
-    async with await RunStore.open(tmp_store_path) as store:
-        assert len(await store.evidence(run_id)) == 1  # existing data kept
-        assert await store.web_research(run_id) == []
-        await store.add_web_research(run_id, **_research_kwargs())  # pyright: ignore[reportArgumentType]
-        assert len(await store.web_research(run_id)) == 1
-    with closing(sqlite3.connect(tmp_store_path)) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone() == (SCHEMA_VERSION,)
-
-
-async def test_reader_opens_a_version_2_store_without_migrating_it(tmp_store_path: Path):
-    async with await RunStore.open(tmp_store_path) as store:
-        run_id = await _run(store)
-    _downgrade_to_v2(tmp_store_path)
-
-    async with await RunReader.open(tmp_store_path) as reader:
-        assert await reader.web_research(run_id) == []
-        assert await reader.get_web_research(run_id, 'wr_0000000000000000') is None
-    with closing(sqlite3.connect(tmp_store_path)) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone() == (2,)
-
-
-async def test_writer_migrates_a_version_3_store_and_counts_writes(tmp_store_path: Path):
-    async with await RunStore.open(tmp_store_path) as store:
-        run_id = await _run(store)
-        await store.add_evidence(run_id, _http(), count_request=True)
-    _downgrade_to_v3(tmp_store_path)
-
-    async with await RunReader.open(tmp_store_path) as reader:  # a v3 reader sees no write counter, not an error
-        run = await reader.get_run(run_id)
-        assert (run.requests_spent, run.write_requests_spent) == (1, 0)
-    async with await RunStore.open(tmp_store_path) as store:
-        write = _http('/orders').model_copy(deep=True)
-        write.http.request.method = 'POST'
-        await store.add_evidence(run_id, write.model_copy(update={'id': evidence_id(write)}), count_request=True)
-        run = await store.get_run(run_id)
-        assert (run.requests_spent, run.write_requests_spent) == (2, 1)
-        assert len(await store.evidence(run_id)) == 2  # existing data kept
-    with closing(sqlite3.connect(tmp_store_path)) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone() == (SCHEMA_VERSION,)
-
-
-@pytest.mark.parametrize('opener', [RunStore.open, RunReader.open])
-async def test_version_1_store_is_still_refused(tmp_store_path: Path, opener: object):
-    async with await RunStore.open(tmp_store_path):
-        pass
-    _execute(tmp_store_path, 'PRAGMA user_version = 1')
-    with pytest.raises(StoreError) as exc:
-        await opener(tmp_store_path)  # pyright: ignore[reportUnknownVariableType, reportCallIssue]
-    assert exc.value.rule_code == 'store-version'
