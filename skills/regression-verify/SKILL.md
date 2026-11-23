@@ -23,6 +23,9 @@ After the target changes — a new deployment, a config edit, or simply a fresh 
 re-verify what was previously reported instead of re-testing from scratch. Two engine
 paths cover the two questions a regression sweep asks:
 
+**Standards:** OWASP WSTG v4.2 (§5 Reporting & Re-testing), NIST SP 800-115 (§7 Post-Testing /
+Mitigation Verification), OWASP ASVS v5.0 (full citations and URLs in `docs/skills/README.md`).
+
 1. **Is a specific finding still live?** Replay its verification recipe against the
    authorized target with `partex verify` (§13.4). One finding, minimal requests,
    recorded verdict.

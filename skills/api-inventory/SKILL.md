@@ -21,6 +21,12 @@ Construct a stable, normalized API operation inventory from captured `HttpExchan
 records and reconcile observed traffic against declared OpenAPI contracts (`ConfigExcerpt`
 with `format: openapi` and `revision`).
 
+**Standards:** OpenAPI Specification (OAS) 3.0.3 & 3.1.0 (§4.8.9 Path Templating Matching),
+JSON Schema Draft 2020-12, RFC 6570 (URI Template), RFC 8594 (`Sunset`) & RFC 9745
+(`Deprecation`), OWASP API3:2023 (BOPLA — read-side Excessive Data Exposure), OWASP API9:2023
+(Improper Inventory Management), CWE-213, CWE-1059 (full citations and URLs in
+`docs/skills/api-inventory.md`).
+
 ## Workflow
 
 1. **Bundle review (`partex review` / `partex chat`):** Run `--checks api-contract-conformance`

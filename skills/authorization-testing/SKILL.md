@@ -19,9 +19,14 @@ metadata:
 
 # Authorization Boundary Testing (BOLA / IDOR / BFLA)
 
-Test operations from the `api-inventory` surface for broken object-level (BOLA/IDOR) and
-function-level (BFLA) authorization by replaying the same normalized operation across two
-distinct `engagement.roles` handles.
+Test operations from the `api-inventory` surface for broken object-level (BOLA/IDOR),
+property-level (BOPLA / mass assignment), and function-level (BFLA) authorization by
+replaying the same normalized operation across two distinct `engagement.roles` handles.
+
+**Standards:** OWASP API1:2023 (BOLA), OWASP API3:2023 (BOPLA / Mass Assignment), OWASP
+API5:2023 (BFLA), OWASP WSTG v4.2 (`WSTG-ATHZ-02`, `WSTG-ATHZ-03`, `WSTG-ATHZ-04`,
+`WSTG-CONF-06`, `WSTG-INPV-04`), CWE-639, CWE-285, CWE-862, CWE-863, CWE-915 (full citations
+and URLs in `docs/skills/authorization-testing.md`).
 
 ## Mandatory Two-Role Rule
 
@@ -41,10 +46,12 @@ distinct `engagement.roles` handles.
 
 | Finding / Outcome Class | Condition | Expected Disposition |
 |---|---|---|
-| Verified BOLA / IDOR | Role B accesses or mutates an object owned by Role A (`2xx` with Role A resource data) | `high` / `critical` finding + `verify_recipe` citing both `ev_*` IDs |
-| Verified BFLA / method bypass | Lower-privilege role invokes an admin operation or privileged HTTP method (`PUT`/`DELETE`/`PATCH`) | `high` finding + `verify_recipe` citing both `ev_*` IDs |
-| Unprobed operation | Operation in inventory lacks a second role in `engagement.roles` or hit `max_requests` | **Coverage gap** (`needs_follow_up`), not a finding |
-| Missing evidence | Neither baseline exchange nor role-pair capture exists for the operation | **Insufficient evidence**; do not infer enforcement |
+| Verified BOLA / IDOR (`API1:2023`, CWE-639) | Role B accesses or mutates an object owned by Role A (`2xx` with Role A's distinct resource attributes; not a soft-403, token re-hydration, or empty list) | `high` / `critical` finding + `verify_recipe` citing both `ev_*` IDs |
+| Verified BFLA / method bypass (`API5:2023`, CWE-285) | Lower-privilege role invokes an admin operation or privileged HTTP method (`PUT`/`DELETE`/`PATCH`) | `high` finding + `verify_recipe` citing both `ev_*` IDs |
+| Verified Mass Assignment / BOPLA write (`API3:2023`, CWE-915) | Lower-privilege role binds undeclared privilege/ownership fields (`role`, `is_admin`, `tenant_id`) on a test-owned object and a read-back confirms persistence | `high` finding (write-approval gated, test-owned records only) |
+| Verified Batch / Bulk ID Injection (`API1:2023`, CWE-639) | Appending Role A's object ID to a bulk array (`{"ids": [<role_b_id>, <role_a_id>]}`) returns or mutates Role A's record | `high` finding + `verify_recipe` citing baseline and replay `ev_*` IDs |
+| Unprobed operation | Operation in inventory lacks a second role in `engagement.roles`, requires write approval (#65), or hit `max_requests` | **Coverage gap** (`needs_follow_up`), not a finding |
+| Missing evidence | Neither baseline exchange nor role-pair capture exists for the operation | **Insufficient evidence** (`not_applicable`); do not infer enforcement |
 
 ## Verification Protocol (`verify_recipe`)
 

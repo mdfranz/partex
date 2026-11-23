@@ -4,13 +4,20 @@
 - **Skill Path:** `skills/header-review/SKILL.md` (`reference/response-policies.md`)
 - **Check ID & Protocol:** `header-security` (`PassiveCheck` — pure function over `Sequence[Evidence]`)
 - **Standards & References:**
-  - OWASP WSTG v4.2: `WSTG-CONF-07` (HSTS), `WSTG-CLNT-07` (CORS), `WSTG-CLNT-12` (CSP), `WSTG-SESS-02` (Cookie Attributes)
-  - OWASP Secure Headers Project (2025/2026 response-header baselines)
-  - IETF RFC 6797 (HTTP Strict Transport Security)
-  - W3C Content Security Policy Level 3 (CSP3) & Google CSP Evaluator rules
-  - IETF RFC 6265bis (Cookies: HTTP State Management Mechanism) & W3C CHIPS (`Partitioned`)
-  - WHATWG Fetch Standard (CORS protocol)
-  - CWE-319, CWE-614, CWE-1004, CWE-1275, CWE-942, CWE-693
+  - OWASP Web Security Testing Guide (WSTG) v4.2:
+    - [WSTG-CONF-07 — Test HTTP Strict Transport Security](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/07-Test_HTTP_Strict_Transport_Security)
+    - [WSTG-CLNT-07 — Testing Cross Origin Resource Sharing](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/07-Testing_Cross_Origin_Resource_Sharing)
+    - [WSTG-CLNT-09 — Testing for Clickjacking](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/09-Testing_for_Clickjacking)
+    - [WSTG-CLNT-12 — Testing for Content Security Policy](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/12-Testing_for_CSP)
+    - [WSTG-SESS-02 — Testing for Cookies Attributes](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/06-Session_Management_Testing/02-Testing_for_Cookies_Attributes)
+  - [OWASP Secure Headers Project](https://owasp.org/www-project-secure-headers/) & [OWASP HTTP Headers Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html)
+  - [OWASP Content Security Policy Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html) & [web.dev Strict CSP Guide](https://web.dev/articles/strict-csp)
+  - [IETF RFC 6797 — HTTP Strict Transport Security (HSTS)](https://www.rfc-editor.org/rfc/rfc6797) & [RFC 7034 — HTTP Header Field X-Frame-Options](https://www.rfc-editor.org/rfc/rfc7034)
+  - [W3C Content Security Policy Level 3 (CSP3)](https://www.w3.org/TR/CSP3/)
+  - [IETF `draft-ietf-httpbis-rfc6265bis` — Cookies: HTTP State Management Mechanism](https://httpwg.org/http-extensions/draft-ietf-httpbis-rfc6265bis.html) & [IETF CHIPS (`Partitioned` cookie attribute — `draft-cutler-httpbis-partitioned-cookies`)](https://datatracker.ietf.org/doc/html/draft-cutler-httpbis-partitioned-cookies)
+  - [WHATWG Fetch Standard — CORS Protocol](https://fetch.spec.whatwg.org/#http-cors-protocol) & [WHATWG MIME Sniffing Standard (`X-Content-Type-Options: nosniff`)](https://mimesniff.spec.whatwg.org/)
+  - [PortSwigger Web Security Academy — CORS](https://portswigger.net/web-security/cors) & [PortSwigger XSS Cheat Sheet (`image/svg+xml`)](https://portswigger.net/web-security/cross-site-scripting/cheat-sheet)
+  - CWEs: [CWE-319](https://cwe.mitre.org/data/definitions/319.html) (Cleartext Transmission), [CWE-614](https://cwe.mitre.org/data/definitions/614.html) (Sensitive Cookie Without `Secure`), [CWE-1004](https://cwe.mitre.org/data/definitions/1004.html) (Sensitive Cookie Without `HttpOnly`), [CWE-1275](https://cwe.mitre.org/data/definitions/1275.html) (Sensitive Cookie with Improper `SameSite`), [CWE-942](https://cwe.mitre.org/data/definitions/942.html) (Permissive Cross-domain Policy), [CWE-1021](https://cwe.mitre.org/data/definitions/1021.html) (Improper Restriction of Rendered UI Layers / Clickjacking), [CWE-693](https://cwe.mitre.org/data/definitions/693.html) (Protection Mechanism Failure)
 
 ---
 

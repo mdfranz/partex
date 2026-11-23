@@ -15,14 +15,20 @@ Evaluate captured `HttpExchange` evidence for response-level security controls w
 issuing live network requests. Apply policy rules by response type so inapplicable headers
 on API payloads or redirects do not generate false positives.
 
+**Standards:** OWASP WSTG v4.2 (`WSTG-CONF-07`, `WSTG-CLNT-07`, `WSTG-CLNT-09`, `WSTG-CLNT-12`,
+`WSTG-SESS-02`), RFC 6797 (HSTS), W3C CSP3, `draft-ietf-httpbis-rfc6265bis` & CHIPS
+(`Partitioned`), WHATWG Fetch (CORS), CWE-319, CWE-614, CWE-1004, CWE-1275, CWE-942, CWE-1021
+(full citations and URLs in `docs/skills/header-review.md`).
+
 ## Scope and Evidence Requirements
 
 - **Passive only.** Inspect only `HttpExchange` records already registered in the run's
   `RunStore` or loaded from an offline bundle (`LoadedBundle` via `partex review`).
 - **Response-type classification.** Classify each exchange before evaluating controls:
-  - **HTML document** (`Content-Type: text/html` with `2xx` status): evaluate HSTS, CSP,
-    framing controls (`X-Frame-Options` or CSP `frame-ancestors`), `X-Content-Type-Options`,
-    `Set-Cookie`, and CORS.
+  - **HTML / active document** (`Content-Type: text/html`, `application/xhtml+xml`, or
+    script-capable `image/svg+xml` with `2xx` status): evaluate HSTS, CSP, framing controls
+    (`X-Frame-Options` or CSP `frame-ancestors`), `X-Content-Type-Options`, `Set-Cookie`, and
+    CORS. (`image/svg+xml` executes inline `<script>` unless sandboxed via CSP.)
   - **API / JSON response** (`Content-Type: application/json` or non-HTML data): evaluate
     HSTS (on HTTPS), `X-Content-Type-Options`, `Set-Cookie`, and CORS. Do not require
     HTML-rendering CSP directives (`script-src`, `style-src`) or framing controls on pure

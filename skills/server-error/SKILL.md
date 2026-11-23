@@ -14,6 +14,11 @@ checks:
 Record 5xx responses already captured in the run as findings, so errors provoked by probing are
 not left only in prose. Passive: the check reads existing evidence and sends no requests.
 
+**Standards:** OWASP WSTG v4.2 (`WSTG-ERRH-01`), RFC 9110 §15.6 (Server Error `5xx`), RFC 9457
+(Problem Details for HTTP APIs), CWE-755 (Improper Handling of Exceptional Conditions), CWE-209
+(Generation of Error Message Containing Sensitive Information) — full citations and URLs in
+`docs/skills/version-disclosure.md`.
+
 ## When to run
 
 - After operator-directed probes (`http_request`, `batch_http_request`) that returned 5xx, or
@@ -25,9 +30,9 @@ not left only in prose. Passive: the check reads existing evidence and sends no 
 
 | Condition | Severity | CWE |
 |---|---|---|
-| `500`, `501`, `505`+ response | `low` | 755 |
-| `502` / `503` / `504` response (usually infrastructure) | `info` | 755 |
-| Any 5xx body containing a stack trace or framework debug page | `medium` | 209 |
+| `500`, `501`, `505`+ response (including bare default templates such as a plain Spring `Whitelabel Error Page` without stack frames, #204) | `low` | CWE-755 |
+| `502` / `503` / `504` response (usually infrastructure) | `info` | CWE-755 |
+| Any 5xx body containing a stack trace, internal filesystem path, or framework debug page | `medium` | CWE-209 |
 
 ## Output Discipline
 

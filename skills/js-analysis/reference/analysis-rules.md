@@ -17,10 +17,18 @@
   `contentHash`, `checksum`, `digest`, `etag`, `nonce` or `chunk…` are high-entropy by
   construction; the entropy rule skips them. A secret-named key (`apiKey`, `passwordHash`) is
   still judged by the name-based rule.
-- **Vendor / minified bundles:** High-volume minified bundles may legitimately contain
-  DOM sinks (`innerHTML`, `postMessage`) inside framework internals (e.g., React, Vue,
-  webpack runtime). Treat sink findings as low-confidence leads requiring manual
-  reachability verification.
+- **Vendor / minified bundles & DOM-XSS source→sink triage (`WSTG-CLNT-01`, `WSTG-CLNT-11`, CWE-79):**
+  High-volume minified bundles legitimately contain DOM sinks (`innerHTML`, `outerHTML`,
+  `document.write`, `eval`, `postMessage`) inside framework internals (React, Vue, webpack
+  runtime). Treat sink findings as low-confidence leads requiring manual source→sink
+  reachability verification:
+  - Check whether an attacker-controlled DOM **source** (`location.search`, `location.hash`,
+    `location.href`, `document.referrer`, `window.name`, or an incoming `message` event payload)
+    flows into the sink without context-aware sanitization or `DOMPurify`.
+  - For `window.addEventListener('message', handler)` / `postMessage` (`WSTG-CLNT-11`), verify
+    whether `handler` checks `event.origin` via exact origin comparison (avoiding bypassable
+    `.indexOf()` / `.includes()` / unanchored regex checks) and whether outbound `postMessage`
+    uses a specific `targetOrigin` rather than `'*'`.
 
 ## 2. Non-Finding Cases
 

@@ -3,7 +3,7 @@
 Hermetic: the check is a pure function over validated evidence.
 """
 
-from partex.checks.server_error import CHECK_ID, ServerErrorCheck, path_pattern
+from partex.checks.server_error import CHECK_ID, ServerErrorCheck, discloses_internals, path_pattern
 from partex.ids import evidence_id
 from partex.models import ConfigEvidence, HttpEvidence, HttpExchange, HttpRequest, HttpResponse
 
@@ -42,6 +42,24 @@ def test_stack_trace_body_is_medium() -> None:
     [draft] = check.review([ev])
     assert draft.severity == 'medium'
     assert 'CWE-209' in draft.description
+
+
+def test_bare_whitelabel_error_page_stays_low_until_stack_trace_present() -> None:
+    """Spring Boot Whitelabel template without stack frames is CWE-755 low, not CWE-209 medium (#204)."""
+    assert not discloses_internals('<html><body><h1>Whitelabel Error Page</h1><p>500</p></body></html>')
+    assert discloses_internals('Whitelabel Error Page\n    at java.lang.Thread.run(Thread.java:840)')
+
+    bare = _http(body='<html><body><h1>Whitelabel Error Page</h1><p>Internal Server Error</p></body></html>')
+    [bare_draft] = check.review([bare])
+    assert bare_draft.severity == 'low'
+    assert 'CWE-209' not in bare_draft.description
+
+    with_trace = _http(
+        body='Whitelabel Error Page\njava.lang.RuntimeException: boom\n\tat org.springframework.web.DispatcherServlet'
+    )
+    [trace_draft] = check.review([with_trace])
+    assert trace_draft.severity == 'medium'
+    assert 'CWE-209' in trace_draft.description
 
 
 def test_gateway_statuses_are_info_unless_debug_body() -> None:

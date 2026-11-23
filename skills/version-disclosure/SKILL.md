@@ -15,6 +15,10 @@ Actively probe an authorized target through `ScopedHttpClient` for explicit soft
 version banners and unhandled exception details, then confirm each finding with a minimal
 replayable `verify_recipe`.
 
+**Standards:** OWASP WSTG v4.2 (`WSTG-INFO-02`, `WSTG-INFO-08`, `WSTG-ERRH-01`), RFC 9110
+§10.2.4 (`Server`) & §7.6.3 (`Via`), RFC 9457 (`application/problem+json`), CWE-200,
+CWE-209, CWE-497 (full citations and URLs in `docs/skills/version-disclosure.md`).
+
 ## Scope and Engagement Rules
 
 - **Authorized live runs only.** All probes execute through the engagement-scoped target

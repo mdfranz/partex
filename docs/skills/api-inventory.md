@@ -1,16 +1,25 @@
-# Research: `api-inventory` (`api-contract-conformance`)
+# Research: `api-inventory` (`api-contract-conformance`) & `openapi-spec-review`
 
-- **Priority / Slice:** P1.1 — First post-M6 integration slice (S1, `PARTX_SKILL_PLAN.md` §4)
-- **Skill Path:** `skills/api-inventory/SKILL.md` (`reference/contract-matching.md`)
-- **Check ID & Protocol:** `api-contract-conformance` (`PassiveCheck` over `HttpEvidence` + `ConfigEvidence` with `format: "openapi"`)
-- **Engine Dependency Decision (`DEPS.md` §3.1):** Minimal in-package OpenAPI/JSON-Schema resolver (~300–500 lines of Python stdlib + `pyyaml`), zero new PyPI dependencies.
+- **Priority / Slice:** P1.1 — First post-M6 integration slice (S1, `PARTX_SKILL_PLAN.md` §4, #24, #153, #155, #156)
+- **Skill Paths:**
+  - `skills/api-inventory/SKILL.md` (`reference/contract-matching.md`)
+  - `skills/openapi-spec-review/SKILL.md`
+- **Check IDs & Protocols:**
+  - `api-contract-conformance` (`PassiveCheck` over `HttpEvidence` + `ConfigEvidence` with `format: "openapi"`)
+  - `openapi-spec-review` (`PassiveCheck` over `ConfigEvidence` with `format: "openapi"` + originating `HttpEvidence` when live-captured via #155)
+- **Engine Dependency Decision (`DEPS.md` §3.1, amended #153):** In-package OpenAPI 3.0 / 3.1 subset resolver (`src/partex/openapi_resolver.py`) backed by [`referencing`](https://github.com/python-jsonschema/referencing) (already in `uv.lock` via `mcp`, zero new PyPI packages) initialized with **no external retriever** so external `$ref`s never open sockets and degrade cleanly to `not_applicable` (`insufficient evidence`).
 - **Standards & References:**
-  - OpenAPI Specification (OAS) v3.0.3 & v3.1.0
-  - JSON Schema Draft 2020-12 (`properties`, `additionalProperties`, `unevaluatedProperties`, `allOf`, `$ref`)
-  - IETF RFC 6570 (URI Template) & OAS Path Templating rules
-  - IETF RFC 8594 (`Sunset` header) & RFC 9745 (`Deprecation` header)
-  - OWASP API Security Top 10 (2023): `API9:2023` (Improper Inventory Management) & `API3:2023` (Broken Object Property Level Authorization — read-side Excessive Data Exposure)
-  - CWE-1059 (Insufficient Technical Documentation), CWE-213 (Exposure of Sensitive Information Due to Incompatible Policies)
+  - [OpenAPI Specification (OAS) v3.0.3](https://spec.openapis.org/oas/v3.0.3.html) & [v3.1.0](https://spec.openapis.org/oas/v3.1.0.html) (especially [§4.8.9 Path Templating Matching](https://spec.openapis.org/oas/v3.1.0.html#path-templating-matching))
+  - [JSON Schema Draft 2020-12 Core](https://json-schema.org/draft/2020-12/json-schema-core.html) & [Applicator](https://json-schema.org/draft/2020-12/json-schema-validation.html) (`$ref`, `$id`, `$anchor`, `$dynamicRef`, `properties`, `additionalProperties`, `unevaluatedProperties`, `allOf`)
+  - [IETF RFC 6570 — URI Template](https://www.rfc-editor.org/rfc/rfc6570) & [RFC 6901 — JSON Pointer](https://www.rfc-editor.org/rfc/rfc6901)
+  - [IETF RFC 8594 — The `Sunset` HTTP Header Field](https://www.rfc-editor.org/rfc/rfc8594) & [RFC 9745 — The `Deprecation` HTTP Header Field](https://www.rfc-editor.org/rfc/rfc9745)
+  - OWASP API Security Top 10 (2023):
+    - [API9:2023 — Improper Inventory Management](https://owasp.org/API-Security/editions/2023/en/0xa9-improper-inventory-management/)
+    - [API3:2023 — Broken Object Property Level Authorization (BOPLA)](https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/)
+    - [API2:2023 — Broken Authentication](https://owasp.org/API-Security/editions/2023/en/0xa2-broken-authentication/)
+    - [API7:2023 — Server Side Request Forgery (SSRF)](https://owasp.org/API-Security/editions/2023/en/0xa7-server-side-request-forgery/)
+  - [OWASP REST Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html)
+  - CWEs: [CWE-1059](https://cwe.mitre.org/data/definitions/1059.html) (Insufficient Technical Documentation), [CWE-213](https://cwe.mitre.org/data/definitions/213.html) (Exposure of Sensitive Information Due to Incompatible Policies), [CWE-200](https://cwe.mitre.org/data/definitions/200.html) (Information Exposure), [CWE-522](https://cwe.mitre.org/data/definitions/522.html) (Insufficiently Protected Credentials), [CWE-598](https://cwe.mitre.org/data/definitions/598.html) (Sensitive Query Strings), [CWE-918](https://cwe.mitre.org/data/definitions/918.html) (SSRF), [CWE-601](https://cwe.mitre.org/data/definitions/601.html) (Open Redirect)
 
 ---
 
@@ -30,17 +39,20 @@ Inputs in a passive bundle or live capture store:
 
 ---
 
-## 2. OpenAPI 3.0 vs. 3.1 Divergences for the In-Package Resolver
+## 2. OpenAPI 3.0 vs. 3.1 Divergences for the `referencing`-Backed Resolver
 
-Per `DEPS.md` §3.1, `partex` implements a focused ~300–500 line resolver rather than pulling
-in `openapi-core` or `jsonschema`. Research on real-world OpenAPI specs highlights five
-exact differences between OAS 3.0.x and OAS 3.1.x that the check code must handle:
+Per `DEPS.md` §3.1 (amended in #153), `partex` owns path-template specificity matching,
+composition flattening, and undeclared/sensitive-field analysis in `src/partex/openapi_resolver.py`,
+backed by [`referencing`](https://github.com/python-jsonschema/referencing) (already in `uv.lock`
+through `mcp`) for JSON Schema 2020-12 / OAS 3.1 `$ref`, `$id`, `$anchor`, and `$dynamicRef`
+resolution with **no external retriever**. Research on real-world OpenAPI specs highlights five
+exact differences between OAS 3.0.x and OAS 3.1.x that the check code handles:
 
 | Feature | OpenAPI 3.0.x | OpenAPI 3.1.x (JSON Schema 2020-12) | Check Resolver Strategy |
 |---|---|---|---|
 | **Version field** | `openapi: "3.0.0"` .. `"3.0.4"` | `openapi: "3.1.0"` / `"3.1.1"` | Accept `3.0.*` and `3.1.*`; reject Swagger `2.0` or mark insufficient evidence with clear reason |
 | **Nullable types** | `type: string`, `nullable: true` | `type: ["string", "null"]` or `anyOf: [{type: string}, {type: "null"}]` | Treat `null` JSON values on optional/nullable properties as conforming; never flag `null` as an undeclared field |
-| **`$ref` siblings** | Siblings next to `$ref` ignored in 3.0 | `$ref` can coexist with sibling keywords (`description`, `unevaluatedProperties`, etc.) | Resolve local JSON Pointer `#/...` first, then merge outer sibling object keys over resolved target (cycle-guarded with a `visited: frozenset[str]` set!) |
+| **`$ref` siblings & `$dynamicRef`** | Siblings next to `$ref` ignored in 3.0; local JSON Pointers `#/...` only | `$ref` can coexist with sibling keywords (`description`, `unevaluatedProperties`, etc.); schemas may use `$id`, `$anchor`, and `$dynamicRef` | Resolve references via `referencing.Registry` (with no retriever), memoize non-cyclic targets, guard cycles via `active_ids` + step budget (`MAX_SCHEMA_RESOLUTION_STEPS`), and merge outer sibling keywords over the resolved target |
 | **Base URL / server prefix** | `servers: [{url: "/api/v2"}]` or full URL `https://api.example.com/v2` | Same, with `servers[].variables` | Strip matching server base path prefix (`/v2` or `/api/v2`) before matching `paths` keys, or normalize full path `/api/v2/users/{id}` consistently |
 | **Strict object closure** | `additionalProperties: false` (breaks naively across `allOf` branches if evaluated per-branch!) | `unevaluatedProperties: false` **or** `additionalProperties: false` | Collect the **union** of declared `properties` across all `allOf` subschemas (and matching `oneOf`/`anyOf` branches) before checking whether an observed response key is undeclared |
 

@@ -17,6 +17,10 @@ Passive review of `format: openapi` `ConfigEvidence` (supplied in a bundle or au
 from live `2xx` captures). Emits at most **one finding per `(spec, rule)`**, citing JSON Pointer
 paths and `ev_*` IDs, never observed values. Sends no network traffic.
 
+**Standards:** OpenAPI 3.0.3 / 3.1.0, RFC 6901 (JSON Pointer), OWASP API2:2023 (Broken
+Authentication), OWASP API3:2023 (BOPLA), OWASP API7:2023 (SSRF), CWE-200, CWE-522, CWE-598,
+CWE-601, CWE-918 (full citations and URLs in `docs/skills/api-inventory.md`).
+
 ## When to run
 
 - After capturing an OpenAPI/Swagger JSON or YAML document during a live session (`run_check('openapi-spec-review')`),

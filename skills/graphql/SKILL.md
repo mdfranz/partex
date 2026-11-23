@@ -24,6 +24,12 @@ lives in per-field and nested-edge resolvers, and GraphQL-over-HTTP routinely re
 HTTP `200 OK` even when authorization fails, so evaluation must inspect the JSON `data` /
 `errors` envelope rather than HTTP status codes alone.
 
+**Standards:** GraphQL Specification (October 2021), GraphQL-over-HTTP Specification,
+OWASP WSTG v4.2 (`WSTG-APIT-01`, `WSTG-ATHZ-02/04`, `WSTG-SESS-05`, `WSTG-ERRH-01`), OWASP
+API1/API3/API4/API5:2023, OWASP GraphQL Cheat Sheet, Apollo CSRF & Federation specs, Relay
+Global Object Identification, CWE-639, CWE-285, CWE-200, CWE-209, CWE-352, CWE-400, CWE-915
+(full citations and URLs in `docs/skills/graphql.md`).
+
 This playbook works within the existing tools: passive bundle/traffic harvesting,
 role-pair replay with selection-set widening and nested/fragment checks, bounded
 introspection/suggestion/federation and CSRF probes, and **observation** of batching and

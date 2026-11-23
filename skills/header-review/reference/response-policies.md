@@ -17,10 +17,12 @@ redirect `HttpExchange` records.
     a missing or unparseable `max-age` is its own `Malformed HSTS max-age directive` finding,
     never treated as `max-age=0`.
 
-## 2. Content Security Policy (CSP)
+## 2. Content Security Policy (CSP — W3C CSP3 / `WSTG-CLNT-12`)
 
-- **Applies to:** `2xx` HTML document responses (`text/html`, `application/xhtml+xml`).
-  Inapplicable to `application/json` API responses and `3xx` redirects without HTML bodies.
+- **Applies to:** `2xx` HTML and active document responses (`text/html`,
+  `application/xhtml+xml`; also note `image/svg+xml` which can execute inline `<script>` unless
+  sandboxed via CSP). Inapplicable to `application/json` API responses and `3xx` redirects
+  without HTML bodies.
 - **Baseline:** Present `Content-Security-Policy` defining `default-src` / `script-src`
   without `'unsafe-inline'`, `'unsafe-eval'`, or scheme/host wildcards (`*`, `http:`), and
   restricting framing via `frame-ancestors 'none'` or `'self'`.
@@ -30,6 +32,10 @@ redirect `HttpExchange` records.
     one.
   - A full CSP3 fallback pattern (`'nonce-…' 'strict-dynamic' https:`) makes host-source
     wildcards legacy-only — not a violation.
+  - **Nonce / `'strict-dynamic'` completeness:** `default-src` does not fall back for
+    `base-uri` or `frame-ancestors`. A nonce/`'strict-dynamic'` policy that omits
+    `base-uri 'none'`/`'self'` (allowing `<base>` tag hijack of relative scripts) or
+    `object-src 'none'` remains incomplete under W3C CSP3 / strict-CSP guidance.
 - **Multiple enforced headers (#52):** browsers apply every enforced policy (intersection).
   A weakness counts only when **every** enforced header permits it; framing counts as
   CSP-controlled only when every header defines `frame-ancestors`.
@@ -50,12 +56,18 @@ redirect `HttpExchange` records.
 - **Baseline:** `X-Content-Type-Options: nosniff`.
 - **Violations:** Header absent or set to a value other than `nosniff`.
 
-## 4. Cookie Attributes (`Set-Cookie`)
+## 4. Cookie Attributes (`Set-Cookie` — `draft-ietf-httpbis-rfc6265bis` / `WSTG-SESS-02`)
 
 - **Applies to:** Any response emitting one or more `Set-Cookie` headers.
 - **Baseline:** Cookies carrying session or authentication state require `Secure` (on
-  HTTPS), `HttpOnly`, and `SameSite=Lax` or `SameSite=Strict` (`SameSite=None` requires
-  `Secure`).
+  HTTPS, CWE-614), `HttpOnly` (CWE-1004), and `SameSite=Lax` or `SameSite=Strict` (CWE-1275;
+  `SameSite=None` requires `Secure`).
+- **Prefix and `Partitioned` invariants:**
+  - `__Host-` prefix (`draft-ietf-httpbis-rfc6265bis`): must carry `Secure`, `Path=/`, and
+    **no** `Domain` attribute (host-locked to defeat subdomain cookie tossing).
+  - `__Secure-` prefix (`draft-ietf-httpbis-rfc6265bis`): must carry `Secure` over `https://`.
+  - `Partitioned` attribute (CHIPS — `draft-cutler-httpbis-partitioned-cookies`): must carry
+    `Secure`.
 - **Redaction rule:** Record only the cookie **name** and missing/weak attribute flags in
   finding output. Never include the cookie value in `title`, `description`, or
   `remediation`.
@@ -70,22 +82,24 @@ redirect `HttpExchange` records.
   (`session-cookie-config` / `token-weakness`); do not double-report attribute-only
   gaps when both checks run.
 
-## 5. Cross-Origin Resource Sharing (CORS)
+## 5. Cross-Origin Resource Sharing (CORS — WHATWG Fetch / `WSTG-CLNT-07`)
 
-- **Applies to:** Responses containing `Access-Control-Allow-Origin` (ACAO).
+- **Applies to:** Responses containing `Access-Control-Allow-Origin` (ACAO, CWE-942).
 - **Violations:**
   - `Access-Control-Allow-Origin: *` combined with `Access-Control-Allow-Credentials: true`
-    (browsers reject `*` + credentials, but server intent indicates misconfiguration;
-    flag if reflected origin or wildcard is paired with credentials).
-  - `Access-Control-Allow-Origin: null` with `Access-Control-Allow-Credentials: true`.
+    (browsers reject `*` + credentials per the WHATWG Fetch Standard, but server intent
+    indicates misconfiguration).
+  - `Access-Control-Allow-Origin: null` with `Access-Control-Allow-Credentials: true`
+    (exploitable via sandboxed `<iframe sandbox="allow-scripts">`).
   - Dynamic reflection of an arbitrary `Origin` request header into ACAO alongside
-    `Access-Control-Allow-Credentials: true`.
+    `Access-Control-Allow-Credentials: true` (and check `Vary: Origin` when ACAO is dynamic to
+    avoid cross-origin cache poisoning).
 - **Compliant case:** `Access-Control-Allow-Origin: *` without credentials on explicitly
   public, unauthenticated static/API responses is acceptable; do not flag without
   credentialed or sensitive context.
-- **Severity (#38):** the passive `*`/`null` + credentials pair is `medium` — browsers
-  reject the literal combination; the genuinely exploitable reflected-origin variant needs
-  an active probe to confirm.
+- **Severity (#38):** the passive `*`/`null` + credentials pair is rated `medium` by
+  `header-security`; active confirmation of arbitrary origin reflection (or sandboxed `null`
+  exploitation with credentials) escalates to `high`.
 
 ## 6. Framing / Clickjacking Controls (#52)
 
