@@ -47,7 +47,7 @@ traversals, and polymorphic types, with authorization enforced per *resolver*. B
   `needs_follow_up` vocabulary; this playbook adapts them to GraphQL's `200 OK` envelope,
   nested edges, Relay `node(id)`, inline fragments, and mutation input objects.
 - **`js-analysis`** owns passive extraction from bundles and SSR payloads; this research
-  doc and `skills/js-analysis/reference/analysis-rules.md` §3 define extraction across raw
+  doc and `skills/js-analysis/reference/analysis-rules.md` §5 define extraction across raw
   strings, compiled `DocumentNode` ASTs, Relay artifacts, and hydration stores.
 - **`header-review`** owns raw `Set-Cookie` (`SameSite`, `Secure`, `HttpOnly`) and CORS
   policy findings; GraphQL CSRF checks here cite cookie/CORS posture without double-filing

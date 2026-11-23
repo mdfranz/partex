@@ -154,7 +154,7 @@ def make_server(host: str = '127.0.0.1', port: int = 0) -> _FixtureAppServer:
 
 def serve_thread(server: _FixtureAppServer) -> threading.Thread:
     """Start serving in a daemon thread."""
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True)
     thread.start()
     return thread
 
