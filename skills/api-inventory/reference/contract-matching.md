@@ -15,9 +15,11 @@
   coverage rows, and `surface_nodes` metadata.
 - Resolve `servers[].url` path prefixes (substituting `servers[].variables.*.default` when
   declared) ahead of `paths` templates.
-- Resolve local JSON Pointer `#/...` `$ref`s (including OpenAPI 3.1 `$ref` sibling keyword
-  merging and cycle guards), `allOf` property unions, `oneOf`/`anyOf` variants, and
-  nullable unions (`nullable: true` or `type: ["string", "null"]`).
+- Resolve local and in-document JSON Schema references (`#/...`, `$id`, `$anchor`,
+  `$dynamicRef`) via `referencing` (with no external retriever, `DEPS.md` §3.1 #153),
+  including OpenAPI 3.1 `$ref` sibling keyword merging, cycle/step-budget guards, `allOf`
+  property unions, `oneOf`/`anyOf` variants, and nullable unions (`nullable: true` or
+  `type: ["string", "null"]`).
 - If an external or missing `$ref` cannot be resolved offline, mark that operation's
   schema check as `not_applicable` (`insufficient evidence: unresolvable $ref ...`) rather
   than failing or claiming conformance.

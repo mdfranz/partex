@@ -4,11 +4,19 @@
   - **M7 (`PLAN.md` §13.6 & §15, `DEPS.md` §5–§8):** Browser Capture Harness (`src/partex/browser.py` + `playwright-cli` agent guidance port) — primary evidence feeder for `api-inventory` (P1.1) and `authorization-testing` (P1.2) on modern SPAs.
   - **P2.2 / S5 (`PARTX_SKILL_PLAN.md` §4):** `gateway-policy` skill + check (rate/size limits, API deprecation/sunset lifecycle, OWASP API4:2023 & API9:2023).
 - **Standards & References:**
-  - OWASP API Security Top 10 (2023): `API4:2023` (Unrestricted Resource Consumption) & `API9:2023` (Improper Inventory Management)
-  - IETF `draft-ietf-httpapi-ratelimit-headers` (`RateLimit` and `RateLimit-Policy` HTTP Structured Fields)
-  - IETF RFC 6585 §4 (`429 Too Many Requests`) & RFC 9110 §10.2.3 (`Retry-After`)
-  - IETF RFC 9745 (The `Deprecation` HTTP Header Field) & RFC 8594 (The `Sunset` HTTP Header Field)
-  - Chrome DevTools Protocol (CDP) & Playwright Network/Route Interception API
+  - OWASP API Security Top 10 (2023):
+    - [API4:2023 — Unrestricted Resource Consumption](https://owasp.org/API-Security/editions/2023/en/0xa4-unrestricted-resource-consumption/)
+    - [API9:2023 — Improper Inventory Management](https://owasp.org/API-Security/editions/2023/en/0xa9-improper-inventory-management/)
+  - [IETF `draft-ietf-httpapi-ratelimit-headers` — `RateLimit` and `RateLimit-Policy` HTTP Header Fields](https://datatracker.ietf.org/doc/draft-ietf-httpapi-ratelimit-headers/) & [RFC 9651 — Structured Field Values for HTTP](https://www.rfc-editor.org/rfc/rfc9651)
+  - [IETF RFC 6585 §4 — `429 Too Many Requests`](https://www.rfc-editor.org/rfc/rfc6585#section-4) & [RFC 9110 §10.2.3 — `Retry-After`](https://www.rfc-editor.org/rfc/rfc9110#section-10.2.3)
+  - [IETF RFC 9745 — The `Deprecation` HTTP Header Field](https://www.rfc-editor.org/rfc/rfc9745) & [RFC 8594 — The `Sunset` HTTP Header Field](https://www.rfc-editor.org/rfc/rfc8594)
+  - [ECMA-426 — Source Map Format Specification (v3)](https://tc39.es/ecma426/)
+  - OWASP WSTG v4.2 (Client-Side & JS Bundle Analysis — `js-analysis`):
+    - [WSTG-CLNT-01 — Testing for DOM-Based Cross Site Scripting](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/01-Testing_for_DOM-based_Cross_Site_Scripting)
+    - [WSTG-CLNT-11 — Testing Web Messaging (`postMessage`)](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/11-Client-side_Testing/11-Testing_Web_Messaging)
+    - [PortSwigger Web Security Academy — DOM-Based Vulnerabilities](https://portswigger.net/web-security/dom-based)
+  - [Chrome DevTools Protocol (CDP)](https://chromedevtools.github.io/devtools-protocol/) & [Playwright Network / Route Interception API](https://playwright.dev/python/docs/network)
+  - CWEs: [CWE-770](https://cwe.mitre.org/data/definitions/770.html) (Allocation of Resources Without Limits or Throttling), [CWE-540](https://cwe.mitre.org/data/definitions/540.html) (Inclusion of Sensitive Information in Source Code / Source Maps), [CWE-798](https://cwe.mitre.org/data/definitions/798.html) (Use of Hard-coded Credentials), [CWE-79](https://cwe.mitre.org/data/definitions/79.html) (DOM XSS)
 
 ---
 

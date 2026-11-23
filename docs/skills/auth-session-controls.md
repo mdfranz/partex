@@ -7,12 +7,20 @@
   - `token-weakness` (`ActiveCheck` + `verify_recipe` — JWT & session lifecycle boundary probes)
 - **Engine Dependency Decision (`DEPS.md` §3.2 & §3.3):** Pure Python 3.14 stdlib (`base64`, `json`, `hmac`, `hashlib`, `urllib.parse`), hand-rolled RFC 6265bis parser shared with capture redaction (`DEPS.md` §8.5). Zero `PyJWT` or `cryptography` dependency in base install.
 - **Standards & References:**
-  - IETF RFC 8725 (JSON Web Token Best Current Practices)
-  - IETF RFC 7515 (JWS), RFC 7517 (JWK), RFC 7518 (JWA), RFC 7519 (JWT)
-  - IETF RFC 6265bis (HTTP State Management Mechanism)
-  - OWASP API Security Top 10 (2023): `API2:2023` (Broken Authentication)
-  - OWASP WSTG v4.2: `WSTG-SESS-02` (Cookie Attributes), `WSTG-SESS-04` (Exposed Session Variables), `WSTG-SESS-06` (Logout Functionality), `WSTG-SESS-10` (Testing JSON Web Tokens)
-  - CWE-347 (Improper Verification of Cryptographic Signature), CWE-327 (Broken/Risky Crypto Algorithm), CWE-613 (Insufficient Session Expiration), CWE-598 (Use of GET Request Method With Sensitive Query Strings)
+  - [IETF RFC 8725 — JSON Web Token Best Current Practices (JWT BCP)](https://www.rfc-editor.org/rfc/rfc8725)
+  - [IETF RFC 7515 (JWS)](https://www.rfc-editor.org/rfc/rfc7515), [RFC 7517 (JWK)](https://www.rfc-editor.org/rfc/rfc7517), [RFC 7518 (JWA)](https://www.rfc-editor.org/rfc/rfc7518), [RFC 7519 (JWT)](https://www.rfc-editor.org/rfc/rfc7519)
+  - [IETF RFC 6749 §5.1 — OAuth 2.0 Token Response `Cache-Control: no-store`](https://www.rfc-editor.org/rfc/rfc6749#section-5.1)
+  - [IETF `draft-ietf-httpbis-rfc6265bis` — Cookies: HTTP State Management Mechanism](https://httpwg.org/http-extensions/draft-ietf-httpbis-rfc6265bis.html)
+  - [OWASP API Security Top 10 (2023): API2:2023 — Broken Authentication](https://owasp.org/API-Security/editions/2023/en/0xa2-broken-authentication/)
+  - OWASP Web Security Testing Guide (WSTG) v4.2:
+    - [WSTG-SESS-02 — Testing for Cookies Attributes](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/06-Session_Management_Testing/02-Testing_for_Cookies_Attributes)
+    - [WSTG-SESS-03 — Testing for Session Fixation](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/06-Session_Management_Testing/03-Testing_for_Session_Fixation)
+    - [WSTG-SESS-04 — Testing for Exposed Session Variables](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/06-Session_Management_Testing/04-Testing_for_Exposed_Session_Variables)
+    - [WSTG-SESS-06 — Testing for Logout Functionality](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/06-Session_Management_Testing/06-Testing_for_Logout_Functionality)
+    - [WSTG-SESS-10 — Testing JSON Web Tokens](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/06-Session_Management_Testing/10-Testing_JSON_Web_Tokens)
+  - [OWASP JSON Web Token for Java Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_for_Java_Cheat_Sheet.html) & [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)
+  - [PortSwigger Web Security Academy — JWT Attacks](https://portswigger.net/web-security/jwt) & [Algorithm Confusion Attacks](https://portswigger.net/web-security/jwt/algorithm-confusion)
+  - CWEs: [CWE-347](https://cwe.mitre.org/data/definitions/347.html) (Improper Verification of Cryptographic Signature), [CWE-327](https://cwe.mitre.org/data/definitions/327.html) (Broken/Risky Crypto Algorithm), [CWE-613](https://cwe.mitre.org/data/definitions/613.html) (Insufficient Session Expiration), [CWE-598](https://cwe.mitre.org/data/definitions/598.html) (Use of GET Request Method With Sensitive Query Strings)
 
 ---
 

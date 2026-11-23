@@ -8,28 +8,27 @@
   `POST /graphql` operation key); active authorization replay builds on `authz-boundary`
   two-role semantics.
 - **Standards & References:**
-  - **GraphQL Specification** (introspection `__schema` / `__type` / `__typename`,
+  - **[GraphQL Specification (October 2021)](https://spec.graphql.org/October2021/)** (introspection `__schema` / `__type` / `__typename`,
     validation vs. execution phases, aliases, fragments, input objects) &
-    **GraphQL-over-HTTP Specification** (`application/graphql-response+json`, `200 OK`
+    **[GraphQL-over-HTTP Specification](https://graphql.github.io/graphql-over-http/draft/)** (`application/graphql-response+json`, `200 OK`
     partial-data and error envelopes, GET vs. POST semantics).
-  - **OWASP WSTG v4.2:** `WSTG-APIT-01` (Testing GraphQL), `WSTG-ATHZ-01..04`
-    (Authorization), `WSTG-SESS-05` (CSRF), `WSTG-ERRH-01/02` (Error Handling).
-  - **OWASP API Security Top 10 (2023):** `API1:2023` (BOLA — per-resolver & nested-edge
-    object authorization), `API3:2023` (BOPLA — read-side selection-set over-fetching and
-    write-side input-object mass assignment), `API4:2023` (Unrestricted Resource
-    Consumption — array batching, aliases, depth, fragment expansion), `API5:2023` (BFLA —
-    per-mutation / admin operation authorization).
-  - **OWASP GraphQL Cheat Sheet** & **PortSwigger Web Security Academy (GraphQL API
-    Vulnerabilities)**: introspection/suggestion hardening, array & alias batching, CSRF,
+  - **OWASP WSTG v4.2:**
+    - [WSTG-APIT-01 — Testing GraphQL](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/12-API_Testing/01-Testing_GraphQL)
+    - [WSTG-ATHZ-02 — Bypassing Authorization Schema](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/02-Testing_for_Bypassing_Authorization_Schema) & [WSTG-ATHZ-04 — IDOR](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References)
+    - [WSTG-SESS-05 — Testing for Cross Site Request Forgery (CSRF)](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/06-Session_Management_Testing/05-Testing_for_Cross_Site_Request_Forgery)
+    - [WSTG-ERRH-01 — Testing for Improper Error Handling](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/08-Error_Handling/01-Testing_for_Improper_Error_Handling)
+  - **OWASP API Security Top 10 (2023):**
+    - [API1:2023 — BOLA](https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/) (per-resolver & nested-edge object authorization)
+    - [API3:2023 — BOPLA](https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/) (read-side selection-set over-fetching and write-side input-object mass assignment)
+    - [API4:2023 — Unrestricted Resource Consumption](https://owasp.org/API-Security/editions/2023/en/0xa4-unrestricted-resource-consumption/) (array batching, aliases, depth, fragment expansion)
+    - [API5:2023 — BFLA](https://owasp.org/API-Security/editions/2023/en/0xa5-broken-function-level-authorization/) (per-mutation / admin operation authorization)
+  - **[OWASP GraphQL Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/GraphQL_Cheat_Sheet.html)** & **[PortSwigger Web Security Academy — GraphQL API Vulnerabilities](https://portswigger.net/web-security/graphql)**: introspection/suggestion hardening, array & alias batching, CSRF,
     Trusted Documents / persisted-query safelisting, resolver-level authorization.
-  - **CWEs:** CWE-639 (User-Controlled Key / BOLA), CWE-285 (Improper Authorization),
-    CWE-200 (Schema/Information Exposure), CWE-209 (Error Message Disclosure), CWE-352
-    (CSRF), CWE-400 (Uncontrolled Resource Consumption), CWE-915 (Mass Assignment).
-  - **Ecosystem specifications & tooling studied:** Apollo Server (`csrfPrevention` /
-    `Apollo-Require-Preflight`, `allowBatchedHttpRequests`, APQ vs. GraphOS Persisted
-    Queries), Apollo Federation (`_service { sdl }`, `_entities`), Apollo Router
-    fragment/directive enforcement, Relay Global Object Identification (`node(id)`),
-    InQL, Clairvoyance, and GraphQL Cop.
+  - **CWEs:** [CWE-639](https://cwe.mitre.org/data/definitions/639.html) (User-Controlled Key / BOLA), [CWE-285](https://cwe.mitre.org/data/definitions/285.html) (Improper Authorization),
+    [CWE-200](https://cwe.mitre.org/data/definitions/200.html) (Schema/Information Exposure), [CWE-209](https://cwe.mitre.org/data/definitions/209.html) (Error Message Disclosure), [CWE-352](https://cwe.mitre.org/data/definitions/352.html)
+    (CSRF), [CWE-400](https://cwe.mitre.org/data/definitions/400.html) (Uncontrolled Resource Consumption), [CWE-915](https://cwe.mitre.org/data/definitions/915.html) (Mass Assignment).
+  - **Ecosystem specifications & tooling studied:** [Apollo Server (`csrfPrevention` / `Apollo-Require-Preflight`)](https://www.apollographql.com/docs/apollo-server/security/cors), [Apollo Persisted Queries (APQ vs. Safelisting)](https://www.apollographql.com/docs/apollo-server/performance/apq), [Apollo Federation Subgraph Specification (`_service { sdl }`, `_entities`)](https://www.apollographql.com/docs/graphos/schema-design/federated-schemas/reference/subgraph-spec), [Relay Global Object Identification (`node(id)`)](https://relay.dev/graphql/objectidentification.htm),
+    InQL, [Clairvoyance](https://github.com/nikitastupin/clairvoyance), and [GraphQL Cop](https://github.com/dolevf/graphql-cop).
 
 ---
 

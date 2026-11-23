@@ -3,9 +3,14 @@
 - **Priority / Slice:** post-M6 skill slice for #224 (first increment: trackers and consent signals).
 - **Skill / check:** `skills/privacy-review/` and the passive `privacy-signals` check
   (`src/partex/checks/privacy_signals.py`).
-- **Standards and references (context only; findings never state a legal conclusion):** GDPR Arts. 5-7
-  and 13, ePrivacy Directive Art. 5(3), CPRA/CCPA, OWASP Top 10 Privacy Risks, OWASP ASVS V8
-  (data protection).
+- **Standards and references (context only; findings never state a legal conclusion):**
+  - [GDPR (Regulation (EU) 2016/679) Arts. 5–7 & 13](https://eur-lex.europa.eu/eli/reg/2016/679/oj)
+  - [ePrivacy Directive (2002/58/EC, as amended by 2009/136/EC) Art. 5(3)](https://eur-lex.europa.eu/eli/dir/2002/58/2009-12-19)
+  - [California Consumer Privacy Act / CPRA (Cal. Civ. Code § 1798.100 et seq.)](https://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=CIV&division=3.&title=1.81.5.&part=4.)
+  - [OWASP Top 10 Privacy Risks Project](https://owasp.org/www-project-top-10-privacy-risks/)
+  - [OWASP Application Security Verification Standard (ASVS) V8 — Data Protection](https://owasp.org/www-project-application-security-verification-standard/)
+  - [IAB Europe Transparency & Consent Framework (TCF v2.2 `__tcfapi`)](https://iabeurope.eu/transparency-consent-framework/) & [W3C Global Privacy Control (GPC)](https://w3c.github.io/gpc/)
+  - [CWE-359 — Exposure of Private Personal Information to an Unauthorized Actor](https://cwe.mitre.org/data/definitions/359.html)
 
 ## 1. Motivation (what the local corpus showed)
 

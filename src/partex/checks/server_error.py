@@ -32,11 +32,15 @@ CHECK_DESCRIPTION = (
 _GATEWAY_STATUSES = frozenset({502, 503, 504})
 
 # Stack-trace and debug-page markers (skills/server-error/SKILL.md). Data, not code.
+# Note (#204, docs/skills/version-disclosure.md §3): Spring Boot's default "Whitelabel Error Page"
+# is a bare status/message template unless server.error.include-stacktrace is enabled (which adds
+# Java stack frames such as "at java.lang." or "at org.springframework."). Bare "Whitelabel Error
+# Page" alone is therefore excluded here so a generic 500 template stays `low` (CWE-755) rather
+# than escalating to `medium` (CWE-209).
 DEBUG_MARKERS = (
     'Traceback (most recent call last):',
     "You're seeing this error because you have DEBUG = True",
     'Werkzeug Debugger',
-    'Whitelabel Error Page',
     'at java.lang.',
     'at org.springframework.',
     'Exception in thread "',

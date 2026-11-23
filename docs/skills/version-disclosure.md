@@ -1,13 +1,21 @@
-# Research: `version-disclosure` (`version-disclosure`)
+# Research: `version-disclosure` (`version-disclosure`) & `server-error` (`server-error`)
 
-- **Priority / Milestone:** P0 — Built-in active check + `verify_recipe` (M3 landed in `src/partex/checks/version_disclosure.py`; `PLAN.md` §10 & §13.4)
-- **Skill Path:** `skills/version-disclosure/SKILL.md` (`reference/verification-criteria.md`)
-- **Check ID & Protocol:** `version-disclosure` (`ActiveCheck` with single-request `verify_recipe`)
+- **Priority / Milestone:** P0 — Built-in active check + `verify_recipe` (M3 landed in `src/partex/checks/version_disclosure.py`; `PLAN.md` §10 & §13.4) paired with passive 5xx error review (`src/partex/checks/server_error.py`, #128, #204)
+- **Skill Paths:**
+  - `skills/version-disclosure/SKILL.md` (`reference/verification-criteria.md`)
+  - `skills/server-error/SKILL.md`
+- **Check IDs & Protocols:**
+  - `version-disclosure` (`ActiveCheck` with single-request `verify_recipe`)
+  - `server-error` (`PassiveCheck` over captured `5xx` `HttpEvidence`)
 - **Standards & References:**
-  - OWASP WSTG v4.2: `WSTG-INFO-02` (Fingerprint Web Server), `WSTG-INFO-08` (Fingerprint Web Application Framework), `WSTG-ERRH-01` (Improper Error Handling), `WSTG-ERRH-02` (Testing for Stack Traces)
-  - IETF RFC 9110 §10.2.4 (`Server` header — advises against needlessly detailed product/version info) & §7.6.3 (`Via` header)
-  - IETF RFC 9457 (Problem Details for HTTP APIs — §5 Security Considerations)
-  - CWE-200 (Exposure of Sensitive Information), CWE-209 (Generation of Error Message Containing Sensitive Information), CWE-497 (Exposure of Sensitive System Information)
+  - OWASP Web Security Testing Guide (WSTG) v4.2:
+    - [WSTG-INFO-02 — Fingerprint Web Server](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/01-Information_Gathering/02-Fingerprint_Web_Server)
+    - [WSTG-INFO-08 — Fingerprint Web Application Framework](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/01-Information_Gathering/08-Fingerprint_Web_Application_Framework)
+    - [WSTG-ERRH-01 — Testing for Improper Error Handling](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/08-Error_Handling/01-Testing_for_Improper_Error_Handling) (note: in WSTG v4.2, stack-trace testing `ERRH-02` was consolidated into `WSTG-ERRH-01`)
+  - [OWASP Error Handling Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Error_Handling_Cheat_Sheet.html)
+  - [IETF RFC 9110 — HTTP Semantics §10.2.4 (`Server`)](https://www.rfc-editor.org/rfc/rfc9110#section-10.2.4) (advises against needlessly detailed product/version info), [§7.6.3 (`Via`)](https://www.rfc-editor.org/rfc/rfc9110#section-7.6.3), & [§15.6 (`5xx` Server Error)](https://www.rfc-editor.org/rfc/rfc9110#section-15.6)
+  - [IETF RFC 9457 — Problem Details for HTTP APIs (§5 Security Considerations)](https://www.rfc-editor.org/rfc/rfc9457#section-5)
+  - CWEs: [CWE-200](https://cwe.mitre.org/data/definitions/200.html) (Exposure of Sensitive Information), [CWE-209](https://cwe.mitre.org/data/definitions/209.html) (Generation of Error Message Containing Sensitive Information), [CWE-497](https://cwe.mitre.org/data/definitions/497.html) (Exposure of Sensitive System Information), [CWE-755](https://cwe.mitre.org/data/definitions/755.html) (Improper Handling of Exceptional Conditions)
 
 ---
 

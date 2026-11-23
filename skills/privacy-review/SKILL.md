@@ -21,6 +21,11 @@ requests. Run it after discovering and downloading the application's JavaScript 
 (`discover_js_assets` and `download_asset`), because most trackers are loaded from scripts, not
 from the HTML.
 
+**Standards (context only; findings never state a legal conclusion):** GDPR (EU 2016/679) Arts.
+5–7 & 13, ePrivacy Directive (2002/58/EC) Art. 5(3), CPRA/CCPA, OWASP Top 10 Privacy Risks,
+OWASP ASVS V8 (Data Protection), IAB TCF v2.2 (`__tcfapi`), W3C Global Privacy Control, CWE-359
+(full citations and URLs in `docs/skills/privacy-review.md`).
+
 ## Signals, not verdicts
 
 - A finding says an SDK is **referenced**. It does not say what data is sent, to whom, or whether

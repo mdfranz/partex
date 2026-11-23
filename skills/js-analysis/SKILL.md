@@ -16,6 +16,12 @@ Download full JavaScript bundles locally (beyond the 256 KB inline capture cap) 
 scoped client and analyze them deterministically with `tree-sitter` — never execute target
 JavaScript.
 
+**Standards:** ECMA-426 (Source Map Format v3), OWASP WSTG v4.2 (`WSTG-CLNT-01` DOM-Based XSS,
+`WSTG-CLNT-11` Web Messaging, `WSTG-APIT-01` GraphQL), OWASP API9:2023 (Improper Inventory
+Management), CWE-798 (Hard-coded Credentials), CWE-540 (Inclusion of Sensitive Information in
+Source Code), CWE-79 (DOM XSS) — full citations and URLs in
+`docs/skills/gateway-and-spa-recon.md` and `docs/skills/graphql.md` §7.
+
 ## Workflow
 
 1. **Discover assets** with `discover_js_assets` from captured HTML `<script src>` tags and

@@ -6,12 +6,23 @@
 - **Engagement Requirement (`PLAN.md` §4.1 D2):** `engagement.roles` mapping at least two distinct scoped role handles (e.g. `owner` + `guest`, or `tenant_a` + `tenant_b`), resolved from `PARTEX_CRED_*` env vars.
 - **Standards & References:**
   - OWASP API Security Top 10 (2023):
-    - `API1:2023` — Broken Object Level Authorization (BOLA / IDOR)
-    - `API3:2023` — Broken Object Property Level Authorization (BOPLA — write-side Mass Assignment)
-    - `API5:2023` — Broken Function Level Authorization (BFLA)
-  - OWASP WSTG v4.2: `WSTG-ATHZ-02` (Bypassing Authorization Schema), `WSTG-ATHZ-03` (Privilege Escalation), `WSTG-ATHZ-04` (Insecure Direct Object References)
-  - Tooling lineage studied: Burp Autorize & AuthMatrix false-positive failure modes and semantic differential response analysis
-  - CWE-639 (Authorization Bypass Through User-Controlled Key), CWE-285 (Improper Authorization), CWE-915 (Improperly Controlled Modification of Dynamically-Determined Object Attributes)
+    - [API1:2023 — Broken Object Level Authorization (BOLA / IDOR)](https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/)
+    - [API3:2023 — Broken Object Property Level Authorization (BOPLA — write-side Mass Assignment)](https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/)
+    - [API5:2023 — Broken Function Level Authorization (BFLA)](https://owasp.org/API-Security/editions/2023/en/0xa5-broken-function-level-authorization/)
+  - OWASP Web Security Testing Guide (WSTG) v4.2:
+    - [WSTG-ATHZ-02 — Testing for Bypassing Authorization Schema](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/02-Testing_for_Bypassing_Authorization_Schema)
+    - [WSTG-ATHZ-03 — Testing for Privilege Escalation](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/03-Testing_for_Privilege_Escalation)
+    - [WSTG-ATHZ-04 — Testing for Insecure Direct Object References](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/05-Authorization_Testing/04-Testing_for_Insecure_Direct_Object_References)
+    - [WSTG-CONF-06 — Test HTTP Methods (`X-HTTP-Method-Override`)](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/02-Configuration_and_Deployment_Management_Testing/06-Test_HTTP_Methods)
+    - [WSTG-INPV-04 — Testing for HTTP Parameter Pollution](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/04-Testing_for_HTTP_Parameter_Pollution)
+  - OWASP Cheat Sheets:
+    - [OWASP Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html)
+    - [OWASP Authorization Testing Automation Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Testing_Automation_Cheat_Sheet.html)
+    - [OWASP Insecure Direct Object Reference Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html)
+    - [OWASP Mass Assignment Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Mass_Assignment_Cheat_Sheet.html)
+  - [PortSwigger Web Security Academy — Access Control Vulnerabilities (`X-Original-URL` / `X-Rewrite-URL`)](https://portswigger.net/web-security/access-control) & [Orange Tsai (Black Hat USA 2018) — *Breaking Parser Logic! Take Your Path Normalization Off and Pop 0days Out* (`..;` / proxy-backend path differentials)](https://i.blackhat.com/us-18/Wed-August-8/us-18-Orange-Tsai-Breaking-Parser-Logic-Take-Your-Path-Normalization-Off-And-Pop-0days-Out-2.pdf)
+  - Tooling lineage studied: Burp Autorize & AuthMatrix false-positive failure modes and ParTEx semantic differential response analysis (Soft-403, Token Re-hydration, Empty Collection, 3-Way Baseline Matrix)
+  - CWEs: [CWE-639](https://cwe.mitre.org/data/definitions/639.html) (Authorization Bypass Through User-Controlled Key), [CWE-285](https://cwe.mitre.org/data/definitions/285.html) (Improper Authorization), [CWE-862](https://cwe.mitre.org/data/definitions/862.html) (Missing Authorization), [CWE-863](https://cwe.mitre.org/data/definitions/863.html) (Incorrect Authorization), [CWE-915](https://cwe.mitre.org/data/definitions/915.html) (Improperly Controlled Modification of Dynamically-Determined Object Attributes / Mass Assignment)
 
 ---
 
