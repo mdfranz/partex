@@ -40,6 +40,7 @@ from .telemetry import LOG_FILE_ENV, announce, configure_telemetry, resolve_log_
 
 DB_ENV = 'PARTEX_DB'
 LOGFIRE_ENV = 'PARTEX_LOGFIRE'
+LOGFIRE_CONTENT_ENV = 'PARTEX_LOGFIRE_CONTENT'
 SKILL_DIR_ARGS: dict[str, Any] = {
     'action': 'append',
     'default': [],
@@ -183,6 +184,11 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         '--logfire', action='store_true', help=f'also send telemetry to Logfire (or set {LOGFIRE_ENV}=1)'
+    )
+    common.add_argument(
+        '--logfire-content',
+        action='store_true',
+        help=f'keep model and tool content out of the default secret scrubber in traces (or set {LOGFIRE_CONTENT_ENV}=1)',
     )
     common.add_argument(
         '--log-file',
@@ -970,7 +976,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         remote = args.logfire or os.environ.get(LOGFIRE_ENV) == '1'
         log_path = resolve_log_path(args.command, args.log_file)
         if remote or log_path is not None:
-            configure_telemetry(log_path=log_path, remote=remote, service_version=engine.engine_version())
+            content = args.logfire_content or os.environ.get(LOGFIRE_CONTENT_ENV) == '1'
+            configure_telemetry(
+                log_path=log_path, remote=remote, service_version=engine.engine_version(), content=content
+            )
             if args.command in {'chat', 'agent'}:
                 announce(log_path)
         return handler(args)

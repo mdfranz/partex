@@ -39,6 +39,8 @@
 #                            terminal (--max-requests is raised automatically when the import needs the room). Merges
 #                            with -u. <target-url> is then optional: the first imported entry is the baseline target.
 #       --logfire            also send traces to Logfire [PARTEX_LOGFIRE=1]; needs LOGFIRE_TOKEN (local log is always kept)
+#       --logfire-content    keep prompts and tool I/O out of the secret scrubber in traces [PARTEX_LOGFIRE_CONTENT=1];
+#                            raw tool results can then carry secrets, so use it on non-sensitive targets only
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
 #   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000;
 #                            0 = unlimited, still paced by --max-rps]
@@ -103,6 +105,7 @@ while [[ $# -gt 0 ]]; do
     -N|--nmap-file) NMAP_FILE=${2?$1 needs a value}; shift 2 ;;
     -k|--insecure) INSECURE=1; shift ;;
     --logfire) export PARTEX_LOGFIRE=1; shift ;;
+    --logfire-content) export PARTEX_LOGFIRE_CONTENT=1; shift ;;
     -l|--list) LIST=1; shift ;;
     -n|--max-requests) MAX_REQUESTS=${2?$1 needs a value}; shift 2 ;;
     -R|--max-rps) MAX_RPS=${2?$1 needs a value}; shift 2 ;;

@@ -106,9 +106,10 @@ class JsonlSpanExporter(SpanExporter):
 
 # Span attributes that carry model prompts, replies and tool I/O. Logfire's default scrubber blanks any value that
 # mentions ``auth``, ``secret``, ``password``, ``cookie`` …, which hid most tool results in security testing
-# (headers, auth endpoints, config) and made traces useless for debugging. These values are already
-# secret-redacted by partex (``redact()`` / ``frame_untrusted``) before they reach a span, so they are kept;
-# every other attribute keeps the default scrubbing.
+# (headers, auth endpoints, config) and made traces useless for debugging. Keeping them is opt-in
+# (``--logfire-content``, #238): the SDK captures raw tool arguments and results independently of partex's
+# ``redact()`` / ``frame_untrusted``, so they can carry cleartext secrets. Every other attribute, and all
+# attributes by default, keep the default scrubbing.
 CONTENT_ATTRIBUTES = frozenset(
     {
         'gen_ai.input.messages',
@@ -127,8 +128,10 @@ def keep_content(match: ScrubMatch) -> Any:
     return match.value if len(path) >= 2 and path[0] == 'attributes' and path[1] in CONTENT_ATTRIBUTES else None
 
 
-def configure_telemetry(*, log_path: Path | None, remote: bool, service_version: str) -> None:
+def configure_telemetry(*, log_path: Path | None, remote: bool, service_version: str, content: bool = False) -> None:
     """Configure Logfire once for the process: the local JSONL log, and remote export only if *remote*.
+
+    With *content*, model and tool content skips the default scrubber (see :data:`CONTENT_ATTRIBUTES`).
 
     Never ``instrument_httpx()``: the target client carries engagement credentials.
     """
@@ -141,7 +144,7 @@ def configure_telemetry(*, log_path: Path | None, remote: bool, service_version:
         send_to_logfire='if-token-present' if remote else False,
         console=False,
         additional_span_processors=processors,
-        scrubbing=logfire.ScrubbingOptions(callback=keep_content),
+        scrubbing=logfire.ScrubbingOptions(callback=keep_content) if content else None,
     )
     logfire.instrument_pydantic_ai()
 
