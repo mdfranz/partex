@@ -109,7 +109,7 @@ class _FixtureServer(http.server.ThreadingHTTPServer):
 def target_server() -> Iterator[_FixtureServer]:
     """A running fixture target on 127.0.0.1 with an ephemeral port."""
     server = _FixtureServer(('127.0.0.1', 0), _FixtureHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True)
     thread.start()
     try:
         yield server

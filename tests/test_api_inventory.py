@@ -634,7 +634,7 @@ class _OpenApiFixtureHandler(http.server.BaseHTTPRequestHandler):
 @pytest.fixture
 def live_openapi_server() -> Iterator[_OpenApiFixtureServer]:
     srv = _OpenApiFixtureServer()
-    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread = threading.Thread(target=srv.serve_forever, kwargs={'poll_interval': 0.01}, daemon=True)
     thread.start()
     try:
         yield srv
