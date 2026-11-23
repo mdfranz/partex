@@ -11,7 +11,12 @@
   innocuous identifier. Forty-char hex strings are excluded (they are commit/build
   SHAs, ~4.0 bits/char), so hashes stay out while random base64 secrets are caught.
   Known token prefixes (`sk-`, `ghp_`, `AKIA…`, `AIza…`, JWT `eyJ…`) match by structure
-  regardless of identifier.
+  regardless of identifier and are reported once (`token-literal`).
+- **Integrity and cache values are not secrets.** Subresource-integrity values
+  (`sha384-<base64>`, `sha512-…`, `md5-…`) and values under keys such as `integrity`, `hash`,
+  `contentHash`, `checksum`, `digest`, `etag`, `nonce` or `chunk…` are high-entropy by
+  construction; the entropy rule skips them. A secret-named key (`apiKey`, `passwordHash`) is
+  still judged by the name-based rule.
 - **Vendor / minified bundles:** High-volume minified bundles may legitimately contain
   DOM sinks (`innerHTML`, `postMessage`) inside framework internals (e.g., React, Vue,
   webpack runtime). Treat sink findings as low-confidence leads requiring manual
@@ -33,6 +38,15 @@
   `sourcesContent`, `names`) and re-runs the same rules over each original source body.
   This is the **biggest disclosure win per effort**: original (unminified) source, comments,
   and dead code surface endpoints, secrets, versions, and sinks the bundle hides.
+- **Third-party code is not the application.** Sources under `node_modules/` and bundler
+  runtime entries (`webpack/bootstrap`, `webpack/runtime`, `external …`) are counted in the
+  disclosure finding but not analyzed: a library's `innerHTML` or test token would otherwise
+  appear on every parsed map. A map whose only content is third-party is `low`, not `medium`.
+- **Inline maps** (`sourceMappingURL=data:…`) are reported as `low` and described as inline;
+  they are not parsed yet, and the data URI is never copied into a finding. A downloaded `.map`
+  is matched to its bundle ignoring any query string.
+- **Source names are target-controlled text.** A `sources` entry is cleaned (control characters
+  and newlines removed) and capped (120 characters) before it appears in a finding.
 - **Redaction is absolute.** Original source bodies are never copied into findings or model
   context. Only source *filenames* (paths), identifiers, and `<redacted>` secret values may
   appear. A map that is not valid v3 JSON (no `sources` list) is skipped — it is a signal,

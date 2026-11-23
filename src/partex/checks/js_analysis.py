@@ -60,6 +60,17 @@ _CHUNK_URL_RE = re.compile(r'\.chunk\.(?:js|mjs)$')
 """Webpack chunk outputs (``/static/js/admin.chunk.js``) — a feature/route lead in minified bundles."""
 _BASE64_TOKEN_RE = re.compile(r'^[A-Za-z0-9+/=_-]{20,512}$')
 _HEX40_RE = re.compile(r'^[0-9a-fA-F]{40}$')
+_NON_SECRET_KEY_RE = re.compile(r'(?:integrity|hash|checksum|digest|etag|nonce|chunk)', re.IGNORECASE)
+"""Keys whose long random-looking value is an integrity/cache token, not a credential (SRI, content hashes)."""
+_HASH_PREFIX_RE = re.compile(r'^(?:sha(?:1|224|256|384|512)|md5)-', re.IGNORECASE)
+"""Subresource-integrity style values (``sha384-<base64>``): high entropy by construction, never secrets."""
+_VENDOR_SOURCE_RE = re.compile(
+    r'(?:^|[/\\])node_modules[/\\]|(?:^|[/\\:])webpack[/\\](?:bootstrap|runtime)\b|^external\b', re.IGNORECASE
+)
+"""Third-party and bundler-runtime entries in a source map's ``sources`` (not the application's own code)."""
+_CONTROL_RE = re.compile(r'[\x00-\x1f\x7f-\x9f\u2028\u2029]+')
+MAX_SOURCE_NAME_CHARS = 120
+"""A source-map ``sources`` entry is target-controlled text; it is cleaned and capped before it reaches a finding."""
 _HIGH_ENTROPY_MIN_BITS = 4.5
 """Shannon entropy (bits/char) floor for an identifier-independent secret-shaped token (truffleHog/gitleaks
 model: random base64 clears it, random hex (~4.0) does not, so commit/build hashes stay out)."""
@@ -191,7 +202,7 @@ def _high_entropy_token(value: str) -> bool:
         return False
     if not any(ch.isdigit() for ch in value) or not any(ch.isalpha() for ch in value):
         return False
-    if _HEX40_RE.fullmatch(value):
+    if _HEX40_RE.fullmatch(value) or _HASH_PREFIX_RE.match(value):
         return False
     return _entropy(value) >= _HIGH_ENTROPY_MIN_BITS
 
@@ -282,15 +293,18 @@ def _analyze(source: bytes) -> JsAnalysisResult:
             return
         if _VERSION_KEY_RE.fullmatch(key) and _VERSION_VAL_RE.fullmatch(val.strip()):
             versions.append((key, val, line))
-        # Secret detection is layered: a secret-named key first, then known token structure/prefixes, then
-        # identifier-independent high entropy (something innocuous-looking assigned a long random token).
+        # Secret detection is layered: a secret-named key first, then identifier-independent high entropy (something
+        # innocuous-looking assigned a long random token). Known token structure (``ghp_``, ``AKIA``, ``eyJ``) is
+        # reported once, as ``token-literal``, by the string visitor below, so it is not repeated here.
         stripped = val.strip()
         kind: str | None = None
         if _SECRET_KEY_RE.search(key) and _looks_like_secret(val):
             kind = key
-        elif _SECRET_VALUE_RE.match(stripped):
-            kind = 'token-structure'
-        elif _high_entropy_token(stripped):
+        elif (
+            not _NON_SECRET_KEY_RE.search(key)
+            and not _SECRET_VALUE_RE.match(stripped)
+            and _high_entropy_token(stripped)
+        ):
             kind = 'high-entropy-value'
         if kind is not None:
             add_secret(kind, line, val)
@@ -437,42 +451,64 @@ class SourcemapInfo:
 
     sources: tuple[str, ...]
     has_content: bool
+    """Whether original *first-party* source bodies are present (third-party ``node_modules`` bodies do not count)."""
+    vendor_count: int = 0
     error: str | None = None
 
 
-def _parse_sourcemap(data: bytes) -> SourcemapInfo:
-    """Parse a source-map v3 JSON document.  ``sourcesContent`` is only *counted*, never copied out here."""
+def _safe_name(name: str) -> str:
+    """A ``sources`` entry for a finding: control characters and newlines removed, length capped (target-controlled)."""
+    cleaned = _CONTROL_RE.sub(' ', name).strip()
+    if len(cleaned) > MAX_SOURCE_NAME_CHARS:
+        return cleaned[: MAX_SOURCE_NAME_CHARS - 1] + '…'
+    return cleaned
+
+
+def _without_query(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, '', ''))
+
+
+def _load_sourcemap(data: bytes) -> dict[str, Any] | None:
+    """The source-map JSON object, or ``None`` when *data* is not one.  Parsed once and shared by the readers below."""
     try:
         raw = json.loads(data.decode('utf-8', 'replace'))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return SourcemapInfo((), False, error=f'not valid JSON: {exc}')
-    if not isinstance(raw, dict):
-        return SourcemapInfo((), False, error='source map is not a JSON object')
-    record = cast(dict[str, Any], raw)
+    except json.JSONDecodeError:
+        return None
+    return cast(dict[str, Any], raw) if isinstance(raw, dict) else None
+
+
+def _parse_sourcemap(record: dict[str, Any] | None) -> SourcemapInfo:
+    """Describe a loaded source-map v3 document.  ``sourcesContent`` is only *counted*, never copied out here."""
+    if record is None:
+        return SourcemapInfo((), False, error='not a JSON object')
     sources = record.get('sources')
     if not isinstance(sources, list):
         return SourcemapInfo((), False, error='no `sources` list (not a v3 source map)')
     source_items = cast(list[Any], sources)
     if not all(isinstance(item, str) for item in source_items):
         return SourcemapInfo((), False, error='no `sources` string list (not a v3 source map)')
+    names = [cast(str, item) for item in source_items]
     content = record.get('sourcesContent')
     has_content = False
     if isinstance(content, list):
-        content_items = cast(list[Any], content)
-        has_content = any(isinstance(item, str) and bool(item) for item in content_items)
-    names = [cast(str, item) for item in source_items]
-    return SourcemapInfo(tuple(names), has_content)
+        bodies = cast(list[Any], content)
+        has_content = any(
+            isinstance(body, str) and bool(body) and index < len(names) and not _VENDOR_SOURCE_RE.search(names[index])
+            for index, body in enumerate(bodies)
+        )
+    vendor = sum(1 for name in names if _VENDOR_SOURCE_RE.search(name))
+    return SourcemapInfo(tuple(names), has_content, vendor_count=vendor)
 
 
-def _sourcemap_sources(data: bytes) -> list[tuple[str, bytes]]:
-    """``(source_name, source_bytes)`` for every present ``sourcesContent`` entry (names without content skipped)."""
-    try:
-        raw = json.loads(data.decode('utf-8', 'replace'))
-    except UnicodeDecodeError, json.JSONDecodeError:
+def _sourcemap_sources(record: dict[str, Any] | None) -> list[tuple[str, bytes]]:
+    """``(source_name, source_bytes)`` for each present first-party ``sourcesContent`` entry.
+
+    Third-party (``node_modules``) and bundler-runtime entries are skipped: their sinks and tokens are the library's,
+    not the application's, and analyzing them buries the first-party results.
+    """
+    if record is None:
         return []
-    if not isinstance(raw, dict):
-        return []
-    record = cast(dict[str, Any], raw)
     sources = record.get('sources')
     content = record.get('sourcesContent')
     if not isinstance(sources, list) or not isinstance(content, list):
@@ -481,8 +517,11 @@ def _sourcemap_sources(data: bytes) -> list[tuple[str, bytes]]:
     bodies = cast(list[Any], content)
     pairs: list[tuple[str, bytes]] = []
     for index, body in enumerate(bodies):
-        if isinstance(body, str) and body and index < len(source_names) and isinstance(source_names[index], str):
-            pairs.append((cast(str, source_names[index]), body.encode('utf-8')))
+        if not (isinstance(body, str) and body and index < len(source_names)):
+            continue
+        name = source_names[index]
+        if isinstance(name, str) and not _VENDOR_SOURCE_RE.search(name):
+            pairs.append((name, body.encode('utf-8')))
     return pairs
 
 
@@ -493,13 +532,15 @@ def _sourcemap_findings(
     run over ``sourcesContent``.  Source *filenames* may appear; source bodies and secret values never do."""
     url = item.artifact.url
     drafts: list[FindingDraft] = []
-    listed = ', '.join(info.sources[:MAX_LISTED])
+    listed = ', '.join(_safe_name(name) for name in info.sources[:MAX_LISTED])
     more = f' (+{len(info.sources) - MAX_LISTED} more)' if len(info.sources) > MAX_LISTED else ''
     disclosure = (
         'original source bodies are present (sourcesContent)'
         if info.has_content
         else 'only original source filenames are present (sourcesContent absent)'
     )
+    if info.vendor_count:
+        disclosure += f'; {info.vendor_count} third-party/runtime source(s) were not analyzed'
     drafts.append(
         FindingDraft(
             check_id=CHECK_ID,
@@ -542,7 +583,7 @@ def _sourcemap_findings(
         for kind, _line in result.secrets:
             secret_sources.setdefault(kind, []).append(name)
     for kind, names in sorted(secret_sources.items()):
-        shown = ', '.join(list(dict.fromkeys(names))[:MAX_LISTED])
+        shown = ', '.join(_safe_name(name) for name in list(dict.fromkeys(names))[:MAX_LISTED])
         drafts.append(
             FindingDraft(
                 check_id=CHECK_ID,
@@ -580,7 +621,7 @@ def _sourcemap_findings(
         for sink, _line in result.sinks:
             sink_sources.setdefault(sink, set()).add(name)
     for sink, names in sorted(sink_sources.items()):
-        shown = ', '.join(sorted(names)[:MAX_LISTED])
+        shown = ', '.join(_safe_name(name) for name in sorted(names)[:MAX_LISTED])
         drafts.append(
             FindingDraft(
                 check_id=CHECK_ID,
@@ -677,10 +718,11 @@ class JsAnalysisCheck:
             data, _, _, _ = _read_js_source(map_item)
             if data is None:
                 continue  # unreadable map artifact → the bundle keeps today's low finding
-            info = _parse_sourcemap(data)
+            record = _load_sourcemap(data)
+            info = _parse_sourcemap(record)
             if info.error is None:
-                parsed_maps[map_item.id] = (map_item, info, _sourcemap_sources(data))
-                parsed_map_urls.add(map_item.artifact.url)
+                parsed_maps[map_item.id] = (map_item, info, _sourcemap_sources(record))
+                parsed_map_urls.add(_without_query(map_item.artifact.url))
 
         for item in evidence:
             if not _is_js_evidence(item):
@@ -781,10 +823,24 @@ class JsAnalysisCheck:
                 unparsed = [
                     (m, ln)
                     for m, ln in result.sourcemaps
-                    if m.startswith('data:') or urljoin(url, m) not in parsed_map_urls
+                    if m.startswith('data:') or _without_query(urljoin(url, m)) not in parsed_map_urls
                 ]
                 if unparsed:
-                    maps = ', '.join(f'{m} (line {ln})' for m, ln in unparsed)
+                    external = [(m, ln) for m, ln in unparsed if not m.startswith('data:')]
+                    inline = [ln for m, ln in unparsed if m.startswith('data:')]
+                    parts: list[str] = []
+                    if external:
+                        maps = ', '.join(f'{m} (line {ln})' for m, ln in external)
+                        parts.append(
+                            f'declares sourceMappingURL: {maps}. No matching source map artifact was captured, so '
+                            'the referenced map was not fetched or parsed (out of scope, missing, or 404).'
+                        )
+                    if inline:  # the data: URI itself can be megabytes; never put it in a finding
+                        lines = ', '.join(str(ln) for ln in inline)
+                        parts.append(
+                            f'embeds an inline (data:) source map at line {lines}; inline maps are not parsed by '
+                            'this check, so the original source it carries was not analyzed.'
+                        )
                     drafts.append(
                         FindingDraft(
                             check_id=CHECK_ID,
@@ -792,10 +848,7 @@ class JsAnalysisCheck:
                             severity='low',
                             subject='js:sourcemap',
                             title='JavaScript sourceMappingURL exposed',
-                            description=(
-                                f'{url} declares sourceMappingURL: {maps}. No matching source map artifact was '
-                                'captured, so the referenced map was not fetched or parsed (out of scope, missing, or 404).'
-                            ),
+                            description=f'{url} {" ".join(parts)}',
                             evidence_ids=[item.id],
                             remediation='Restrict or omit source map references in production builds if original source should not be public.',
                         )
