@@ -589,14 +589,12 @@ async def test_web_search_end_to_end_audit_usage_span_truncation_and_refusals(
 
         assert ws_calls[2].result == {'refused': 'cap'}
 
-        # Check llm_usage row with role='search'.
-        usage_rows = await store.llm_usage(session.run_id)
-        search_usage = [u for u in usage_rows if u.role == 'search']
-        assert len(search_usage) == 1
-        assert search_usage[0].model == 'gemini-2.5-flash'
-        assert search_usage[0].input_tokens == 42
-        assert search_usage[0].output_tokens == 18
-        assert search_usage[0].status == 'ok'
+        # Check run token totals include the search call (role='search' does not overwrite run.model).
+        run = await store.get_run(session.run_id)
+        assert run.model is None
+        assert run.model_calls == 1
+        assert run.input_tokens == 42
+        assert run.output_tokens == 18
 
         # Ensure TesterDeps is wired cleanly.
         assert deps.searcher is searcher

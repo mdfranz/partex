@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from .ids import canonical_json
-from .models import CoverageEntry, Evidence, Finding, ReviewSummary, Severity, Verification, redact
-from .storage import LlmUsageRecord, RunReader, RunRecord, RunStore, ToolCallRecord, WebResearchRecord
+from .models import CoverageEntry, Evidence, Finding, Severity, Verification, redact
+from .storage import RunReader, RunRecord, RunStore, ToolCallRecord, WebResearchRecord
 
 __all__ = [
     'SEVERITY_RANK',
@@ -36,21 +36,25 @@ type ExportStore = RunReader | RunStore
 
 
 def _serialize_run(run: RunRecord) -> dict[str, Any]:
-    """Serialize *run* without non-deterministic ``id`` or ``created_at`` fields."""
+    """Serialize *run* without non-deterministic ``id``, ``created_at``, or ``ended_at`` fields."""
     return {
         'authorized': run.authorized,
+        'engagement_id': run.engagement_id,
         'engine_version': run.engine_version,
         'error': run.error,
         'findings_count': run.findings_count,
         'input_kind': run.input_kind,
         'input_ref': run.input_ref,
         'input_sha256': run.input_sha256,
+        'input_tokens': run.input_tokens,
         'model': run.model,
+        'model_calls': run.model_calls,
+        'output_tokens': run.output_tokens,
         'requests_spent': run.requests_spent,
         'scope_snapshot': None if run.scope_snapshot is None else run.scope_snapshot.model_dump(mode='json'),
         'selected_checks': list(run.selected_checks),
         'state': run.state,
-        'summary_error': run.summary_error,
+        'write_requests_spent': run.write_requests_spent,
     }
 
 
@@ -60,20 +64,6 @@ def _serialize_tool_call(call: ToolCallRecord) -> dict[str, Any]:
         'args': call.args,
         'result': call.result,
         'tool': call.tool,
-    }
-
-
-def _serialize_llm_usage(usage: LlmUsageRecord) -> dict[str, Any]:
-    """Serialize one model turn without the non-deterministic ``created_at`` timestamp."""
-    return {
-        'cache_read_tokens': usage.cache_read_tokens,
-        'cache_write_tokens': usage.cache_write_tokens,
-        'input_tokens': usage.input_tokens,
-        'latency_ms': usage.latency_ms,
-        'model': usage.model,
-        'output_tokens': usage.output_tokens,
-        'role': usage.role,
-        'status': usage.status,
     }
 
 
@@ -100,12 +90,10 @@ def build_export_payload(
     *,
     evidence: Sequence[Evidence] = (),
     findings: Sequence[Finding] = (),
-    llm_usage: Sequence[LlmUsageRecord] = (),
     verifications: Sequence[Verification] = (),
     coverage: Sequence[CoverageEntry] = (),
     tool_calls: Sequence[ToolCallRecord] = (),
     web_research: Sequence[WebResearchRecord] = (),
-    summary: ReviewSummary | None = None,
     include_secrets: bool = False,
 ) -> dict[str, Any]:
     """Assemble the canonical JSON-serializable payload for a run export."""
@@ -127,9 +115,7 @@ def build_export_payload(
         'coverage': [entry.model_dump(mode='json') for entry in sorted_coverage],
         'evidence': serialized_evidence,
         'findings': [finding.model_dump(mode='json') for finding in sorted_findings],
-        'llm_usage': [_serialize_llm_usage(u) for u in llm_usage],
         'run': _serialize_run(run),
-        'summary': None if summary is None else summary.model_dump(mode='json'),
         'tool_calls': [_serialize_tool_call(call) for call in tool_calls],
         'verifications': [verification.model_dump(mode='json') for verification in sorted_verifications],
         'web_research': [_serialize_web_research(entry) for entry in web_research],
@@ -149,19 +135,15 @@ async def export_run_data(
     verifications = await store.verifications(run_id)
     coverage = await store.coverage(run_id)
     tool_calls = await store.tool_calls(run_id)
-    llm_usage = await store.llm_usage(run_id)
     web_research = await store.web_research(run_id)
-    summary = await store.summary(run_id)
     return build_export_payload(
         run,
         evidence=evidence,
         findings=findings,
-        llm_usage=llm_usage,
         verifications=verifications,
         coverage=coverage,
         tool_calls=tool_calls,
         web_research=web_research,
-        summary=summary,
         include_secrets=include_secrets,
     )
 

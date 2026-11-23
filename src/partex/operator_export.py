@@ -133,8 +133,6 @@ def render_markdown_report(payload: dict[str, Any], run_id: str) -> str:
                 lines += [
                     f'- {_cell(source.get("title") or source["url"])}: <{source["url"]}>' for source in entry['sources']
                 ]
-    if payload['summary'] is not None:
-        lines += ['', '## Summary', '', payload['summary']['narrative']]
     lines += ['', '_Secrets are redacted in this report._', '']
     return '\n'.join(lines)
 

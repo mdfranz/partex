@@ -11,10 +11,8 @@ import json
 import threading
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlsplit
 
-import anyio
 import pytest
 
 from partex import cli
@@ -25,13 +23,13 @@ from partex.checks.api_inventory import (
     api_contract_conformance_check,
     collapse_path_ids,
 )
-from partex.engine import CheckFailed, live_session, run_review, run_test
+from partex.engine import live_session, run_review, run_test
 from partex.export import export_run_json
 from partex.har_io import export_bundle
 from partex.ids import evidence_id, sha256_hex
 from partex.models import ConfigEvidence, ConfigExcerpt, HttpEvidence, HttpExchange, HttpRequest, HttpResponse
 from partex.registry import build_registry
-from partex.storage import RunReader, RunStore
+from partex.storage import RunStore
 
 FIXTURES = Path(__file__).resolve().parents[1] / 'fixtures' / 'bundles'
 API_FIXTURES = FIXTURES / 'api-inventory'
@@ -130,22 +128,6 @@ async def test_fixture_conforming_produces_no_findings_and_records_inventory_and
     assert 'unobserved in bundle' in coverage['POST /api/v2/orders'].reason
     assert '2026.11.1' in coverage['POST /api/v2/orders'].reason
 
-    nodes, edges = await tmp_store.surface(result.run_id)
-    endpoint_nodes = {n.key: n for n in nodes if n.kind == 'endpoint'}
-    assert set(endpoint_nodes) == {
-        'GET /api/v2/projects/{id}',
-        'GET /api/v2/users/me',
-        'GET /api/v2/users/{id}',
-        'POST /api/v2/orders',
-        'POST /graphql',
-    }
-    assert endpoint_nodes['GET /api/v2/users/{id}'].metadata['provenance'] == 'declared+observed'
-    assert endpoint_nodes['GET /api/v2/users/{id}'].metadata['query_params'] == ['include']
-    assert endpoint_nodes['GET /api/v2/users/{id}'].metadata['revision'] == '2026.11.1'
-    assert endpoint_nodes['POST /api/v2/orders'].metadata['provenance'] == 'declared'
-    assert any(n.kind == 'host' and n.key == 'api.example.test' for n in nodes)
-    assert len(edges) == 4  # 4 observed endpoints exposed by api.example.test
-
 
 # ── Fixture triad: 2. Disallowed / excessive response fields + redaction ─────
 
@@ -220,8 +202,6 @@ async def test_fixture_no_contract_and_external_ref_record_insufficient_evidence
     (nc_cov,) = await tmp_store.coverage(no_contract.run_id)
     assert nc_cov.outcome == 'not_applicable'
     assert 'insufficient evidence' in nc_cov.reason and 'no OpenAPI contract' in nc_cov.reason
-    nodes, _ = await tmp_store.surface(no_contract.run_id)
-    assert [n.key for n in nodes if n.kind == 'endpoint'] == ['GET /api/v2/users/{id}']
 
     ext_ref = await run_review(API_FIXTURES / 'external-ref', tmp_store, [CHECK_ID])
     assert ext_ref.state == 'checks_complete'
@@ -301,12 +281,6 @@ def test_cli_acceptance_and_byte_identical_exports_twice(capsys: pytest.CaptureF
         for cov_json in export_data['coverage']:
             assert secret_val not in json.dumps(cov_json)
     assert 'super-secret-live-token-xyz' not in out_a.read_text(encoding='utf-8')
-
-    async def _verify_surface() -> None:
-        async with await RunReader.open(db_a) as reader_a, await RunReader.open(db_b) as reader_b:
-            assert await reader_a.surface(payload_a['run_id']) == await reader_b.surface(payload_b['run_id'])
-
-    anyio.run(_verify_surface)
 
 
 async def test_finding_ids_survive_bundle_revisions_and_route_reordering(tmp_path: Path) -> None:
@@ -455,29 +429,6 @@ def test_collapse_path_ids_handles_numbers_uuids_hex_and_root() -> None:
         == '/api/v1/users/{id}/keys/{id}/items/{id}'
     )
     assert collapse_path_ids('https://api.example.test/graphql') == '/graphql'
-
-
-async def test_passive_bad_surface_hook_fails_atomically_publishing_nothing(tmp_store: RunStore) -> None:
-    class BadSurfaceCheck:
-        check_id = 'bad-surface'
-        version = '1'
-        title = 'bad'
-        description = 'bad'
-
-        def applies_to(self, evidence: object) -> bool:
-            return True
-
-        def review(self, evidence: object) -> list[object]:
-            return []
-
-        def surface(self, evidence: object) -> dict[str, Any]:
-            return {'nodes': [{'kind': 'endpoint', 'key': 'GET /x', 'evidence_ids': ['ev_missing']}], 'edges': []}
-
-    result = await run_review(VALID_BUNDLE, tmp_store, ['bad-surface'], registry={'bad-surface': BadSurfaceCheck()})
-    assert (result.state, result.failed_check) == ('checks_failed', 'bad-surface')
-    assert 'unregistered evidence' in (result.error or '')
-    assert await tmp_store.evidence(result.run_id) == []
-    assert CheckFailed
 
 
 # ── Live OpenAPI capture -> ConfigEvidence registration (issue #155) ─────────

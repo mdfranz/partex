@@ -256,13 +256,16 @@ async def test_previous_run_is_readable_only_with_from(tmp_store: RunStore, tmp_
 
 
 async def test_earlier_runs_of_the_same_target_are_listed_and_readable(
-    tmp_store: RunStore, tmp_path: Path, target_app: Any
+    tmp_store: RunStore, tmp_path: Path, target_app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(target, '_default_resolver', lambda host: '127.0.0.1')
     eng = engagement(tmp_path, target_app)
     async with live_session(eng, tmp_store, authorized=True, checks=('version-disclosure',)) as earlier:
         earlier_id = earlier.run_id
         earlier_finding = earlier.findings[0].id
     async with live_session(eng, tmp_store, authorized=True) as session:
+        # Even after extending scope in the current session, engagement_id matching keeps earlier runs visible (#245).
+        await session.extend_scope(f'localhost:{target_app.port}', confirmed_by='test')
         listed, by_id, current = await drive_code(
             session,
             tmp_store,
@@ -447,19 +450,17 @@ async def test_inapplicable_check_is_skipped_in_the_deterministic_pass(
         assert session.findings == []
 
 
-# ── local observability: llm_usage + read-tool audit (#54) ────────────────────
+# ── local observability: run model usage totals + action-only tool_calls (#54, #245) ──
 
 
-async def test_run_agent_records_model_usage_and_read_tool_calls(
+async def test_run_agent_records_model_usage_totals_and_skips_read_tool_audit(
     tmp_path: Path, target_app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A session is auditable from the DB alone: model turns in llm_usage, read tools in tool_calls."""
-    import sqlite3
-
+    """A session records model token/call totals on runs, while read-only lookups write no tool_calls rows."""
     import partex.agent_adapter
 
     async def fake_chat(agent: Agent[TesterDeps, str], **kwargs: Any) -> None:
-        # Stand in for the terminal: run one turn that reads findings, so a read-tool audit is written.
+        # Stand in for the terminal: run one turn that reads findings.
         await agent.run('what are the findings?', deps=kwargs['deps'], model=scripted([('list_findings', {})]))
 
     monkeypatch.setattr(partex.agent_adapter, 'chat', fake_chat)
@@ -467,45 +468,19 @@ async def test_run_agent_records_model_usage_and_read_tool_calls(
     run_id = await run_agent(
         engagement(tmp_path, target_app), db, TestModel(), authorized=True, checks=('version-disclosure',)
     )
-    conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
-    usage = conn.execute(
-        'SELECT role, status, COUNT(*), SUM(output_tokens) FROM llm_usage WHERE run_id=? GROUP BY role, status',
-        (run_id,),
-    ).fetchall()
-    assert usage and all(role == 'tester' and status == 'ok' for role, status, _, _ in usage)
-    assert sum(count for _, _, count, _ in usage) >= 1  # briefing + the chat turn
-    tools = dict(conn.execute('SELECT tool, COUNT(*) FROM tool_calls WHERE run_id=? GROUP BY tool', (run_id,)))
-    assert tools.get('list_findings', 0) >= 1  # the read-tool call is now audited locally
-
-
-async def test_read_tool_audit_is_compact_and_has_no_secrets(
-    tmp_store: RunStore, tmp_path: Path, target_app: Any
-) -> None:
-    recorded: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
-
-    async def audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
-        recorded.append((tool, args, result))
-
-    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
-        agent: Agent[TesterDeps, str] = build_tester_agent('test')
-        deps = TesterDeps(run_id=session.run_id, reader=tmp_store, audit=audit, session=session, store=tmp_store)
-        await agent.run(
-            'look',
-            deps=deps,
-            model=streaming(
-                snippet_script(['print(await list_findings())', "print(await lookup_evidence(evidence_id='ev_nope'))"])
-            ),
-        )
-    tools = {tool for tool, _, _ in recorded}
-    assert tools == {'list_findings', 'lookup_evidence'}
-    lookup = next(r for t, _, r in recorded if t == 'lookup_evidence')
-    assert lookup == {'found': False}  # compact: no body, no evidence contents
+    async with await RunStore.open(db) as store:
+        run = await store.get_run(run_id)
+        assert run.model == 'test'
+        assert run.model_calls >= 1  # briefing + the chat turn
+        assert run.input_tokens > 0
+        assert run.ended_at is not None
+        assert run.engagement_id is not None and run.engagement_id.startswith('eng_')
+        calls = await store.tool_calls(run_id)
+        assert not [c for c in calls if c.tool == 'list_findings']
 
 
 async def test_chat_path_writes_nothing_to_the_run(tmp_path: Path, target_app: Any) -> None:
-    """chat is read-only: reviewing a run records no llm_usage and no tool_calls against it."""
-    import sqlite3
-
+    """chat is read-only: reviewing a run records no model usage and no tool_calls against it."""
     from partex.agent_adapter import run_chat
     from partex.storage import RunStore as Store
 
@@ -529,13 +504,14 @@ async def test_chat_path_writes_nothing_to_the_run(tmp_path: Path, target_app: A
         await run_chat(run_id, db, TestModel(), briefing=False)
     finally:
         monkeypatch.undo()
-    conn = sqlite3.connect(f'file:{db}?mode=ro', uri=True)
-    assert conn.execute('SELECT COUNT(*) FROM llm_usage WHERE run_id=?', (run_id,)).fetchone()[0] == 0
-    assert conn.execute('SELECT COUNT(*) FROM tool_calls WHERE run_id=?', (run_id,)).fetchone()[0] == 0
+    async with await Store.open(db) as store:
+        run = await store.get_run(run_id)
+        assert (run.model_calls, run.input_tokens, run.output_tokens) == (0, 0, 0)
+        assert await store.tool_calls(run_id) == []
 
 
 async def test_usage_recorder_covers_streaming_and_errors(tmp_store: RunStore) -> None:
-    """UsageRecordingModel writes a row for the streamed path (what CLAI2 uses) and for a failed call."""
+    """UsageRecordingModel accumulates totals on runs for streamed and failed calls."""
     from pydantic_ai import Agent as _Agent
     from pydantic_ai.models.function import AgentInfo as _AgentInfo
     from pydantic_ai.models.test import TestModel as _TestModel
@@ -549,8 +525,8 @@ async def test_usage_recorder_covers_streaming_and_errors(tmp_store: RunStore) -
 
     async with _Agent(recorder).run_stream('hi') as result:  # streamed path
         await result.get_output()
-    rows = await tmp_store.llm_usage_totals(run_id)
-    assert rows['calls'] == 1 and rows['input_tokens'] > 0
+    run = await tmp_store.get_run(run_id)
+    assert run.model_calls == 1 and run.input_tokens > 0 and run.model == 'test'
 
     async def boom_stream(messages: list[ModelMessage], info: _AgentInfo):  # type: ignore[no-untyped-def]
         raise RuntimeError('provider down')
@@ -569,11 +545,8 @@ async def test_usage_recorder_covers_streaming_and_errors(tmp_store: RunStore) -
     failing_sync = UsageRecordingModel(FunctionModel(boom_sync), store=tmp_store, run_id=run_id, role='tester')
     with pytest.raises(RuntimeError, match='provider down'):  # non-streamed request path
         await _Agent(failing_sync).run('hi')
-    import sqlite3
-
-    conn = sqlite3.connect(f'file:{tmp_store.path}?mode=ro', uri=True)
-    statuses = dict(conn.execute('SELECT status, COUNT(*) FROM llm_usage WHERE run_id=? GROUP BY status', (run_id,)))
-    assert statuses.get('error', 0) == 2 and statuses.get('ok', 0) == 1  # stream + non-stream failure, one ok
+    run = await tmp_store.get_run(run_id)
+    assert run.model_calls == 3
 
 
 # ── operator-confirmed scope extension (issue #64) ────────────────────────────
@@ -911,9 +884,6 @@ async def test_run_code_reads_saved_research_and_isolates_other_runs(
             audit_args={'query': 'nginx 1.24.0 cve'},
         )
 
-        async def audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
-            await tmp_store.record_tool_call(session.run_id, tool, args, result)
-
         # Monty surfaces a nested call's ToolFailed to the snippet as a plain Exception carrying
         # the message, so the refusals are caught and printed rather than ending the snippet.
         refusal_snippet = (
@@ -934,7 +904,6 @@ async def test_run_code_reads_saved_research_and_isolates_other_runs(
                 f'print(await lookup_research(research_id={research_id!r}))',
                 refusal_snippet,
             ],
-            audit=audit,
         )
 
         # The selected run's research reads back framed as untrusted web_search data (the sandbox
@@ -949,18 +918,13 @@ async def test_run_code_reads_saved_research_and_isolates_other_runs(
         assert unrelated_id not in listing and 'unrelated target' not in listing
         assert 'no web research' in refused and 'not a run against this target' in refused
 
-        # Every read landed an audit row, in call order: the seed's web_search row first (metadata only —
-        # never the answer), then the reads; the gate refusal raised before its audit, so no fourth row.
+        # Only the seed's web_search action landed an audit row (metadata only — never the answer);
+        # read-only lookups write no tool_calls rows (#245).
         calls = await tmp_store.tool_calls(session.run_id)
-        assert [call.tool for call in calls] == ['web_search', 'list_research', 'lookup_research', 'lookup_research']
+        assert [call.tool for call in calls] == ['web_search']
         seed_audit = json.dumps(calls[0].result)
         assert 'Nginx 1.24.0 has CVE-2024-7347' not in seed_audit  # the seed audit never holds the answer
         assert 'nvd.nist.gov' in seed_audit  # source URLs are metadata, and are audit-visible
-        assert calls[1].args == {'run': 'current'} and calls[1].result == {'count': 1}
-        assert calls[2].args == {'research_id': research_id, 'run': 'current'}
-        assert calls[2].result == {'found': True}
-        assert calls[3].args == {'research_id': unrelated_id, 'run': 'current'}
-        assert calls[3].result == {'found': False}  # audited as absent, never exposed
 
 
 async def test_save_report_writes_a_private_audited_file(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
@@ -980,21 +944,14 @@ async def test_save_report_writes_a_private_audited_file(tmp_store: RunStore, tm
         assert 'Findings' not in json.dumps(call.args) + json.dumps(call.result)  # the audit never holds the text
         assert not any(artifact_dir(tmp_store.path).glob('**/summary-1*'))  # never beside captured evidence
 
-        async def audit(tool: str, args: dict[str, Any], result: dict[str, Any]) -> None:
-            await tmp_store.record_tool_call(session.run_id, tool, args, result)
-
         (read,) = await drive_code(
             session,
             tmp_store,
             ["print(await list_reports())\nprint(await read_report(name='summary-1'))"],
-            audit=audit,
         )
         assert 'summary-1' in read
         assert 'See ev_abc.' in read
-        _, listing, reading = await tmp_store.tool_calls(session.run_id)
-        assert listing.tool == 'list_reports' and listing.result == {'count': 1}
-        assert reading.tool == 'read_report' and reading.result == {'found': True}
-        assert reading.args == {'name': 'summary-1', 'run': session.run_id}
+        assert [c.tool for c in await tmp_store.tool_calls(session.run_id)] == ['save_report']
 
 
 @pytest.mark.parametrize(

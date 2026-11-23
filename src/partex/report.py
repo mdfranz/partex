@@ -1,8 +1,9 @@
 """Cross-run reporting rollup over the store — PLAN §7/§8 (``partex report``).
 
-A read-only aggregation of what runs already recorded: findings by severity and check, model spend
-from ``llm_usage``, and the agent tool-call audit from ``tool_calls``. No engine or schema change —
-the store stays the only writer, and this never touches the network or a model.
+A read-only aggregation of what runs already recorded: findings by severity and check, run-level model
+spend from ``runs`` (``model``, ``model_calls``, ``input_tokens``, ``output_tokens``), and the action
+tool-call audit from ``tool_calls``. The store stays the only writer, and this never touches the
+network or a model.
 """
 
 from collections.abc import Sequence
@@ -10,7 +11,7 @@ from typing import Any
 
 from .export import SEVERITY_RANK
 from .models import Finding, Severity
-from .storage import LlmUsageRecord, RunReader, RunRecord, RunStore, ToolCallRecord
+from .storage import RunReader, RunRecord, RunStore, ToolCallRecord
 
 type ReportStore = RunReader | RunStore
 
@@ -42,7 +43,6 @@ def build_report_payload(
     runs: Sequence[RunRecord],
     findings: Sequence[Finding],
     tool_calls: Sequence[ToolCallRecord],
-    llm_usage: Sequence[LlmUsageRecord],
 ) -> dict[str, Any]:
     """Aggregate the already-read run data into a deterministic, JSON-serializable report payload."""
     states: dict[str, int] = {}
@@ -62,31 +62,28 @@ def build_report_payload(
         for check_id, group in sorted(by_check.items(), key=lambda kv: (-len(kv[1]), kv[0]))
     ]
 
-    spend: dict[tuple[str, str], dict[str, int]] = {}
-    for u in llm_usage:
+    spend: dict[str, dict[str, int]] = {}
+    for run in runs:
+        if run.model_calls <= 0 and run.input_tokens <= 0 and run.output_tokens <= 0:
+            continue
+        model_label = run.model or 'unknown'
         agg = spend.setdefault(
-            (u.role, u.model),
-            {'turns': 0, 'input_tokens': 0, 'output_tokens': 0, 'cache_read_tokens': 0, 'latency_ms': 0, 'errors': 0},
+            model_label,
+            {'runs': 0, 'model_calls': 0, 'input_tokens': 0, 'output_tokens': 0},
         )
-        agg['turns'] += 1
-        agg['input_tokens'] += u.input_tokens
-        agg['output_tokens'] += u.output_tokens
-        agg['cache_read_tokens'] += u.cache_read_tokens
-        agg['latency_ms'] += u.latency_ms
-        agg['errors'] += 0 if u.status == 'ok' else 1
+        agg['runs'] += 1
+        agg['model_calls'] += run.model_calls
+        agg['input_tokens'] += run.input_tokens
+        agg['output_tokens'] += run.output_tokens
     model_usage = [
         {
-            'role': role,
             'model': model,
-            'turns': agg['turns'],
+            'runs': agg['runs'],
+            'model_calls': agg['model_calls'],
             'input_tokens': agg['input_tokens'],
             'output_tokens': agg['output_tokens'],
-            'cache_read_tokens': agg['cache_read_tokens'],
-            'total_latency_ms': agg['latency_ms'],
-            'avg_latency_ms': round(agg['latency_ms'] / agg['turns']) if agg['turns'] else 0,
-            'errors': agg['errors'],
         }
-        for (role, model), agg in sorted(spend.items(), key=lambda kv: (-kv[1]['turns'], kv[0]))
+        for model, agg in sorted(spend.items(), key=lambda kv: (-kv[1]['model_calls'], kv[0]))
     ]
 
     tools: dict[str, dict[str, int]] = {}
@@ -119,16 +116,14 @@ def build_report_payload(
 
 
 async def gather_report_payload(store: ReportStore) -> dict[str, Any]:
-    """Read every run's findings, tool calls, and model usage from *store* and build the report."""
+    """Read every run's findings and tool calls from *store* and build the report."""
     runs = await store.list_runs()
     findings: list[Finding] = []
     tool_calls: list[ToolCallRecord] = []
-    llm_usage: list[LlmUsageRecord] = []
     for run in runs:
         findings.extend(await store.findings(run.id))
         tool_calls.extend(await store.tool_calls(run.id))
-        llm_usage.extend(await store.llm_usage(run.id))
-    return build_report_payload(runs, findings, tool_calls, llm_usage)
+    return build_report_payload(runs, findings, tool_calls)
 
 
 def render_report_text(payload: dict[str, Any]) -> str:
@@ -149,12 +144,11 @@ def render_report_text(payload: dict[str, Any]) -> str:
         lines.append(f'  {check["check_id"]:<24} {check["total"]:>4}  ({sev})')
 
     usage = payload['model_usage']
-    lines.append(f'model usage: {sum(row["turns"] for row in usage)} turns')
+    lines.append(f'model usage: {sum(row["model_calls"] for row in usage)} calls')
     for row in usage:
         lines.append(
-            f'  {row["role"]}/{row["model"]}: {row["turns"]} turns, '
-            f'{row["input_tokens"]}/{row["output_tokens"]} tok in/out, '
-            f'{row["cache_read_tokens"]} cache-rd, avg {row["avg_latency_ms"]}ms, {row["errors"]} errors'
+            f'  {row["model"]}: {row["model_calls"]} calls ({row["runs"]} runs), '
+            f'{row["input_tokens"]}/{row["output_tokens"]} tok in/out'
         )
 
     tool_calls = payload['tool_calls']
