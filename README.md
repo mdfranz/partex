@@ -167,5 +167,7 @@ Partex keeps its local run database and history together so a single setting con
 
 Use `--db PATH` or `PARTEX_DB` to select a different database. Its artifacts, reports, operator exports, and read-only chat history are stored alongside it. Live `agent` sessions use temporary terminal storage. Use `--log-file PATH` or `PARTEX_LOG_FILE` to select a different trace file. Commands that accept `--out` write to the path you provide.
 
+To reclaim space, `scripts/clean-state.sh` offers each database (with its WAL files, artifacts, reports, and chat history) and each trace log, oldest first, and deletes only the items you confirm one by one. `--older-than DAYS`, `--db-only`, `--logs-only`, and `--dry-run` narrow what it offers.
+
 Existing data stays where it is. To open previous runs, point `--db` at the original database, such as `./partex-probe.db` for the launcher or `${XDG_DATA_HOME:-$HOME/.local/share}/partex/partex.db` for the CLI.
 
