@@ -12,6 +12,7 @@ from pydantic_ai.framing import wrap
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 
+from .model_capabilities import MODEL_CAPABILITIES
 from .tools import BRIEFING_TAG, REVIEWER_TOOLS, ReviewDeps
 
 REVIEWER_INSTRUCTIONS = """\
@@ -79,7 +80,7 @@ def build_reviewer_agent(
         output_type=str,
         instructions=instructions,
         tools=REVIEWER_TOOLS,
-        capabilities=list(skills),
+        capabilities=[*MODEL_CAPABILITIES, *skills],
         model_settings=model_settings,
         defer_model_check=True,
     )
