@@ -56,4 +56,7 @@ distinct `engagement.roles` handles.
   out of text.
 
 Consult [role-pair-probing.md](reference/role-pair-probing.md) for object-ID substitution,
-BFLA method-swap patterns, and destructive-action guardrails.
+BFLA method-swap patterns, and destructive-action guardrails. For GraphQL targets the
+same two-role rule applies **per query/mutation, not per route** — role-pair replay of
+harvested queries with selection-set widening is the
+[`skills/graphql/`](../graphql/SKILL.md) playbook.
