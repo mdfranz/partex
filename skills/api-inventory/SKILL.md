@@ -44,6 +44,8 @@ with `format: openapi` and `revision`).
   single normalized operation key (e.g. `POST /graphql`) in v1; per-query/per-mutation
   decomposition into distinct operations is **out of scope**. Do not invent synthetic
   operation keys for individual queries — record the endpoint once as a coverage row.
+  GraphQL-specific probing (query-harvested coverage rows, per-field authorization,
+  introspection) is the [`skills/graphql/`](../graphql/SKILL.md) playbook.
 - **Declared vs. observed provenance.** Keep two surfaces distinct in every inventory:
   - *Declared*: operations defined in a `ConfigExcerpt` (`format: openapi`, citing
     `revision`).
