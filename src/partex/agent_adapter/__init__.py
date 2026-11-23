@@ -138,7 +138,7 @@ async def run_agent(
     user_agent: str | None = None,
     allow_methods: Sequence[str] = (),
     max_writes: int | None = None,
-    checks: tuple[str, ...] = ('version-disclosure',),
+    checks: tuple[str, ...] = engine.DEFAULT_AGENT_CHECKS,
     from_run: str | None = None,
     bundle: Path | None = None,
     briefing: bool = True,
