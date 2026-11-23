@@ -15,6 +15,7 @@ from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.exceptions import AgentRunError
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai.usage import UsageLimits
 
 # Imported at module level, before any tool frames text: CLAI2 registers its own framing tags at
 # import time, and a tag registered after escaping has started changes how earlier text renders.
@@ -47,8 +48,13 @@ from .usage import UsageRecordingModel
 # conversation content to the model a second time.
 CHAT_SETTINGS = Settings(model=None, code_mode=False, speculative_code_mode=False, session_namer=False)
 
+DEFAULT_REQUEST_LIMIT = 200
+"""Model turns one operator prompt may take. ``chat()`` does not apply CLAI2's ``request_limit`` setting (only its CLI
+does), so without an explicit ``usage_limits`` pydantic-ai's own default of 50 silently stopped long turns mid-task."""
+
 __all__ = [
     'BRIEFING_PROMPT',
+    'DEFAULT_REQUEST_LIMIT',
     'ReviewDeps',
     'TesterDeps',
     'WebSearcher',
@@ -110,6 +116,7 @@ async def run_chat(
     *,
     briefing: bool = True,
     skills: Sequence[AgentCapability[ReviewDeps]] = (),
+    request_limit: int = DEFAULT_REQUEST_LIMIT,
     console: Console | None = None,
 ) -> None:
     """Open *run_id* in *db_path* read-only, print a briefing (unless disabled), then start the chat."""
@@ -136,6 +143,7 @@ async def run_chat(
                 builtin_plugins=(PluginSettings(id=TARGETS_PLUGIN_ID, factory=TARGETS_PLUGIN_FACTORY),),
                 console=console,
                 settings=CHAT_SETTINGS,
+                usage_limits=UsageLimits(request_limit=request_limit),
             )
         finally:
             current_targets.reset(token)
@@ -151,12 +159,15 @@ async def run_agent(
     urls_file: Path | None = None,
     recursive: bool = False,
     user_agent: str | None = None,
-    checks: tuple[str, ...] = ('version-disclosure',),
+    allow_methods: Sequence[str] = (),
+    max_writes: int | None = None,
+    checks: tuple[str, ...] = engine.DEFAULT_AGENT_CHECKS,
     from_run: str | None = None,
     bundle: Path | None = None,
     briefing: bool = True,
     skills: Sequence[AgentCapability[TesterDeps]] = (),
     search_model: SearchModelConfig | None = None,
+    request_limit: int = DEFAULT_REQUEST_LIMIT,
     console: Console | None = None,
 ) -> str:
     """Open a new live session on *engagement_path*, brief, then let the operator direct probes in CLAI2.
@@ -186,6 +197,8 @@ async def run_agent(
             urls_file=urls_file,
             recursive=recursive,
             user_agent=user_agent,
+            allow_methods=allow_methods,
+            max_writes=max_writes,
             checks=checks,
         ) as session:
             seed_plan = None
@@ -262,6 +275,7 @@ async def run_agent(
                         ),
                         console=console,
                         settings=CHAT_SETTINGS,
+                        usage_limits=UsageLimits(request_limit=request_limit),
                     )
                 finally:
                     current_targets.reset(targets_token)

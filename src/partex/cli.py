@@ -57,6 +57,18 @@ INSECURE_HELP = (
 )
 USER_AGENT_HELP = 'User-Agent for this run, overriding the engagement http.user_agent (default partex/<version>)'
 
+ALLOW_METHOD_HELP = (
+    'also authorize this state-changing method (POST, PUT, PATCH or DELETE) for this run; repeatable, needs '
+    '--max-writes (or the engagement max_write_requests). Each write still waits for operator approval; headless '
+    'runs deny them'
+)
+MAX_WRITES_HELP = 'budget of state-changing requests for this run (ceiling 1000); overrides max_write_requests'
+
+REQUEST_LIMIT_HELP = (
+    'most model turns one prompt may take before the turn stops (default {default}); a long investigation that '
+    'chains many tool calls may need more'
+)
+
 EXIT_OK = 0
 EXIT_FATAL = 1
 EXIT_USAGE = 2
@@ -157,6 +169,12 @@ async def _write_export(store: RunStore, run_id: str, out: str | None) -> None:
 # ── Parser ────────────────────────────────────────────────────────────────────
 
 
+def _request_limit_help() -> str:
+    from .agent_adapter import DEFAULT_REQUEST_LIMIT
+
+    return REQUEST_LIMIT_HELP.format(default=DEFAULT_REQUEST_LIMIT)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The argparse surface (PLAN §8). Every subcommand accepts ``--logfire``; store commands ``--db``."""
     common = argparse.ArgumentParser(add_help=False)
@@ -201,6 +219,8 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument('--user-agent', default=None, help=USER_AGENT_HELP)
     test.add_argument('--urls-file', default=None, help=URLS_FILE_HELP)
     test.add_argument('--recursive', action='store_true', help=RECURSIVE_HELP)
+    test.add_argument('--allow-method', action='append', default=[], metavar='METHOD', help=ALLOW_METHOD_HELP)
+    test.add_argument('--max-writes', type=int, default=None, metavar='N', help=MAX_WRITES_HELP)
     test_selection = test.add_mutually_exclusive_group()
     test_selection.add_argument(
         '--checks',
@@ -326,6 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
         '--no-briefing', action='store_true', help='open the chat without the opening model summary of the run'
     )
     chat.add_argument('--skill-dir', **SKILL_DIR_ARGS)
+    chat.add_argument('--request-limit', type=_positive_int, default=None, metavar='N', help=_request_limit_help())
     chat.set_defaults(handler=_cmd_chat)
 
     agent = subparsers.add_parser(
@@ -339,6 +360,8 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument('--user-agent', default=None, help=USER_AGENT_HELP)
     agent.add_argument('--urls-file', default=None, help=URLS_FILE_HELP)
     agent.add_argument('--recursive', action='store_true', help=RECURSIVE_HELP)
+    agent.add_argument('--allow-method', action='append', default=[], metavar='METHOD', help=ALLOW_METHOD_HELP)
+    agent.add_argument('--max-writes', type=int, default=None, metavar='N', help=MAX_WRITES_HELP)
     agent.add_argument(
         '--model', required=True, help='as for chat: a model string, or a bare name with --gateway-route'
     )
@@ -350,8 +373,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent.add_argument(
         '--checks',
-        default='version-disclosure',
-        help='active checks run before the chat opens (comma-separated; default: %(default)s)',
+        default=','.join(engine.DEFAULT_AGENT_CHECKS),
+        help='checks run before the chat opens (comma-separated; default: %(default)s). The passive discovery '
+        'checks also re-run by themselves when assets or specs are captured (#185)',
     )
     agent.add_argument('--from', dest='from_run', default=None, help='earlier run the agent may read (run_…)')
     agent.add_argument(
@@ -360,6 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="expose an imported bundle's surface to the session read-only (nothing is sent automatically, #76)",
     )
     agent.add_argument('--no-briefing', action='store_true', help='open the chat without the opening summary')
+    agent.add_argument('--request-limit', type=_positive_int, default=None, metavar='N', help=_request_limit_help())
     agent.add_argument('--skill-dir', **SKILL_DIR_ARGS)
     agent.set_defaults(handler=_cmd_agent)
 
@@ -461,6 +486,8 @@ def _cmd_test(args: argparse.Namespace) -> int:
                 urls_file=args.urls_file,
                 recursive=bool(args.recursive),
                 user_agent=args.user_agent,
+                allow_methods=args.allow_method,
+                max_writes=args.max_writes,
                 seed_bundle=args.bundle,
                 max_seed=args.max_seed,
             )
@@ -800,6 +827,10 @@ def _session_skills(args: argparse.Namespace) -> list[Any]:
     return skill_capabilities(usable_skills(registry.skills, registry.checks))
 
 
+def _request_limit_kwargs(args: argparse.Namespace) -> dict[str, int]:
+    return {} if args.request_limit is None else {'request_limit': args.request_limit}
+
+
 def _cmd_chat(args: argparse.Namespace) -> int:
     from .agent_adapter import run_chat
     from .models_config import resolve_model
@@ -813,7 +844,17 @@ def _cmd_chat(args: argparse.Namespace) -> int:
     anyio.run(check_run)  # unknown store or run: exit 1 before a model is built or the terminal opens
     model = resolve_model(args.model, gateway_route=args.gateway_route)
     skills = _session_skills(args)
-    anyio.run(partial(run_chat, args.run_id, db_path, model, briefing=not args.no_briefing, skills=skills))
+    anyio.run(
+        partial(
+            run_chat,
+            args.run_id,
+            db_path,
+            model,
+            briefing=not args.no_briefing,
+            skills=skills,
+            **_request_limit_kwargs(args),
+        )
+    )
     return EXIT_OK
 
 
@@ -850,12 +891,15 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             urls_file=Path(args.urls_file) if args.urls_file is not None else None,
             recursive=bool(args.recursive),
             user_agent=args.user_agent,
+            allow_methods=args.allow_method,
+            max_writes=args.max_writes,
             checks=checks,
             from_run=args.from_run,
             bundle=bundle,
             briefing=not args.no_briefing,
             skills=_session_skills(args),
             search_model=search_model,
+            **_request_limit_kwargs(args),
         )
     )
     print(f'session run {run_id} saved; review it with: partex show {run_id} --db {db_path}', file=sys.stderr)

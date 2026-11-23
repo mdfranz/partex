@@ -41,6 +41,7 @@ from .engagement import MANIFEST_NAME, check_credentials_available, load_engagem
 from .errors import BudgetExhausted, PartexError, ScopeViolation, ValidationFailed
 from .ids import finding_id
 from .models import (
+    WRITE_METHODS,
     ArtifactEvidence,
     ConfigEvidence,
     CoverageEntry,
@@ -65,6 +66,11 @@ ENTRY_POINT_GROUP = 'partex.checks'
 MAX_DRAFTS_PER_CHECK = 1000
 DEFAULT_ACTIVE_CHECKS = ('version-disclosure',)
 """Active checks ``partex test`` runs when none are named."""
+DISCOVERY_CHECKS = ('js-analysis', 'api-contract-conformance', 'openapi-spec-review')
+"""Passive checks a live session re-runs by itself when static sources (downloaded assets, API specs) arrive (#185).
+They only read captured evidence, so a pass sends no traffic and spends no budget."""
+DEFAULT_AGENT_CHECKS = (*DEFAULT_ACTIVE_CHECKS, *DISCOVERY_CHECKS)
+"""What ``partex agent`` runs before the chat opens when ``--checks`` is not given (#185)."""
 _NOT_RUN = object()
 
 
@@ -545,6 +551,33 @@ def _apply_user_agent(engagement: Engagement, user_agent: str | None) -> Engagem
     return engagement.model_copy(update={'http': HttpPolicy(user_agent=user_agent)})
 
 
+def _apply_write_flags(engagement: Engagement, allow_methods: Sequence[str], max_writes: int | None) -> Engagement:
+    """``--allow-method`` / ``--max-writes`` extend the engagement's write authority for this run (#65, #119).
+
+    Same E3 rules as the file: a write method needs a budget and a budget needs a write method. Never widens past
+    the ceilings, and approval of each write still happens per action (§4.2).
+    """
+    if not allow_methods and max_writes is None:
+        return engagement
+    methods = list(engagement.scope.allowed_methods)
+    for method in allow_methods:
+        verb = method.strip().upper()
+        if verb not in WRITE_METHODS:
+            raise _GateRefused(
+                f'--allow-method {method!r}: choose from {", ".join(sorted(WRITE_METHODS))}', rule_code='scope-invalid'
+            )
+        if verb not in methods:
+            methods.append(verb)
+    budget = engagement.scope.max_write_requests if max_writes is None else max_writes
+    if max_writes is not None and max_writes < 0:
+        raise _GateRefused('--max-writes must be 0 or more', rule_code='scope-invalid')
+    scope = engagement.scope.model_copy(update={'allowed_methods': methods, 'max_write_requests': budget})
+    problems = validate_scope(scope)
+    if problems:
+        raise _GateRefused('write flags: ' + '; '.join(problems), rule_code='scope-invalid')
+    return engagement.model_copy(update={'scope': scope})
+
+
 def _apply_insecure(engagement: Engagement, insecure: bool) -> Engagement:
     """``--insecure`` turns verification off for this run, keeping any ``insecure_hosts`` the file lists."""
     if not insecure or not engagement.tls.verify:
@@ -588,6 +621,8 @@ async def _check_live_gates(
     urls_file: str | Path | None = None,
     recursive: bool = False,
     user_agent: str | None = None,
+    allow_methods: Sequence[str] = (),
+    max_writes: int | None = None,
 ) -> Engagement:
     """The live gates, all before any socket: ``--authorized`` (E2 CLI half), E1–E7, credentials present."""
     if not authorized:
@@ -603,6 +638,7 @@ async def _check_live_gates(
         engagement = await anyio.to_thread.run_sync(
             partial(_apply_urls_file, engagement, urls_file, recursive=recursive)
         )
+    engagement = _apply_write_flags(engagement, allow_methods, max_writes)
     return _apply_user_agent(_apply_insecure(engagement, insecure), user_agent)
 
 
@@ -616,6 +652,8 @@ async def run_test(
     urls_file: str | Path | None = None,
     recursive: bool = False,
     user_agent: str | None = None,
+    allow_methods: Sequence[str] = (),
+    max_writes: int | None = None,
     registry: Mapping[str, Any] | None = None,
     seed_bundle: str | Path | None = None,
     max_seed: int | None = None,
@@ -656,6 +694,8 @@ async def run_test(
             urls_file=urls_file,
             recursive=recursive,
             user_agent=user_agent,
+            allow_methods=allow_methods,
+            max_writes=max_writes,
         )
     except _GateRefused as exc:
         return await invalid(exc.rule_code or 'engagement-invalid', str(exc))
@@ -1016,6 +1056,36 @@ class LiveSessionRefused(PartexError):
         self.run_id = run_id
 
 
+@dataclass(frozen=True, slots=True)
+class DiscoveryUpdate:
+    """What one automatic discovery pass produced (#185): which checks ran and what is new in the run."""
+
+    checks: tuple[str, ...]
+    new_findings: int
+    new_surface_nodes: int
+    surface_nodes: int
+    failed: tuple[str, ...] = ()
+
+    def note(self) -> str:
+        """One line for the model: what discovery learned, and where to read it."""
+        parts = [f'{self.surface_nodes} surface node(s) known ({self.new_surface_nodes} new)']
+        if self.new_findings:
+            parts.append(f'{self.new_findings} new finding(s)')
+        if self.failed:
+            parts.append(f'failed: {", ".join(self.failed)}')
+        return (
+            f'Discovery update (partex ran {", ".join(self.checks) or "no checks"} on newly captured sources; '
+            f'no traffic sent): {"; ".join(parts)}. Read them with list_coverage and list_findings before guessing paths.'
+        )
+
+
+def _is_discovery_source(item: Evidence) -> bool:
+    """Evidence that feeds the discovery checks: a downloaded asset, or a derived OpenAPI spec."""
+    if isinstance(item, ArtifactEvidence):
+        return True
+    return isinstance(item, ConfigEvidence) and item.config.format.lower() == 'openapi'
+
+
 class LiveSession:
     """One open live run that an operator (through an agent) extends with further requests and checks.
 
@@ -1031,6 +1101,8 @@ class LiveSession:
         self.captured: list[Evidence] = []
         self.findings: list[Finding] = []
         self._store = store
+        self._discovery_cursor = 0
+        self._discovery_lock = anyio.Lock()
         self.client = ScopedHttpClient(
             engagement,
             source=f'capture:{run_id}',
@@ -1164,6 +1236,43 @@ class LiveSession:
         self.engagement = self.engagement.model_copy(update={'scope': after})
         return before, after
 
+    async def refresh_discovery(self) -> DiscoveryUpdate | None:
+        """Run the passive discovery checks when static sources arrived since the last call (#185).
+
+        Returns ``None`` when nothing new could change their output (the common case, and cheap). Otherwise runs
+        each registered :data:`DISCOVERY_CHECKS` that applies, committing findings, coverage and surface exactly
+        as an explicit ``run_check`` does; re-runs are idempotent (finding IDs, node upserts and edge inserts all
+        dedupe). A check that fails is reported in the update, not raised, so a bad bundle cannot end the session.
+        Sends no traffic.
+        """
+        async with self._discovery_lock:
+            fresh = self.captured[self._discovery_cursor :]
+            self._discovery_cursor = len(self.captured)
+            if not any(_is_discovery_source(item) for item in fresh):
+                return None
+            nodes_before = len((await self._store.surface(self.run_id))[0])
+            findings_before = len(self.findings)
+            ran: list[str] = []
+            failed: list[str] = []
+            for check_id in DISCOVERY_CHECKS:
+                check = self.registry.get(check_id)
+                if check is None or not check.applies_to(self.captured):
+                    continue
+                try:
+                    await self.run_check(check_id)
+                except CheckFailed:
+                    failed.append(check_id)
+                else:
+                    ran.append(check_id)
+            nodes_after = len((await self._store.surface(self.run_id))[0])
+            return DiscoveryUpdate(
+                checks=tuple(ran),
+                new_findings=len(self.findings) - findings_before,
+                new_surface_nodes=nodes_after - nodes_before,
+                surface_nodes=nodes_after,
+                failed=tuple(failed),
+            )
+
     async def run_check(self, check_id: str) -> list[Finding]:
         """Run one registered check over this session and commit its new findings; returns all of its findings.
 
@@ -1207,6 +1316,8 @@ async def live_session(
     urls_file: str | Path | None = None,
     recursive: bool = False,
     user_agent: str | None = None,
+    allow_methods: Sequence[str] = (),
+    max_writes: int | None = None,
     checks: Sequence[str] = (),
     registry: Mapping[str, Any] | None = None,
 ) -> AsyncGenerator[LiveSession]:
@@ -1228,6 +1339,8 @@ async def live_session(
             urls_file=urls_file,
             recursive=recursive,
             user_agent=user_agent,
+            allow_methods=allow_methods,
+            max_writes=max_writes,
         )
     except _GateRefused as exc:
         run_id = await store.create_run(
@@ -1271,6 +1384,7 @@ async def live_session(
         for check in (*active, *passive):  # probes first, so passive checks also see their traffic
             if check.applies_to(session.captured):
                 await session.run_check(check.check_id)
+        await session.refresh_discovery()  # a baseline that is itself a spec or asset feeds discovery right away
         yield session
     except BaseException as exc:
         with anyio.CancelScope(shield=True):

@@ -1050,6 +1050,12 @@ Design rules:
   can self-correct within its retry budget.
 - **The model never writes findings and never sees cleartext secrets.** It can only invoke
   `run_check` / `request_verification`; the engine validates drafts and evidence and commits.
+  In a live session the engine also re-runs the passive discovery checks (`js-analysis`,
+  `api-contract-conformance`, `openapi-spec-review`) by itself when a downloaded asset or captured
+  OpenAPI spec arrives (#185): a read-only pass over captured evidence (no traffic, no budget),
+  idempotent, announced to the model in its next `http_request` / `http_request_batch` /
+  `discover_js_assets` result and audited as a `discovery_refresh` tool call. `partex agent`
+  runs those checks by default alongside `version-disclosure`.
   `http_request` and `lookup_evidence` always redact `secret_fields` before returning `Evidence`
   to the model, and wrap attacker-controlled payloads in per-run random-nonce XML tags
   (`<partex_evidence_<nonce>>`) to isolate untrusted data from instructions.

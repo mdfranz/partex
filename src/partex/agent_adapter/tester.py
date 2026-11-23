@@ -88,6 +88,29 @@ async def _audit(ctx: RunContext[TesterDeps], tool: str, args: dict[str, Any], r
     await ctx.deps.store.record_tool_call(ctx.deps.run_id, tool, args, result)
 
 
+async def _discovery_note(ctx: RunContext[TesterDeps]) -> str:
+    """Run the automatic passive discovery pass if new assets or specs arrived (#185); a note for the model, or ''.
+
+    No traffic is sent. The note is partex's own text, so it sits outside the untrusted-data frame of the result.
+    """
+    update = await ctx.deps.session.refresh_discovery()
+    if update is None:
+        return ''
+    await _audit(
+        ctx,
+        'discovery_refresh',
+        {},
+        {
+            'checks': list(update.checks),
+            'failed': list(update.failed),
+            'new_findings': update.new_findings,
+            'new_surface_nodes': update.new_surface_nodes,
+            'surface_nodes': update.surface_nodes,
+        },
+    )
+    return update.note() + '\n\n'
+
+
 def _exchange_for_model(evidence: HttpEvidence) -> dict[str, Any]:
     redacted = cast(HttpEvidence, redact(evidence))  # redaction keeps the evidence kind
     request, response = redacted.http.request, redacted.http.response
@@ -163,7 +186,7 @@ async def http_request(
         await _audit(ctx, 'http_request', args, {'error': str(exc)})
         raise ToolFailed(f'request failed: {exc}') from exc
     await _audit(ctx, 'http_request', args, {'evidence_id': evidence.id, 'status': evidence.http.response.status_code})
-    return frame_untrusted('http_exchange', _exchange_for_model(evidence))
+    return await _discovery_note(ctx) + frame_untrusted('http_exchange', _exchange_for_model(evidence))
 
 
 async def _approve_write(
@@ -316,7 +339,7 @@ async def http_request_batch(ctx: RunContext[TesterDeps], requests: list[BatchRe
         args,
         {'total': len(requests), 'sent': sent, 'refused': refused, 'errored': errored, 'items': resolved},
     )
-    return frame_untrusted('http_exchange_batch', resolved)
+    return await _discovery_note(ctx) + frame_untrusted('http_exchange_batch', resolved)
 
 
 async def run_check(ctx: RunContext[TesterDeps], check_id: str) -> str:
@@ -354,7 +377,8 @@ async def download_asset(ctx: RunContext[TesterDeps], path: str, headers: dict[s
 
     Uses GET only through the engagement-scoped client (scope, rate limit, and request budget apply).
     Stores the complete file locally on disk and returns metadata and the ``ev_`` evidence ID, never
-    the full body. Run ``run_check('js-analysis')`` afterwards to analyze downloaded JavaScript.
+    the full body. partex analyzes downloaded JavaScript and API specs by itself on your next request (no traffic); the result
+    is announced there. ``run_check('js-analysis')`` still forces a pass.
 
     Args:
         path: A path from the target's base URL (``/static/app.js``) or an absolute in-scope URL.
@@ -419,7 +443,7 @@ async def discover_js_assets(ctx: RunContext[TesterDeps]) -> str:
         {},
         {'in_scope': len(discovery.in_scope), 'out_of_scope': len(discovery.out_of_scope)},
     )
-    return frame_untrusted(
+    return await _discovery_note(ctx) + frame_untrusted(
         'js_discovery',
         {'in_scope': list(discovery.in_scope), 'out_of_scope': list(discovery.out_of_scope)},
     )
@@ -547,7 +571,8 @@ in one call and get {path, status, evidence_id} or {path, refused/error, reason}
 lookup_evidence for bodies), download_asset (GET-only full-body download for
 large assets such as JS bundles, returning metadata + ev_ ID without the body), discover_js_assets
 (lists <script src> and import URLs from captured evidence without fetching), run_check (registered
-partex checks, e.g. js-analysis; the only way a finding is recorded), save_report (write a Markdown report
+partex checks; the only way a finding is recorded; partex itself re-runs js-analysis, api-contract-conformance and
+openapi-spec-review when you download assets or capture an API spec, and announces it in your next result), save_report (write a Markdown report
 for the operator), list_reports and read_report (saved reports for the current or --from run), and
 the other read tools (list_runs, list_findings, get_finding, list_evidence, lookup_evidence, list_research,
 lookup_research). list_research and lookup_research return web research a session saved (check them before
