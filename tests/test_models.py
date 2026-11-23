@@ -361,6 +361,9 @@ def test_scope_max_requests_zero_means_unlimited_but_not_negative():
     assert Scope(hosts=['example.test'], ports=[], max_requests=0).max_requests == 0
     with pytest.raises(ValidationError):
         Scope(hosts=['example.test'], ports=[], max_requests=-1)
+    for bad in (False, True):  # bool coerces to 0/1; false must not become 'unlimited'
+        with pytest.raises(ValidationError):
+            Scope.model_validate({'hosts': ['example.test'], 'ports': [], 'max_requests': bad})
 
 
 # ── Headers ────────────────────────────────────────────────────────────────────
