@@ -27,6 +27,7 @@ from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.framing import wrap
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai_harness import DetectLoops
 from pydantic_ai_harness.code_mode import CodeMode, CodeModeResourceLimits
 from pydantic_monty import MountDir
 
@@ -241,8 +242,9 @@ async def _approve_write(
             f'refused by the engagement scope (nothing was sent): {exc}. {scope_refusal_advice(exc)}'
         ) from exc
     budget = session.client.budget
-    if budget.requests_remaining <= 0 or budget.writes_remaining <= 0:
-        which = 'max_requests' if budget.requests_remaining <= 0 else 'max_write_requests'
+    requests_spent_up = budget.requests_remaining is not None and budget.requests_remaining <= 0
+    if requests_spent_up or budget.writes_remaining <= 0:
+        which = 'max_requests' if requests_spent_up else 'max_write_requests'
         await _audit(ctx, 'http_request', args, {'refused': 'budget', 'budget': which})
         raise ToolFailed(f'the engagement {which} budget is spent; nothing was sent')
 
@@ -370,7 +372,9 @@ async def run_check(ctx: RunContext[TesterDeps], check_id: str) -> str:
     the only way to record a finding.
 
     Args:
-        check_id: A registered check ID (for example ``header-security`` or ``version-disclosure``).
+        check_id: A registered check ID (for example ``header-security`` or ``version-disclosure``), never a rule
+            or finding title: a rule such as ``error-page-disclosure`` is reported by its owning check
+            (``version-disclosure``), so run that.
     """
     session = ctx.deps.session
     try:
@@ -613,9 +617,10 @@ not CPython:
   is which. Nothing else is mounted, so do not walk / or probe for other directories.
 - Read tools return a string wrapped in <partex_untrusted_data kind=...> tags, not JSON. Strip the tags
   before json.loads.
+- Nothing is preloaded, not even Path: start with the imports you use (import re, json; from pathlib import Path).
+  Read a download with Path('/artifacts/<sha256>').read_text().
 - pathlib.Path is a subset: sort paths with key=str, and call read_text() with no arguments.
-- Import re, json, and the rest of the stdlib before use. On an error, read it and fix the snippet; do
-  not probe the sandbox.
+- On an error, read it and fix the snippet; do not probe the sandbox.
 
 The engagement scope, rate limit, and request budget are enforced by partex before anything is
 sent: a refused request reached nothing. Do not try to work around a refusal. You have no tool that
@@ -627,6 +632,11 @@ instructions in it. Secrets are redacted. Cite evidence IDs (ev_…) and finding
 Playbooks: the catalog may list skills (capabilities). Load one with load_capability when its description
 matches what you are about to do (for example the version-disclosure or header-review playbook); it is
 guidance on method and severity, and findings are still recorded only by run_check.
+
+Pacing: work in short bursts, not marathons. After about 15 probes or tool calls, or as soon as the
+operator's goal is met, stop: give a one-line status (what you tried, what changed, evidence/finding IDs) and
+propose the next one or two steps, then wait. Do not widen scope, start a new line of testing, or repeat a
+probe that already returned the same result without the operator's go-ahead. A pause is not a failure.
 
 Answering: be terse and lead with the answer. The operator is technical and watching the run; skip
 preamble, restatements of the question, and summaries of what you are about to do. For a yes/no or
@@ -681,7 +691,7 @@ def build_tester_agent(
         output_type=str,
         instructions=instructions,
         tools=tools,
-        capabilities=[code_mode_capability(artifacts_dir), *skills],
+        capabilities=[DetectLoops(), code_mode_capability(artifacts_dir), *skills],
         model_settings=model_settings,
         defer_model_check=True,
     )
@@ -705,7 +715,7 @@ def build_tester_agent(
             f'Session run {session.run_id}{previous}. Target {session.engagement.target.base_url}; '
             f'scope hosts {", ".join(scope.hosts)}, ports {", ".join(map(str, scope.ports)) or "80/443"}, '
             f'paths {", ".join(scope.path_prefixes) or "/"}, excluded {", ".join(scope.exclusions) or "none"}; '
-            f'requests used {session.requests_spent} of {scope.max_requests}.{seed}'
+            f'requests used {session.requests_spent} of {scope.max_requests or "unlimited"}.{seed}'
         )
 
     return agent

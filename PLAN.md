@@ -313,7 +313,7 @@ row is finalized):
 |---|---|---|
 | E1 | manifest parses, `schema_version` is exactly `1` | `engagement-version` |
 | E2 | `authorization.attestation` is present and non-empty; the CLI additionally requires `--authorized` on every live command, and the stored run records both | `unauthorized` |
-| E3 | scope is non-empty: at least one host; every host parses; `exclusions` are within `path_prefixes`; `max_rps` and `max_requests` are positive with hard ceilings (64 rps, 100k requests); `allowed_methods` defaults to `GET, HEAD, OPTIONS`, must include `GET`, and entries come from `{GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE}` (`CONNECT` and `TRACE` are forbidden); `max_write_requests` defaults to 0 (no state-changing traffic) with a hard ceiling of 1,000; listing a non-safe method with `max_write_requests == 0` (or `max_write_requests > 0` with safe-only methods) is rejected | `scope-invalid` |
+| E3 | scope is non-empty: at least one host; every host parses; `exclusions` are within `path_prefixes`; `max_rps` is positive with a hard ceiling (64 rps); `max_requests` is a non-negative budget with a 100k ceiling, where `0` means unlimited (the rps ceiling still bounds the send rate); `allowed_methods` defaults to `GET, HEAD, OPTIONS`, must include `GET`, and entries come from `{GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE}` (`CONNECT` and `TRACE` are forbidden); `max_write_requests` defaults to 0 (no state-changing traffic) with a hard ceiling of 1,000; listing a non-safe method with `max_write_requests == 0` (or `max_write_requests > 0` with safe-only methods) is rejected | `scope-invalid` |
 | E4 | `credentials` values are environment variable **names** matching `PARTEX_[A-Z0-9_]+` (the namespace keeps an engagement file from naming an unrelated secret such as `GITHUB_TOKEN`); inline values are rejected. Referenced variables must be set at run start | `credential-invalid` / `credential-missing` |
 | E5 | `base_url` host must be inside `scope.hosts` | `scope-invalid` |
 | E6 | `suggested_checks` entries that are not registered are dropped with a warning | - |
@@ -375,7 +375,7 @@ tool — is validated immediately before send:
 4. **Redirects**: never followed automatically; a redirect response is captured as evidence,
    and the new location is re-validated from rule 1 if the caller chooses to follow it.
 5. **Budgets**: a token-bucket limiter enforces `max_rps`; a run-level counter enforces
-   `max_requests`. Exhaustion ends active work cleanly (`checks_complete` with what is
+   `max_requests` (`0` = unlimited). Exhaustion ends active work cleanly (`checks_complete` with what is
    committed), it is not an error.
 
 **Operator exports (`/report`, `/secrets`, #88).** Two more operator-only slash commands live in the

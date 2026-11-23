@@ -16,12 +16,15 @@ import sys
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
 from .paths import mkdir_private, state_dir
+
+if TYPE_CHECKING:
+    from logfire import ScrubMatch
 
 LOG_FILE_ENV = 'PARTEX_LOG_FILE'
 LOGGED_COMMANDS = frozenset({'review', 'test', 'verify', 'chat', 'agent'})
@@ -101,8 +104,34 @@ class JsonlSpanExporter(SpanExporter):
             self._file.close()
 
 
-def configure_telemetry(*, log_path: Path | None, remote: bool, service_version: str) -> None:
+# Span attributes that carry model prompts, replies and tool I/O. Logfire's default scrubber blanks any value that
+# mentions ``auth``, ``secret``, ``password``, ``cookie`` …, which hid most tool results in security testing
+# (headers, auth endpoints, config) and made traces useless for debugging. Keeping them is opt-in
+# (``--logfire-content``, #238): the SDK captures raw tool arguments and results independently of partex's
+# ``redact()`` / ``frame_untrusted``, so they can carry cleartext secrets. Every other attribute, and all
+# attributes by default, keep the default scrubbing.
+CONTENT_ATTRIBUTES = frozenset(
+    {
+        'gen_ai.input.messages',
+        'gen_ai.output.messages',
+        'gen_ai.system_instructions',
+        'gen_ai.tool.call.arguments',
+        'gen_ai.tool.call.result',
+        'final_result',
+    }
+)
+
+
+def keep_content(match: ScrubMatch) -> Any:
+    """Scrub callback: return the original value for :data:`CONTENT_ATTRIBUTES`, else ``None`` (scrub it)."""
+    path = match.path
+    return match.value if len(path) >= 2 and path[0] == 'attributes' and path[1] in CONTENT_ATTRIBUTES else None
+
+
+def configure_telemetry(*, log_path: Path | None, remote: bool, service_version: str, content: bool = False) -> None:
     """Configure Logfire once for the process: the local JSONL log, and remote export only if *remote*.
+
+    With *content*, model and tool content skips the default scrubber (see :data:`CONTENT_ATTRIBUTES`).
 
     Never ``instrument_httpx()``: the target client carries engagement credentials.
     """
@@ -115,6 +144,7 @@ def configure_telemetry(*, log_path: Path | None, remote: bool, service_version:
         send_to_logfire='if-token-present' if remote else False,
         console=False,
         additional_span_processors=processors,
+        scrubbing=logfire.ScrubbingOptions(callback=keep_content) if content else None,
     )
     logfire.instrument_pydantic_ai()
 

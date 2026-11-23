@@ -17,6 +17,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, Text
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai_harness.detect_loops import LoopNudgePart
 
 from partex import engine, target
 from partex.agent_adapter import CHAT_SETTINGS, TesterDeps, build_tester_agent, run_agent
@@ -1333,3 +1334,14 @@ async def test_download_asset_audit_row_records_status(tmp_store: RunStore, tmp_
         (call,) = await tmp_store.tool_calls(session.run_id)
         assert call.tool == 'download_asset'
         assert call.result['status'] == 200 and call.result['evidence_id'].startswith('ev_')
+
+
+async def test_repeated_identical_calls_are_nudged(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    """DetectLoops: an agent repeating the same probe is told to change approach (#250)."""
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True, checks=()) as session:
+        agent: Agent[TesterDeps, str] = build_tester_agent('test')
+        deps = TesterDeps(run_id=session.run_id, reader=tmp_store, session=session, store=tmp_store)
+        model = streaming(snippet_script(['1 + 1'] * 6))
+        result = await agent.run('go', deps=deps, model=model)
+    nudges = [p for m in result.all_messages() for p in m.parts if isinstance(p, LoopNudgePart)]
+    assert nudges

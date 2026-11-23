@@ -38,8 +38,12 @@
 #                            opens with one initial GET per listed target, each captured as evidence and shown live on a
 #                            terminal (--max-requests is raised automatically when the import needs the room). Merges
 #                            with -u. <target-url> is then optional: the first imported entry is the baseline target.
+#       --logfire            also send traces to Logfire [PARTEX_LOGFIRE=1]; needs LOGFIRE_TOKEN (local log is always kept)
+#       --logfire-content    keep prompts and tool I/O out of the secret scrubber in traces [PARTEX_LOGFIRE_CONTENT=1];
+#                            raw tool results can then carry secrets, so use it on non-sensitive targets only
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
-#   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000]
+#   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000;
+#                            0 = unlimited, still paced by --max-rps]
 #   -R, --max-rps N          requests per second [PARTEX_MAX_RPS, default 2; ceiling 64]
 #   -M, --method MODE        what the session may send [PARTEX_METHOD, default read]: read = GET/HEAD/OPTIONS only;
 #                            write = also POST, PUT, PATCH; delete = write plus DELETE. write/delete need a budget:
@@ -47,11 +51,15 @@
 #   -w, --allow-method M     also authorize one state-changing method (POST, PUT, PATCH, DELETE); repeatable
 #                            [PARTEX_ALLOW_METHODS, space-separated]. Needs --max-writes (or --method)
 #   -W, --max-writes N       budget of state-changing requests [PARTEX_MAX_WRITES, ceiling 1000]
+#   -L, --request-limit N    most model turns one prompt may take before it stops and waits for you
+#                            [PARTEX_REQUEST_LIMIT, default 40]; raise it for a long investigation
+#   -T, --thinking LEVEL     reasoning effort of the tester model: minimal|low|medium|high|xhigh|max
+#                            [PARTEX_THINKING, default: the provider's]; lower is faster and cheaper
 #       --no-tui             run `partex test` + show only [NO_TUI=1]
 #   -h, --help
 # Required for the chat step: PYDANTIC_AI_GATEWAY_API_KEY when the model goes through the Gateway (a bare model
 # name, or gateway/...); a direct provider string such as openai:... needs that provider's own key (OPENAI_API_KEY).
-# Request spans are written to the local trace log by default. Set PARTEX_LOGFIRE=1 to opt into remote export.
+# Request spans are written to the local trace log by default. Pass --logfire (or set PARTEX_LOGFIRE=1) to opt into remote export.
 #
 # Traffic: the session opens with 3 GETs (TARGET_URL, /robots.txt, /partex-nonexistent-probe-0); after that
 # only what you ask for in the chat (GET/HEAD/OPTIONS). 2 req/s, budget 50 per session (--max-rps /
@@ -79,6 +87,8 @@ MAX_REQUESTS=${PARTEX_MAX_REQUESTS:-50}
 MAX_RPS=${PARTEX_MAX_RPS:-2}
 ALLOW_METHODS=(${PARTEX_ALLOW_METHODS:-})
 MAX_WRITES=${PARTEX_MAX_WRITES:-}
+REQUEST_LIMIT=${PARTEX_REQUEST_LIMIT:-40}
+THINKING=${PARTEX_THINKING:-}
 METHOD=${PARTEX_METHOD:-read}
 RUN_ID=${RUN_ID:-}   # with --resume: the run to open; otherwise the run to read (--from)
 while [[ $# -gt 0 ]]; do
@@ -94,12 +104,16 @@ while [[ $# -gt 0 ]]; do
     -u|--urls-file) URLS_FILE=${2?$1 needs a value}; shift 2 ;;
     -N|--nmap-file) NMAP_FILE=${2?$1 needs a value}; shift 2 ;;
     -k|--insecure) INSECURE=1; shift ;;
+    --logfire) export PARTEX_LOGFIRE=1; shift ;;
+    --logfire-content) export PARTEX_LOGFIRE_CONTENT=1; shift ;;
     -l|--list) LIST=1; shift ;;
     -n|--max-requests) MAX_REQUESTS=${2?$1 needs a value}; shift 2 ;;
     -R|--max-rps) MAX_RPS=${2?$1 needs a value}; shift 2 ;;
     -M|--method) METHOD=${2?$1 needs a value}; shift 2 ;;
     -w|--allow-method) ALLOW_METHODS+=("${2?$1 needs a value}"); shift 2 ;;
     -W|--max-writes) MAX_WRITES=${2?$1 needs a value}; shift 2 ;;
+    -L|--request-limit) REQUEST_LIMIT=${2?$1 needs a value}; shift 2 ;;
+    -T|--thinking) THINKING=${2?$1 needs a value}; shift 2 ;;
     --no-tui) NO_TUI=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
@@ -109,9 +123,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ $# -eq 0 || -n $TARGET_URL ]] || TARGET_URL=$1
-for _n in MAX_REQUESTS MAX_RPS; do
-  [[ ${!_n} =~ ^[1-9][0-9]*$ ]] || { echo "$_n must be a positive integer, got: ${!_n}" >&2; exit 2; }
-done
+[[ $MAX_REQUESTS =~ ^(0|[1-9][0-9]*)$ ]] || { echo "MAX_REQUESTS must be 0 (unlimited) or a positive integer, got: $MAX_REQUESTS" >&2; exit 2; }
+[[ $REQUEST_LIMIT =~ ^[1-9][0-9]*$ ]] || { echo "REQUEST_LIMIT must be a positive integer, got: $REQUEST_LIMIT" >&2; exit 2; }
+[[ -z $THINKING || $THINKING =~ ^(minimal|low|medium|high|xhigh|max)$ ]] || { echo "THINKING must be minimal, low, medium, high, xhigh or max, got: $THINKING" >&2; exit 2; }
+[[ $MAX_RPS =~ ^[1-9][0-9]*$ ]] || { echo "MAX_RPS must be a positive integer, got: $MAX_RPS" >&2; exit 2; }
 case $METHOD in
   read) ;;
   write) ALLOW_METHODS+=(POST PUT PATCH) ;;
@@ -199,7 +214,7 @@ PY
 )"
   # The session opens with one initial GET per listed URL target (#215); make sure the budget
   # covers the import plus working room, or the pass would stop at --max-requests.
-  if (( nmap_urls_count + 20 > MAX_REQUESTS )); then
+  if (( MAX_REQUESTS > 0 && nmap_urls_count + 20 > MAX_REQUESTS )); then
     MAX_REQUESTS=$((nmap_urls_count + 20))
     (( MAX_REQUESTS > 100000 )) && MAX_REQUESTS=100000  # the engagement scope ceiling (E3)
     echo "imported $nmap_urls_count URL target(s): raising --max-requests to $MAX_REQUESTS so the initial probe pass fits"
@@ -262,5 +277,5 @@ if [[ -n $ROUTE || $MODEL == gateway/* || $MODEL != *:* ]] && [[ -z ${PYDANTIC_A
   exit 1
 fi
 echo "opening a partex agent session on $TARGET_URL (db: $DB)"
-uv run --quiet partex agent "$eng" --authorized --db "$DB" --model "$MODEL" ${ROUTE:+--gateway-route "$ROUTE"} \
+uv run --quiet partex agent "$eng" --authorized --db "$DB" --model "$MODEL" --request-limit "$REQUEST_LIMIT" ${THINKING:+--thinking "$THINKING"} ${ROUTE:+--gateway-route "$ROUTE"} \
   ${SEARCH_MODEL:+--search-model "$SEARCH_MODEL"} ${URLS_FILE:+--urls-file "$URLS_FILE"} ${RECURSIVE:+--recursive} ${WRITE_ARGS[@]+"${WRITE_ARGS[@]}"} ${RUN_ID:+--from "$RUN_ID"}

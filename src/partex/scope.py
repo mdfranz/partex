@@ -366,7 +366,7 @@ def validate_scope(scope: Scope) -> list[str]:
             problems.append(f'exclusion {exclusion!r} is not within any path prefix')
     if scope.max_rps > MAX_RPS_CEILING:
         problems.append(f'max_rps {scope.max_rps} exceeds ceiling {MAX_RPS_CEILING}')
-    if scope.max_requests > MAX_REQUESTS_CEILING:
+    if scope.max_requests > MAX_REQUESTS_CEILING:  # 0 means unlimited: the rate ceiling still applies
         problems.append(f'max_requests {scope.max_requests} exceeds ceiling {MAX_REQUESTS_CEILING}')
     problems.extend(_method_problems(scope))
     return problems

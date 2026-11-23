@@ -40,6 +40,7 @@ from .telemetry import LOG_FILE_ENV, announce, configure_telemetry, resolve_log_
 
 DB_ENV = 'PARTEX_DB'
 LOGFIRE_ENV = 'PARTEX_LOGFIRE'
+LOGFIRE_CONTENT_ENV = 'PARTEX_LOGFIRE_CONTENT'
 SKILL_DIR_ARGS: dict[str, Any] = {
     'action': 'append',
     'default': [],
@@ -169,6 +170,9 @@ async def _write_export(store: RunStore, run_id: str, out: str | None) -> None:
 # ── Parser ────────────────────────────────────────────────────────────────────
 
 
+THINKING_LEVELS = ('minimal', 'low', 'medium', 'high', 'xhigh', 'max')
+
+
 def _request_limit_help() -> str:
     from .agent_adapter import DEFAULT_REQUEST_LIMIT
 
@@ -180,6 +184,11 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         '--logfire', action='store_true', help=f'also send telemetry to Logfire (or set {LOGFIRE_ENV}=1)'
+    )
+    common.add_argument(
+        '--logfire-content',
+        action='store_true',
+        help=f'keep model and tool content out of the default secret scrubber in traces (or set {LOGFIRE_CONTENT_ENV}=1)',
     )
     common.add_argument(
         '--log-file',
@@ -385,6 +394,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent.add_argument('--no-briefing', action='store_true', help='open the chat without the opening summary')
     agent.add_argument('--request-limit', type=_positive_int, default=None, metavar='N', help=_request_limit_help())
+    agent.add_argument(
+        '--thinking',
+        choices=THINKING_LEVELS,
+        default=None,
+        help="tester model's reasoning effort (default: the provider's); lower is faster and cheaper",
+    )
     agent.add_argument('--skill-dir', **SKILL_DIR_ARGS)
     agent.set_defaults(handler=_cmd_agent)
 
@@ -896,6 +911,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             briefing=not args.no_briefing,
             skills=_session_skills(args),
             search_model=search_model,
+            thinking=args.thinking,
             **_request_limit_kwargs(args),
         )
     )
@@ -960,7 +976,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         remote = args.logfire or os.environ.get(LOGFIRE_ENV) == '1'
         log_path = resolve_log_path(args.command, args.log_file)
         if remote or log_path is not None:
-            configure_telemetry(log_path=log_path, remote=remote, service_version=engine.engine_version())
+            content = args.logfire_content or os.environ.get(LOGFIRE_CONTENT_ENV) == '1'
+            configure_telemetry(
+                log_path=log_path, remote=remote, service_version=engine.engine_version(), content=content
+            )
             if args.command in {'chat', 'agent'}:
                 announce(log_path)
         return handler(args)
