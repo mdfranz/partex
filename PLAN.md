@@ -112,34 +112,25 @@ Several initial assumptions in earlier drafts have been explicitly amended as im
 
 ## 2. Architecture
 
-```text
-┌───────────────────────────── partex CLI ──────────────────────────────────┐
-│ engage   review <bundle>   test <eng>   verify <run-id> <finding-id>      │
-│ runs   show <run-id>   summarize <run-id>   checks   agent <eng>          │
-│ chat <run-id>                                                              │
-└──────┬──────────────────────────────────────────────┬───────────────────┘
-       │                                              │
-┌──────▼───────────────────────────────┐   ┌──────────▼──────────────────┐
-│  Engine                              │   │  Agent adapter              │
-│  bundle/engagement load + validate   │   │  Pydantic AI agent + scoped │
-│  evidence registry                   │   │  tools (http, findings,     │
-│  passive checks (deterministic)      │   │  verify) over CLAI2 chat()  │
-│  active checks via target client     │   │  interactive + --auto loop  │
-│  verification runner (PoC replay)    │   │  load_plugins=False         │
-│  findings commit (single writer)     │   └──────────┬──────────────────┘
-└──────┬───────────────────────────────┘              │
-       │                                             │
-┌──────▼─────────────────────────────────────────────▼───────────────────┐
-│  RunStore: SQLite (engagements, runs, evidence, findings,              │
-│  verifications, tool_calls, summaries) + JSON export                    │
-└────────────────────────────────────────────────────────────────────────┘
-       ▲                    ▲                            ▲
-┌──────┴───────────┐ ┌──────┴──────────────┐ ┌───────────┴───────────┐
-│  Skill registry  │ │  Target client      │ │  pydantic-ai core     │
-│  skill dirs      │ │  scoped HTTP client │ │  Agent, TestModel,    │
-│  (data) + entry- │ │  scope gate, capture│ │  FunctionModel,       │
-│  point checks    │ │  rate limiting      │ │  pydantic_clai2       │
-└──────────────────┘ └─────────────────────┘ └───────────────────────┘
+```mermaid
+flowchart TD
+    CLI["partex CLI — engage, review, test, verify, runs, show, summarize, checks, agent, chat"]
+    Engine["Engine — load + validate, evidence registry, passive/active checks, verify runner, findings commit"]
+    Adapter["Agent adapter — Pydantic AI agent + scoped tools over CLAI2 chat(), interactive + --auto"]
+    Store[("RunStore — SQLite (engagements, runs, evidence, findings, verifications, tool_calls, summaries) + JSON export")]
+    Skills["Skill registry — skill dirs (data) + entry-point checks"]
+    Target["Target client — ScopedHttpClient (scope gate, capture, rate limiting)"]
+    PydanticAI["pydantic-ai core — Agent, TestModel, FunctionModel, pydantic_clai2"]
+
+    CLI --> Engine
+    CLI --> Adapter
+    Engine -->|single writer| Store
+    Adapter -->|read + tool audit| Store
+    Skills --> Engine
+    Skills --> Adapter
+    Target --> Engine
+    Target --> Adapter
+    PydanticAI --> Adapter
 ```
 
 Layer rules:
@@ -642,17 +633,17 @@ Two entry pipelines share one lifecycle core:
   passive checks over captures → run active checks (probes) → run verification on eligible
   findings → commit findings incrementally per stage (§6.1) → optionally summarize.
 
-```text
-load + validate ─▶ register evidence ─▶ checks (passive then active, local workers §7.1)
-     │                                          │
-  invalid                       findings committed per stage (§6.1) ─▶ checks_complete
-  (exit 1)                                          │
-                       ┌────────────────────────────┼─────────────────────────────┐
-                  --no-summary                 summarize (§11)          failure / timeout /
-                       │                           │                       Ctrl-C
-                       ▼                           ▼                           ▼
-                     done                      complete              stays checks_complete
-                                                                   (retry: summarize <run-id>)
+```mermaid
+flowchart TD
+    Start["load + validate"] -->|valid| Reg["register evidence"]
+    Start -->|invalid| Invalid["invalid (exit 1)"]
+    Reg --> Checks["checks: passive then active (local workers §7.1)"]
+    Checks -->|check raises| Failed["checks_failed (exit 1; live keeps prior commits §6.1)"]
+    Checks -->|findings committed per stage §6.1| CompleteChecks["checks_complete"]
+    CompleteChecks -->|--no-summary or no --model| Done["done"]
+    CompleteChecks -->|summarize §11| Summarize["generate + validate summary"]
+    Summarize -->|ok| Complete["complete"]
+    Summarize -->|failure / timeout / Ctrl-C| Retry["stays checks_complete (retry: partex summarize)"]
 ```
 
 Run states (stored, monotonic):
@@ -898,7 +889,7 @@ emits a passive-reviewable bundle from a live run's captures (redacted by defaul
 | `partex engage init <dir>` | scaffold an engagement file | `--target`, `--scope-host` |
 | `partex engage check <dir>` | validate engagement + scope + credentials, no traffic | `--json` |
 | `partex review <bundle>` | passive review of an offline bundle (model-free) | `--checks a,b` / `--all`, `--workers N`, `--db`, `--out` |
-| `partex test <engagement>` | live run: capture, passive + active checks, verify (model-free) | `--authorized` (required), `--checks`, `--workers`, `--no-verify`, `--insecure`, `--user-agent`, `--db` |
+| `partex test <engagement>` | live run: capture, passive + active checks, verify (model-free) | `--authorized` (required), `--checks`, `--workers`, `--no-verify`, `--insecure`, `--user-agent`, `--allow-method`, `--max-writes` (#223), `--db` |
 | `partex verify <run-id> <finding-id>` | (re)run verification for one finding in one run | `--authorized`, `--insecure`, `--user-agent`, `--db` |
 | `partex export-bundle <run-id>` | write a passive bundle from a live run's captures | `--out DIR`, `--include-secrets`, `--db` |
 | `partex import-har <file.har>` | build a passive-reviewable bundle from an operator-exported HAR (M3; the MITM-free capture path) | `--out DIR`, `--target` |
@@ -909,7 +900,7 @@ emits a passive-reviewable bundle from a live run's captures (redacted by defaul
 | `partex summarize <run-id>` | (re)generate the summary (M4) | `--model`, `--summary-timeout`, `--db` |
 | `partex checks` | list registered checks (kind, scope needs) and their skills | `--json`, `--skill-dir` |
 | `partex sandboxes` | detect which sandboxes (`monty`, `docker`, `podman`, `bubblewrap`) this host can run | `--json` |
-| `partex agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--gateway-route`, `--checks`, `--from`, `--insecure`, `--user-agent`, `--db` |
+| `partex agent <engagement>` | deterministic `test` pipeline, then interactive agent or autonomous `--auto` loop | `--authorized` (required), `--model`, `--gateway-route`, `--checks`, `--from`, `--insecure`, `--user-agent`, `--allow-method`, `--max-writes` (#223), `--db` |
 | `partex browse <engagement>` | browser capture harness (M7): record and actively probe authenticated SPA flows as evidence | `--authorized` (required), `--attach <cdp-port>`, `--db` |
 | `partex chat <run-id>` | read-only review chat over a saved run | `--model`, `--gateway-route`, `--db`, `--no-briefing` |
 | `partex reports <run-id> [name]` | list or print Markdown saved with `save_report` | `--db`, `--json` |
@@ -1148,13 +1139,19 @@ class TargetClient(Protocol):   # implemented by target.ScopedHttpClient
   no store access and could not otherwise know which exchange to replay.
 - `verify_match` is the reproduction seam: the runner executes the recipe, captures the replay,
   and asks the check whether the finding's class still holds (`confirmed` vs `not_reproduced`).
+  Since #176 every captured replay goes to the matcher: checks may implement the additive
+  `verify_match_all(finding, original, replays)` (the runner falls back to single-replay
+  `verify_match` on the first replay for older checks), so a partial fix that denies one role
+  can no longer false-confirm a multi-replay finding such as `authz-boundary`.
 - `request` takes the full URL because the scope gate needs scheme, host and port; `probe` is
   async because a sync probe cannot await the anyio-based scoped client; `HttpEvidence` is
   returned because §5 drafts must cite `ev_*` ids. Landed by #21/#22; amended per #44.
 - Built-in checks: `api-contract-conformance` (passive, OpenAPI 3.0/3.1 subset resolver +
-  operation inventory, #24), `header-security` (passive), `js-analysis` (passive, tree-sitter AST
-  over downloaded JS artifacts and JS responses, #69), `server-error` (passive, #128), and
-  `version-disclosure` (active).
+  operation inventory, #24), `authz-boundary` (active, BOLA/IDOR/BFLA role-pair probing with
+  multi-replay verification, #27), `header-security` (passive), `js-analysis` (passive,
+  tree-sitter AST over downloaded JS artifacts and JS responses, #69, with source-map
+  fetch-and-parse and entropy-secret detection #193), `openapi-spec-review` (passive, #156),
+  `server-error` (passive, #128), and `version-disclosure` (active).
 - Third-party checks register via the entry-point group `partex.checks`. Check code loads
   **only** from installed distributions; extra skill roots load via `--skill-dir` (data). That
   is the trust boundary: arbitrary paths can add Markdown, never code.
@@ -1179,12 +1176,15 @@ class TargetClient(Protocol):   # implemented by target.ScopedHttpClient
 4. `api-inventory` skill + `api-contract-conformance` passive check (built-in, #24): normalized
    OpenAPI operation inventory, shadow-route detection, disallowed/sensitive response-field checks,
    and coverage ledger rows (`fixtures/bundles/api-inventory/`).
-5. Staged (drafted in `skills/`, not yet enabled): `authorization-testing` + `authz-boundary`,
-   `auth-session-controls` + `session-cookie-config` / `token-weakness` — the remaining P1.2–P1.3
-   slices from `PARTX_SKILL_PLAN.md` §4. Each activates only when its check registers
-   (warning, not error, at `partex checks` time until then) and its fixture triad lands
-   (clean case, one per finding class, insufficient-evidence case), one slice at a time
-   post-M6.
+5. `authorization-testing` skill + `authz-boundary` active check (built-in, #27): BOLA/IDOR/BFLA
+   role-pair probing over `engagement.roles`, with `verify_match_all` requiring the boundary to
+   hold across replays before `confirmed`.
+6. Staged (drafted in `skills/`, not yet enabled): `auth-session-controls` +
+   `session-cookie-config` / `token-weakness` (#26, #195) — the remaining P1.3 slice from
+   `PARTX_SKILL_PLAN.md` §4. It activates only when its checks register (warning, not error, at
+   `partex checks` time until then) and its fixture triad lands (clean case, one per finding
+   class, insufficient-evidence case), one slice at a time post-M6. Data-only playbooks ship
+   without checks: `graphql` (#192) and `regression-verify` (#187).
 
 The header-review fixture exercises the whole passive contract; the version-disclosure fixture
 exercises capture → active probe → verify → replay → export against the local fixture app.
@@ -1403,17 +1403,17 @@ client-issued ones.
 Each milestone ends with its experiments run and documented here. A landed component does not
 by itself satisfy its milestone gate; record the command, result, and revision when a gate is
 verified. The snapshot below reflects `main` and GitHub issue state on
-2026-11-21; it is not a claim that the full validation suite has passed.
+2026-11-23; it is not a claim that the full validation suite has passed.
 
 | Milestone | Progress and remaining work |
 |---|---|
 | M0 | Project, CI (Linux x86_64 + macOS, #86) and hermetic test harness landed; dependencies switched to locked PyPI releases (#13). The fresh-install review experiment remains part of the open M1 gate (#10). |
-| M1 | Core models, bundle loading, storage, passive engine, export, header check (`#6`, `#38`, `#52`) and CLI landed. Gate experiments remain open (#10). Storage integrity/rollback errors and evidence + `requests_spent` atomicity landed (#40); run immutability after `checks_complete` (#159) and pyright over `tests/` (#160) remain open. |
+| M1 | Core models, bundle loading, storage, passive engine, export, header check (`#6`, `#38`, `#52`) and CLI landed. Gate experiments remain open (#10). Storage integrity/rollback errors and evidence + `requests_spent` atomicity landed (#40), as did pyright strict over `tests/` (#160); run immutability after `checks_complete` (#159) remains open. |
 | M2 | Skill documents, registry, entry-point discovery, skills-as-data and frontmatter lint landed (#25). |
 | M3 | Engagement/scope, scoped client (`--insecure` TLS #71), role handles, live engine (with passive checks on live runs #51), fixture target, `version-disclosure` (with prefix anchoring & dedup #80), verification runner, and HAR/bundle round-trip (`import-har`/`export-bundle` #28), catch-all route detection (#53), HAR→active probe seeding (`probes.py`, `--bundle`, #76), an engagement User-Agent (`http.user_agent` / `--user-agent`, default `partex/<version>`, #135), and recorded TLS state for hosts added with `/scope add` under `-k` (#101) landed. |
 | M4 | Not delivered: `summarize.py` and `partex summarize`; retry, validation and timeout gates (§13.5) remain open. |
-| M5 | Read-only `partex chat` (#49), interactive `partex agent` with operator-confirmed live scope extension (#54, #64, #72), full JS download + `js-analysis` (#69), `partex report` (#61), and `partex sandboxes` (#84) landed, plus skills-as-deferred-capabilities (#59), live-session Monty Code Mode (#83), and operator `/report` & `/secrets` (#88), and optional native web search on a separate `--search-model` (`anthropic:`, `google:`, `google-cloud:`, `openai:`; #111, #144) with results persisted in `web_research` (#113) and sources capped (#146). Open: `--auto` mode, speculation gates, headless/cancellation tests, and the tmux checklist. The state-changing/multi-protocol policy (#119) is settled in §4.1/§4.2. Operator-approved `POST`/`PUT`/`PATCH`/`DELETE` through `http_request` landed (#65: `allowed_methods`, `max_write_requests`, `write_requests_spent`, schema v4); websocket frame sends (#116), gRPC invocation (#117) and write-bearing verify recipes still need to adopt the same gate. |
-| M6 | Not delivered: coverage target, authoring docs, target-request Logfire spans (#58), and recorded experiment results. S1 `api-inventory` / `api-contract-conformance` landed (#24); remaining staged draft skills do not enable their checks (#26, #27). |
+| M5 | Read-only `partex chat` (#49), interactive `partex agent` with operator-confirmed live scope extension (#54, #64, #72), full JS download + `js-analysis` (#69), `partex report` (#61), and `partex sandboxes` (#84) landed, plus skills-as-deferred-capabilities (#59), live-session Monty Code Mode (#83), and operator `/report` & `/secrets` (#88), and optional native web search on a separate `--search-model` (`anthropic:`, `google:`, `google-cloud:`, `openai:`; #111, #144) with results persisted in `web_research` (#113) and sources capped (#146). Also landed: multi-replay verification (`verify_match_all`, #176), automatic passive discovery re-runs in live sessions (#185), nmap `-oX` import and the initial URL-list probe pass with a `/targets` plugin (#215), opt-in Gemini safety-filter settings (#218), and CLI write-policy flags `--allow-method` / `--max-writes` plus an explicit session model-turn limit (#223). Open: `--auto` mode, speculation gates, headless/cancellation tests, and the tmux checklist. The state-changing/multi-protocol policy (#119) is settled in §4.1/§4.2. Operator-approved `POST`/`PUT`/`PATCH`/`DELETE` through `http_request` landed (#65: `allowed_methods`, `max_write_requests`, `write_requests_spent`, schema v4); websocket frame sends (#116), gRPC invocation (#117) and write-bearing verify recipes still need to adopt the same gate. |
+| M6 | Not delivered: coverage target, authoring docs, and recorded experiment results. Target-request Logfire spans landed (#58). S1 `api-inventory` / `api-contract-conformance` landed (#24), extended by the `referencing`-based `$ref` resolver (#153), live-captured OpenAPI specs as `ConfigEvidence` (#155), and the `openapi-spec-review` passive check (#156); S2 `authorization-testing` / `authz-boundary` landed (#27). The remaining staged slice is S3 `auth-session-controls` (#26, #195). |
 | M7 | Not delivered: browser capture harness (`browser.py`, `partex browse`). |
 
 No §13 experiment is recorded as passed here until its gate has evidence.
@@ -1480,9 +1480,11 @@ No §13 experiment is recorded as passed here until its gate has evidence.
    mutation), needing a notes table and a read-only-plus-notes store handle?
 7. **CLAI2 session reuse**: should the run record store the agent/chat `session_id` so
    re-invocation resumes the conversation?
-8. **Post-M6 skill port**: which BaaRai offensive playbooks (`api-security`, `patch-diff`,
-   `codeaudit`) port first as data-only skills, and which need new check protocols (e.g. a
-   `SourceCheck` for white-box audit) the engine does not yet have?
+8. **Post-M6 skill port**: the `graphql` (#192) and `regression-verify` (#187) data-only
+   playbooks have shipped, and `authorization-testing` is live with its check (#27). Remaining:
+   which BaaRai offensive playbooks (`api-security`, `patch-diff`, `codeaudit`) port next as
+   data-only skills, and which need new check protocols (e.g. a `SourceCheck` for white-box
+   audit, #190) the engine does not yet have?
 9. **Multi-protocol and state-changing probing (decided, #119)**: the engagement declares
    write authority (`allowed_methods`, `max_write_requests`); `ws`/`wss` join the §4.2 scheme
    rules; one operator-approval primitive gates every state-changing action and is shared by
@@ -1499,11 +1501,12 @@ network door with scope enforced inside it. `review` and `test` are model-free b
 (the default for CI); `summarize`, `agent`, and `chat` require an explicit `--model`. Passive review of
 offline bundles is a first-class mode with full determinism; live runs trade byte-determinism
 for evidence-backed auditability and replayable verification. The shipped skill set is
-`header-review`, `version-disclosure`, `js-analysis`, `server-error`, and `api-inventory` (#24). The
-remaining P1.2–P1.3 skills (`authorization-testing`, `auth-session-controls`) are
-**drafted and staged** in `skills/` per `PARTX_SKILL_PLAN.md` §4; they stay unenabled until
-their checks register and their fixture triads land, integrated one slice at a time
-post-M6, each with its own fixture. Further skill content — including offensive playbooks
+`header-review`, `version-disclosure`, `js-analysis`, `server-error`, `api-inventory` (#24),
+`openapi-spec-review` (#156), and `authorization-testing` (live with `authz-boundary`, #27),
+plus the data-only playbooks `graphql` (#192) and `regression-verify` (#187). The remaining
+P1.3 skill (`auth-session-controls`, #26) is **drafted and staged** in `skills/` per
+`PARTX_SKILL_PLAN.md` §4; it stays unenabled until its checks register and its fixture triad
+lands, one slice at a time post-M6. Further skill content — including offensive playbooks
 from the BaaRai inventory — follows the same gate. Capture and probing run through the same
 three paths the ARTEX lineage ran — the scoped client (M3), operator HAR import (M3), and
 the browser capture harness (M7) — with no MITM interception anywhere.
