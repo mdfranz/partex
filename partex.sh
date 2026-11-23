@@ -49,6 +49,8 @@
 #   -w, --allow-method M     also authorize one state-changing method (POST, PUT, PATCH, DELETE); repeatable
 #                            [PARTEX_ALLOW_METHODS, space-separated]. Needs --max-writes (or --method)
 #   -W, --max-writes N       budget of state-changing requests [PARTEX_MAX_WRITES, ceiling 1000]
+#   -L, --request-limit N    most model turns one prompt may take before it stops and waits for you
+#                            [PARTEX_REQUEST_LIMIT, default 40]; raise it for a long investigation
 #       --no-tui             run `partex test` + show only [NO_TUI=1]
 #   -h, --help
 # Required for the chat step: PYDANTIC_AI_GATEWAY_API_KEY when the model goes through the Gateway (a bare model
@@ -81,6 +83,7 @@ MAX_REQUESTS=${PARTEX_MAX_REQUESTS:-50}
 MAX_RPS=${PARTEX_MAX_RPS:-2}
 ALLOW_METHODS=(${PARTEX_ALLOW_METHODS:-})
 MAX_WRITES=${PARTEX_MAX_WRITES:-}
+REQUEST_LIMIT=${PARTEX_REQUEST_LIMIT:-40}
 METHOD=${PARTEX_METHOD:-read}
 RUN_ID=${RUN_ID:-}   # with --resume: the run to open; otherwise the run to read (--from)
 while [[ $# -gt 0 ]]; do
@@ -103,6 +106,7 @@ while [[ $# -gt 0 ]]; do
     -M|--method) METHOD=${2?$1 needs a value}; shift 2 ;;
     -w|--allow-method) ALLOW_METHODS+=("${2?$1 needs a value}"); shift 2 ;;
     -W|--max-writes) MAX_WRITES=${2?$1 needs a value}; shift 2 ;;
+    -L|--request-limit) REQUEST_LIMIT=${2?$1 needs a value}; shift 2 ;;
     --no-tui) NO_TUI=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --) shift; break ;;
@@ -113,6 +117,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ $# -eq 0 || -n $TARGET_URL ]] || TARGET_URL=$1
 [[ $MAX_REQUESTS =~ ^(0|[1-9][0-9]*)$ ]] || { echo "MAX_REQUESTS must be 0 (unlimited) or a positive integer, got: $MAX_REQUESTS" >&2; exit 2; }
+[[ $REQUEST_LIMIT =~ ^[1-9][0-9]*$ ]] || { echo "REQUEST_LIMIT must be a positive integer, got: $REQUEST_LIMIT" >&2; exit 2; }
 [[ $MAX_RPS =~ ^[1-9][0-9]*$ ]] || { echo "MAX_RPS must be a positive integer, got: $MAX_RPS" >&2; exit 2; }
 case $METHOD in
   read) ;;
@@ -264,5 +269,5 @@ if [[ -n $ROUTE || $MODEL == gateway/* || $MODEL != *:* ]] && [[ -z ${PYDANTIC_A
   exit 1
 fi
 echo "opening a partex agent session on $TARGET_URL (db: $DB)"
-uv run --quiet partex agent "$eng" --authorized --db "$DB" --model "$MODEL" ${ROUTE:+--gateway-route "$ROUTE"} \
+uv run --quiet partex agent "$eng" --authorized --db "$DB" --model "$MODEL" --request-limit "$REQUEST_LIMIT" ${ROUTE:+--gateway-route "$ROUTE"} \
   ${SEARCH_MODEL:+--search-model "$SEARCH_MODEL"} ${URLS_FILE:+--urls-file "$URLS_FILE"} ${RECURSIVE:+--recursive} ${WRITE_ARGS[@]+"${WRITE_ARGS[@]}"} ${RUN_ID:+--from "$RUN_ID"}
