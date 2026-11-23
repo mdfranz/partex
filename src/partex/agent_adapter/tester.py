@@ -27,6 +27,7 @@ from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.framing import wrap
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
+from pydantic_ai_harness import DetectLoops
 from pydantic_ai_harness.code_mode import CodeMode, CodeModeResourceLimits
 from pydantic_monty import MountDir
 
@@ -690,7 +691,7 @@ def build_tester_agent(
         output_type=str,
         instructions=instructions,
         tools=tools,
-        capabilities=[code_mode_capability(artifacts_dir), *skills],
+        capabilities=[DetectLoops(), code_mode_capability(artifacts_dir), *skills],
         model_settings=model_settings,
         defer_model_check=True,
     )
