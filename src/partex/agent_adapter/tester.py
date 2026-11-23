@@ -12,9 +12,9 @@ Each ``http_request`` / ``run_check`` call is recorded in ``tool_calls`` without
 """
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import partial
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urljoin
@@ -34,6 +34,7 @@ from ..checks.version_disclosure import ERROR_PAGE_RISK
 from ..engine import CheckFailed, CheckSelectionError, LiveSession
 from ..errors import BudgetExhausted, PartexError, ScopeViolation
 from ..models import REDACTED, SAFE_METHODS, WRITE_METHODS, ArtifactEvidence, Finding, HttpEvidence, redact
+from ..registry import builtin_skill_root, load_skills
 from ..scope import check_url
 from ..storage import RunStore, run_reports_dir, write_report
 from .approval import WriteAction, WriteGate
@@ -46,29 +47,25 @@ MAX_REQUEST_BODY_CHARS = 64 * 1024
 RULE_OWNERS = {ERROR_PAGE_RISK: 'version-disclosure'}
 """Rule/risk IDs the model mistakes for check IDs, mapped to the check that reports them (#125)."""
 
-SKILL_CHECKS = {
-    'header-review': ('header-security',),
-    'api-inventory': ('api-contract-conformance',),
-    'authorization-testing': ('authz-boundary',),
-    'auth-session-controls': ('session-cookie-config', 'token-weakness'),
-    'privacy-review': ('privacy-signals',),
-}
-"""Skill names whose check IDs differ from the directory name, mapped to the check(s) each skill documents (#232).
 
-Skills whose directory name equals their check ID (``js-analysis``, ``openapi-spec-review``,
-``server-error``, ``version-disclosure``) need no entry — the name is already a check ID. Keep this
-in step with each skill's frontmatter ``checks`` list and the skill inventory in
-``docs/skills/README.md`` (a mapping entry is forward-correct even before its check is registered)."""
+@lru_cache(maxsize=1)
+def _skill_checks() -> dict[str, tuple[str, ...]]:
+    """Skill name -> declared check IDs from built-in skill frontmatter (#232)."""
+    skills, _ = load_skills((builtin_skill_root(),))
+    return {name: skill.checks for name, skill in skills.items() if skill.checks}
 
 
-def _skill_check_hint(name: str) -> str | None:
-    """The check to suggest instead of *name* when *name* is a known skill name, else ``None``."""
-    checks = SKILL_CHECKS.get(name)
-    if not checks:
+def _skill_check_hint(name: str, available: Mapping[str, Any]) -> str | None:
+    """The installed check(s) to suggest when *name* is a known skill name, else ``None``."""
+    declared = _skill_checks().get(name)
+    if not declared:
         return None
-    if len(checks) == 1:
-        return f'{name!r} is a skill name, not a check ID; run {checks[0]}.'
-    return f'{name!r} is a skill name, not a check ID; run one of: {", ".join(checks)}.'
+    installed = [check_id for check_id in declared if check_id in available]
+    if not installed:
+        return None
+    if len(installed) == 1:
+        return f'{name!r} is a skill name, not a check ID; run {installed[0]}.'
+    return f'{name!r} is a skill name, not a check ID; run one of: {", ".join(installed)}.'
 
 
 MODEL_BODY_CHARS = 8_000
@@ -386,7 +383,7 @@ async def run_check(ctx: RunContext[TesterDeps], check_id: str) -> str:
             raise ModelRetry(
                 f'{check_id!r} is a rule reported by the {owner} check, not a check ID; run {owner}.'
             ) from exc
-        if exc.rule_code == 'unknown-check' and (hint := _skill_check_hint(name)):
+        if exc.rule_code == 'unknown-check' and (hint := _skill_check_hint(name, session.registry)):
             raise ModelRetry(hint) from exc
         raise ModelRetry(str(exc)) from exc
     except BudgetExhausted as exc:
