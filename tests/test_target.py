@@ -230,6 +230,16 @@ async def test_max_requests_budget_exhausted_cleanly(target_server: object) -> N
     assert len(target_server.requests) == 2  # pyright: ignore[reportAttributeAccessIssue]
 
 
+async def test_max_requests_zero_is_unlimited(target_server: object) -> None:
+    engagement = engagement_for(target_server, max_requests=0)
+    base_url = target_server.base_url  # pyright: ignore[reportAttributeAccessIssue]
+    async with ScopedHttpClient(engagement) as client:
+        for index in range(5):
+            await client.request('GET', f'{base_url}/api/{index}')
+        assert client.budget.requests_remaining is None
+    assert client.requests_spent == 5
+
+
 def test_token_bucket_waits_between_requests() -> None:
     """Deterministic bucket math with an injected clock and sleep."""
     now = 0.0

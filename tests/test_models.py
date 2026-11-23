@@ -357,9 +357,10 @@ def test_scope_max_rps_positive():
         Scope(hosts=['example.test'], ports=[], max_rps=0)
 
 
-def test_scope_max_requests_positive():
+def test_scope_max_requests_zero_means_unlimited_but_not_negative():
+    assert Scope(hosts=['example.test'], ports=[], max_requests=0).max_requests == 0
     with pytest.raises(ValidationError):
-        Scope(hosts=['example.test'], ports=[], max_requests=0)
+        Scope(hosts=['example.test'], ports=[], max_requests=-1)
 
 
 # ── Headers ────────────────────────────────────────────────────────────────────

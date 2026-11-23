@@ -200,6 +200,7 @@ def test_validate_scope_flags_ceiling_overruns() -> None:
     assert any('max_rps' in p for p in problems)
     problems = validate_scope(scope_of(max_requests=MAX_REQUESTS_CEILING + 1))
     assert any('max_requests' in p for p in problems)
+    assert not any('max_requests' in p for p in validate_scope(scope_of(max_requests=0)))
 
 
 def test_validate_scope_flags_relative_entries() -> None:

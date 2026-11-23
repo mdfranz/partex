@@ -306,7 +306,8 @@ class Scope(BaseModel):
     """Exact URL allowlist (#121); empty means no URL-level restriction. Left out of dumps while empty."""
     ports: Annotated[list[int], Field(default_factory=list)]
     max_rps: Annotated[int, Field(gt=0)] = 5
-    max_requests: Annotated[int, Field(gt=0)] = 2000
+    max_requests: Annotated[int, Field(ge=0)] = 2000
+    """Request budget for the engagement; 0 means unlimited (``max_rps`` still paces every send)."""
     allowed_methods: list[str] = Field(
         default_factory=lambda: list(SAFE_METHODS_ORDERED),
         exclude_if=lambda methods: methods == list(SAFE_METHODS_ORDERED),

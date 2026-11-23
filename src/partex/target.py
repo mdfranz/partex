@@ -186,7 +186,7 @@ class RequestBudget:
     def __init__(self, max_requests: int, max_rps: int, max_write_requests: int = 0) -> None:
         self.max_requests = max_requests
         self.max_write_requests = max_write_requests
-        self._remaining = max_requests
+        self._remaining: int | None = max_requests or None  # None: unlimited (``max_requests == 0``)
         self._writes_remaining = max_write_requests
         self._sent = 0
         self._lock = anyio.Lock()
@@ -198,8 +198,8 @@ class RequestBudget:
         return self._sent
 
     @property
-    def requests_remaining(self) -> int:
-        """Request slots not yet reserved."""
+    def requests_remaining(self) -> int | None:
+        """Request slots not yet reserved; ``None`` when the budget is unlimited (``max_requests == 0``)."""
         return self._remaining
 
     @property
@@ -217,13 +217,14 @@ class RequestBudget:
         Both counters are checked and taken under one lock, so concurrent calls cannot overrun either budget.
         """
         async with self._lock:
-            if self._remaining <= 0:
+            if self._remaining is not None and self._remaining <= 0:
                 raise BudgetExhausted(
                     f'max_requests budget ({self.max_requests}) exhausted; {self._sent} requests were sent'
                 )
             if write and self._writes_remaining <= 0:
                 raise BudgetExhausted(f'max_write_requests budget ({self.max_write_requests}) exhausted')
-            self._remaining -= 1
+            if self._remaining is not None:
+                self._remaining -= 1
             if write:
                 self._writes_remaining -= 1
         await self._bucket.acquire()

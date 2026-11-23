@@ -241,8 +241,9 @@ async def _approve_write(
             f'refused by the engagement scope (nothing was sent): {exc}. {scope_refusal_advice(exc)}'
         ) from exc
     budget = session.client.budget
-    if budget.requests_remaining <= 0 or budget.writes_remaining <= 0:
-        which = 'max_requests' if budget.requests_remaining <= 0 else 'max_write_requests'
+    requests_spent_up = budget.requests_remaining is not None and budget.requests_remaining <= 0
+    if requests_spent_up or budget.writes_remaining <= 0:
+        which = 'max_requests' if requests_spent_up else 'max_write_requests'
         await _audit(ctx, 'http_request', args, {'refused': 'budget', 'budget': which})
         raise ToolFailed(f'the engagement {which} budget is spent; nothing was sent')
 
@@ -705,7 +706,7 @@ def build_tester_agent(
             f'Session run {session.run_id}{previous}. Target {session.engagement.target.base_url}; '
             f'scope hosts {", ".join(scope.hosts)}, ports {", ".join(map(str, scope.ports)) or "80/443"}, '
             f'paths {", ".join(scope.path_prefixes) or "/"}, excluded {", ".join(scope.exclusions) or "none"}; '
-            f'requests used {session.requests_spent} of {scope.max_requests}.{seed}'
+            f'requests used {session.requests_spent} of {scope.max_requests or "unlimited"}.{seed}'
         )
 
     return agent

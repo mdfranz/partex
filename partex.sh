@@ -39,7 +39,8 @@
 #                            terminal (--max-requests is raised automatically when the import needs the room). Merges
 #                            with -u. <target-url> is then optional: the first imported entry is the baseline target.
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
-#   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000]
+#   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000;
+#                            0 = unlimited, still paced by --max-rps]
 #   -R, --max-rps N          requests per second [PARTEX_MAX_RPS, default 2; ceiling 64]
 #   -M, --method MODE        what the session may send [PARTEX_METHOD, default read]: read = GET/HEAD/OPTIONS only;
 #                            write = also POST, PUT, PATCH; delete = write plus DELETE. write/delete need a budget:
@@ -109,9 +110,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ $# -eq 0 || -n $TARGET_URL ]] || TARGET_URL=$1
-for _n in MAX_REQUESTS MAX_RPS; do
-  [[ ${!_n} =~ ^[1-9][0-9]*$ ]] || { echo "$_n must be a positive integer, got: ${!_n}" >&2; exit 2; }
-done
+[[ $MAX_REQUESTS =~ ^(0|[1-9][0-9]*)$ ]] || { echo "MAX_REQUESTS must be 0 (unlimited) or a positive integer, got: $MAX_REQUESTS" >&2; exit 2; }
+[[ $MAX_RPS =~ ^[1-9][0-9]*$ ]] || { echo "MAX_RPS must be a positive integer, got: $MAX_RPS" >&2; exit 2; }
 case $METHOD in
   read) ;;
   write) ALLOW_METHODS+=(POST PUT PATCH) ;;
@@ -199,7 +199,7 @@ PY
 )"
   # The session opens with one initial GET per listed URL target (#215); make sure the budget
   # covers the import plus working room, or the pass would stop at --max-requests.
-  if (( nmap_urls_count + 20 > MAX_REQUESTS )); then
+  if (( MAX_REQUESTS > 0 && nmap_urls_count + 20 > MAX_REQUESTS )); then
     MAX_REQUESTS=$((nmap_urls_count + 20))
     (( MAX_REQUESTS > 100000 )) && MAX_REQUESTS=100000  # the engagement scope ceiling (E3)
     echo "imported $nmap_urls_count URL target(s): raising --max-requests to $MAX_REQUESTS so the initial probe pass fits"
