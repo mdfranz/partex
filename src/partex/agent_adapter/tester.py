@@ -40,6 +40,7 @@ from ..registry import builtin_skill_root, load_skills
 from ..scope import check_url
 from ..storage import RunStore, run_reports_dir, write_report
 from .approval import WriteAction, WriteGate
+from .model_capabilities import MODEL_CAPABILITIES
 from .search import WebSearcher
 from .tools import BRIEFING_TAG, REVIEWER_TOOLS, ReviewDeps, frame_untrusted
 
@@ -691,7 +692,12 @@ def build_tester_agent(
         output_type=str,
         instructions=instructions,
         tools=tools,
-        capabilities=[DetectLoops(), code_mode_capability(artifacts_dir), *skills],
+        capabilities=[
+            DetectLoops(),
+            *MODEL_CAPABILITIES,
+            code_mode_capability(artifacts_dir),
+            *skills,
+        ],
         model_settings=model_settings,
         defer_model_check=True,
     )

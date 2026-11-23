@@ -1345,3 +1345,48 @@ async def test_repeated_identical_calls_are_nudged(tmp_store: RunStore, tmp_path
         result = await agent.run('go', deps=deps, model=model)
     nudges = [p for m in result.all_messages() for p in m.parts if isinstance(p, LoopNudgePart)]
     assert nudges
+
+
+def stream_raw(
+    respond: Callable[[list[ModelMessage], AgentInfo], ModelResponse],
+) -> Callable[[list[ModelMessage], AgentInfo], AsyncIterator[str | DeltaToolCalls]]:
+    """Like :func:`streaming`, but tool arguments reach the agent exactly as written (``streaming`` would wrap
+    invalid JSON as ``INVALID_JSON`` first, which a real provider never does)."""
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
+        for part in respond(messages, info).parts:
+            if isinstance(part, TextPart):
+                yield part.content
+            elif isinstance(part, ToolCallPart):
+                yield {0: DeltaToolCall(name=part.tool_name, json_args=str(part.args), tool_call_id=part.tool_call_id)}
+
+    return stream
+
+
+async def test_session_agents_cache_and_repair_tool_arguments(
+    tmp_store: RunStore, tmp_path: Path, target_app: Any
+) -> None:
+    """#209: prompt caching is requested, and malformed tool-call JSON is repaired instead of failing the run."""
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if any(isinstance(part, ToolReturnPart) for m in messages for part in m.parts):
+            return ModelResponse(parts=[TextPart('done')])
+        # the closing brace is missing: not valid JSON
+        args = '{"method": "get", "path": "/robots.txt"'
+        return ModelResponse(parts=[ToolCallPart('http_request', args, tool_call_id='c0')])
+
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        agent: Agent[TesterDeps, str] = build_tester_agent('test')
+        deps = TesterDeps(run_id=session.run_id, reader=tmp_store, session=session, store=tmp_store)
+        result = await agent.run('go', deps=deps, model=FunctionModel(respond, stream_function=stream_raw(respond)))
+    (exchange,) = (str(part.content) for part in tool_returns(result.all_messages()))
+    assert '/robots.txt' in exchange and '"status": 200' in exchange
+
+
+def test_both_session_agents_request_prompt_caching() -> None:
+    """#209: the tester and the reviewer ask for prompt caching (a no-op on models that cache implicitly)."""
+    from partex.agent_adapter.reviewer import build_reviewer_agent
+
+    for agent in (build_tester_agent('test'), build_reviewer_agent('test')):
+        settings = agent.root_capability.get_model_settings()
+        assert isinstance(settings, dict) and settings.get('cache')
