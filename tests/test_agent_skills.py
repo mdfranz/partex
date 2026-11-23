@@ -131,6 +131,7 @@ def test_shipped_skills_for_installed_checks_load() -> None:
         'header-review',
         'js-analysis',
         'openapi-spec-review',
+        'privacy-review',
         'server-error',
     } <= names
     capabilities = {c.id: c for c in skill_capabilities(usable_skills(registry.skills, registry.checks))}

@@ -12,9 +12,9 @@ Each ``http_request`` / ``run_check`` call is recorded in ``tool_calls`` without
 """
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import partial
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urljoin
@@ -35,6 +35,7 @@ from ..checks.version_disclosure import ERROR_PAGE_RISK
 from ..engine import CheckFailed, CheckSelectionError, LiveSession
 from ..errors import BudgetExhausted, PartexError, ScopeViolation
 from ..models import REDACTED, SAFE_METHODS, WRITE_METHODS, ArtifactEvidence, Finding, HttpEvidence, redact
+from ..registry import builtin_skill_root, load_skills
 from ..scope import check_url
 from ..storage import RunStore, run_reports_dir, write_report
 from .approval import WriteAction, WriteGate
@@ -46,6 +47,27 @@ MAX_REQUEST_BODY_CHARS = 64 * 1024
 
 RULE_OWNERS = {ERROR_PAGE_RISK: 'version-disclosure'}
 """Rule/risk IDs the model mistakes for check IDs, mapped to the check that reports them (#125)."""
+
+
+@lru_cache(maxsize=1)
+def _skill_checks() -> dict[str, tuple[str, ...]]:
+    """Skill name -> declared check IDs from built-in skill frontmatter (#232)."""
+    skills, _ = load_skills((builtin_skill_root(),))
+    return {name: skill.checks for name, skill in skills.items() if skill.checks}
+
+
+def _skill_check_hint(name: str, available: Mapping[str, Any]) -> str | None:
+    """The installed check(s) to suggest when *name* is a known skill name, else ``None``."""
+    declared = _skill_checks().get(name)
+    if not declared:
+        return None
+    installed = [check_id for check_id in declared if check_id in available]
+    if not installed:
+        return None
+    if len(installed) == 1:
+        return f'{name!r} is a skill name, not a check ID; run {installed[0]}.'
+    return f'{name!r} is a skill name, not a check ID; run one of: {", ".join(installed)}.'
+
 
 MODEL_BODY_CHARS = 8_000
 """Response body characters returned to the model per request; the stored evidence keeps the capped body."""
@@ -356,11 +378,14 @@ async def run_check(ctx: RunContext[TesterDeps], check_id: str) -> str:
     try:
         findings = await session.run_check(check_id)
     except CheckSelectionError as exc:
-        owner = RULE_OWNERS.get(check_id.strip())
+        name = check_id.strip()
+        owner = RULE_OWNERS.get(name)
         if owner and exc.rule_code == 'unknown-check':
             raise ModelRetry(
                 f'{check_id!r} is a rule reported by the {owner} check, not a check ID; run {owner}.'
             ) from exc
+        if exc.rule_code == 'unknown-check' and (hint := _skill_check_hint(name, session.registry)):
+            raise ModelRetry(hint) from exc
         raise ModelRetry(str(exc)) from exc
     except BudgetExhausted as exc:
         await _audit(ctx, 'run_check', {'check_id': check_id}, {'refused': 'budget'})
