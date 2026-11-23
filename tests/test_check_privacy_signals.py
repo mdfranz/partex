@@ -130,6 +130,23 @@ def test_non_2xx_and_binary_responses_are_ignored() -> None:
     assert not check.applies_to([err, image]) and check.review([err, image]) == []
 
 
+def test_output_order_is_deterministic_regardless_of_evidence_order() -> None:
+    """Regression (issue #228): findings follow TRACKERS declaration order, not capture order."""
+    gtm = _http('fetch("https://www.googletagmanager.com/gtm.js")')
+    posthog = _http('posthog.init("phc_k1")', url='https://app.test/analytics.js')
+    sentry = _http('Sentry.init({})', url='https://app.test/error.js')
+    forward = [d.model_dump() for d in check.review([posthog, sentry, gtm])]
+    backward = [d.model_dump() for d in check.review([sentry, gtm, posthog])]
+    assert forward == backward
+    assert [d['subject'] for d in forward] == [
+        'tracker:google-tag-manager',
+        'tracker:sentry',
+        'tracker:posthog',
+        'consent:no-cmp-signal',
+    ]
+    assert forward[-1]['evidence_ids'] == sorted([gtm.id, posthog.id])
+
+
 def test_skill_signature_table_names_every_vendor_in_the_check() -> None:
     """Skills are data the check never imports; this keeps the human-readable table in step with the code."""
     table = SIGNATURE_DOC.read_text(encoding='utf-8')

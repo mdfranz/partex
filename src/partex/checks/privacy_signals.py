@@ -27,7 +27,7 @@ from ..models import Evidence, FindingDraft, HttpEvidence, Severity, get_header
 from .js_analysis import iter_js_sources
 
 CHECK_ID = 'privacy-signals'
-CHECK_VERSION = '1.0'
+CHECK_VERSION = '1.1'
 CHECK_TITLE = 'Privacy Signals: Trackers and Consent'
 CHECK_DESCRIPTION = (
     'Flag third-party tracker, analytics, session-replay, error-monitoring, advertising, support-chat and CAPTCHA '
@@ -320,8 +320,13 @@ class PrivacySignalsCheck:
                 origins.add(_origin(source.url))
                 labels.update(marker.label for marker in hits)
 
+        # Deterministic output: findings follow TRACKERS declaration order and cite evidence IDs sorted,
+        # so the drafts are a pure function of the evidence set, not of the order it was captured in (issue #228).
         drafts: list[FindingDraft] = []
-        for tracker, ids, origins, labels in found.values():
+        for tracker in TRACKERS:
+            if tracker.vendor not in found:
+                continue
+            _, ids, origins, labels = found[tracker.vendor]
             drafts.append(
                 FindingDraft(
                     check_id=CHECK_ID,
@@ -335,7 +340,7 @@ class PrivacySignalsCheck:
                         'the application may send visitor data to a third party; it does not show what is sent or '
                         'whether it happens before consent.'
                     ),
-                    evidence_ids=ids,
+                    evidence_ids=sorted(ids),
                     remediation=(
                         'Confirm the SDK is intended and disclosed in the privacy notice, that it loads only after '
                         'consent where one is required, and that the data it receives is minimized.'
@@ -345,7 +350,7 @@ class PrivacySignalsCheck:
 
         non_essential = [(t, ids) for t, ids, _, _ in found.values() if t.category in _NON_ESSENTIAL]
         if non_essential and not consent_seen:
-            ids = list(dict.fromkeys(i for _, group in non_essential for i in group))
+            ids = sorted({i for _, group in non_essential for i in group})
             vendors = ', '.join(sorted(t.vendor for t, _ in non_essential))
             drafts.append(
                 FindingDraft(
@@ -360,7 +365,7 @@ class PrivacySignalsCheck:
                         'a limitation of static evidence, not proof that no consent is requested: a consent flow may '
                         'load later, depend on region, or live server-side. Confirm in a browser session.'
                     ),
-                    evidence_ids=ids,
+                    evidence_ids=sorted(ids),
                     remediation=(
                         'Check in a real browser, with a clean profile and from each relevant region, whether '
                         'non-essential trackers load before the visitor chooses.'
