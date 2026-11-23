@@ -146,6 +146,8 @@ BOLA:
    interfaces with `@authenticated` / `@requiresScopes` / `@policy`). Similarly, a benign
    mutation (`updatePreferences`) can leak restricted data through its returned object
    selection set when read-side resolver authz is missing.
+   UI omission is only a discovery lead: confirmation also requires an expected entitlement
+   boundary from engagement role definitions, policy/configuration, or object ownership.
 4. **Per-mutation BFLA & input-object mass assignment (`API5:2023`, `API3:2023` write-side,
    CWE-285 / CWE-915):**
    Low-privilege callers invoke admin mutations (`WPGraphQL CVE-2026-88974` contributor
@@ -173,11 +175,13 @@ BOLA:
   in validation errors. Tools such as **Clairvoyance** automate dictionary brute-forcing to
   reconstruct the full schema. ParTEx **never** runs wordlist brute-forcing; **one** benign
   invalid-field probe is sufficient to observe whether suggestions are enabled (`info`/`low`).
-- **Apollo Federation subgraph exposure (`_service { sdl }` & `_entities`):** Every
-  federated subgraph exposes `_service { sdl }` and `_entities` as protocol fields — even
-  when standard `__schema` introspection is disabled. If a subgraph is directly reachable
-  without router mTLS/auth, `_service { sdl }` dumps the complete SDL and `_entities`
-  enables direct cross-tenant BOLA bypassing router-level policies.
+- **Apollo Federation subgraph exposure (`_service { sdl }` & `_entities`):** Federated
+  subgraphs expose `_service { sdl }` and, when the schema defines entities, may expose
+  `_entities` as protocol fields — even when standard `__schema` introspection is disabled.
+  If a subgraph is directly reachable without router mTLS/auth, `_service { sdl }` dumps
+  the complete SDL and `_entities` creates a path that may bypass router-level resolver
+  logic. Treat SDL exposure like introspection; confirm any `_entities` BOLA with two-role
+  cross-tenant replay rather than inferring unauthorized access from field availability.
 - **Non-standard paths & exposed IDEs:** Production endpoints frequently live at
   `/api/graphql`, `/v1/graphql`, `/gql`, `/query`, or expose interactive IDEs (`/graphiql`,
   `/playground`, `/altair`, `/voyager`, Apollo Sandbox). Non-production staging hosts stay
@@ -206,6 +210,10 @@ multipart/GET CSRF and XS-Search, requiring `Apollo-Require-Preflight: true` or
 `X-Apollo-Operation-Name`) and PortSwigger's GraphQL CSRF exploit pattern. ParTEx tests
 this safely on cookie-authenticated endpoints using at most two read-only `{ __typename }`
 probes (`GET` and `application/x-www-form-urlencoded` `POST` without custom headers).
+Acceptance proves simple-request reachability only and records `needs_follow_up`; a finding
+requires an approved reversible mutation on a test-owned object or concrete sensitive-read
+/ XS-Search impact. Cookie delivery is evaluated per method (`SameSite=Lax` normally blocks
+cross-site form POST cookies but can allow top-level safe-method navigation).
 
 ---
 
@@ -232,11 +240,11 @@ ParTEx observes controls strictly **without DoS or volume testing**:
 | Bounded Observation | Evidence | Claim |
 |---|---|---|
 | 2-element benign array batch (`__typename`) | `400`/`403` / batching-disabled error | `no_issue_found` (array batching off; aliases still separate) |
-| 2-element benign array batch (`__typename`) | `200 OK` 2-element array | `info`/`low` observation: HTTP array batching enabled |
+| 2-element benign array batch (`__typename`) | `200 OK` 2-element array | Capability/coverage observation: HTTP array batching enabled; not a finding without a sensitive-control bypass |
 | Small-N alias batch (3–5 benign aliases) | Alias/cost limit error | `no_issue_found` — per-alias/cost limit present |
 | Small-N alias batch (3–5 benign aliases) | Resolves exceeding documented/observed single-request limit | Corroborating API4 evidence; bypass claim requires documented limit (`ConfigExcerpt`) or observed refusal of un-aliased form |
 | Single moderately nested query (depth 5–6) | Depth/cost limit error | `no_issue_found` — depth/cost control present |
-| Single moderately nested query (depth 5–6) | No limit message | `info`/`low` observation: no depth/cost control evidenced |
+| Single moderately nested query (depth 5–6) | Accepted | Coverage observation only: this low-cost query was accepted; no inference about higher thresholds |
 
 Explicitly out of scope (per issue #192): volume/DoS sweeps, large alias/array counts,
 fragment-expansion bombs, persisted-query hash brute-forcing, suggestion wordlists, and
@@ -284,9 +292,9 @@ A follow-up `graphql-config` check pair can implement:
      enforced, `csrfPrevention` rejecting `GET`/form-urlencoded, array batching disabled,
      and `200 OK` soft-403 (`data: { user: null }, errors: [FORBIDDEN]`) + token
      re-hydration returning Role B's own record → **zero findings**.
-  2. *Vulnerable:* Introspection + field suggestions enabled, exposed `_service { sdl }`,
-     cookie-auth form-urlencoded CSRF accepted, array batching enabled, and cross-tenant
-     BOLA + selection-set widening confirmed via two-request `verify_recipe` (with
-     `secret_fields` redacted).
+  2. *Vulnerable:* Introspection + field suggestions enabled; exposed `_service { sdl }`,
+     simple-request execution, and array batching recorded as observations; an approved
+     test-owned mutation confirms CSRF; and `_entities` / selection-set cross-tenant BOLA
+     is confirmed via two-request `verify_recipe` (with `secret_fields` redacted).
   3. *Insufficient evidence:* Target with no GraphQL exchanges/bundles (`not_applicable`),
      or Trusted Documents endpoint with `< 2` roles (`needs_follow_up`).

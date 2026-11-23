@@ -72,14 +72,16 @@ query, nested edge, and mutation, not per HTTP route:
   bypass type-specific root authorization.
 - **Selection-set widening, nested traversal, and inline fragments (OWASP API3 / API1).**
   Query an object under both roles adding sensitive fields authorized for Role A (or
-  discovered via introspection/bundles) that Role B's UI omits:
+  discovered via introspection/bundles) that Role B's UI omits. UI omission is a discovery
+  lead, not proof of an authorization boundary: establish Role B's expected entitlement
+  from engagement role definitions, product policy, configuration, or object ownership:
   - Direct field widening (`user(id: $id) { email ssn internalNotes }`).
   - **Nested edge traversal** from a public or shared parent
     (`post(id: $public_id) { author { email } }`, Relay `.nodes` alongside `.edges`).
   - **Polymorphic inline fragments** (`... on AdminUser { apiKey }`) on interfaces/unions
     and on **mutation return selection sets**.
   Confirm Role A resolves the fields first (so schema drift is not misreported), then flag
-  any field resolving with Role A's non-null data under Role B.
+  a field only when Role B is not entitled to it and receives Role A's non-null data.
 - **Per-mutation BFLA & input-object mass assignment (OWASP API5 / API3).** Replay
   privileged mutations under Role B, and test privilege/ownership fields in mutation
   `Input` objects (`updateUser(input: { role: "ADMIN" })`) **strictly on test-owned
@@ -113,9 +115,11 @@ unauthenticated and once per engagement role:
   `info`/`low` if suggestions appear; **never** run wordlist/dictionary brute-forcing.
 - **Apollo Federation subgraphs.** When federation indicators appear (or on directly
   reachable internal/API hosts), send **one** `{ _service { sdl } }` probe: subgraphs
-  expose `_service { sdl }` (full SDL) and `_entities` (direct BOLA bypassing router authz)
-  even when `__schema` introspection is disabled. Direct exposure of a subgraph's
-  `_service { sdl }` or `_entities` is `medium`/`high` depending on data/entity access.
+  expose `_service { sdl }` (full SDL) and may expose `_entities` even when `__schema`
+  introspection is disabled. Treat `_service.sdl` like introspection (`info`/`low`) and
+  direct subgraph reachability as a configuration/coverage observation. `_entities` is a
+  BOLA lead, not proof: emit `medium`/`high` only after the same two-role cross-tenant
+  verification required above confirms unauthorized entity data.
 
 ## GraphQL CSRF (cookie-authenticated endpoints)
 
@@ -128,9 +132,13 @@ run at most **two read-only `{ __typename }` probes** without custom preflight h
 2. `POST /graphql` with `Content-Type: application/x-www-form-urlencoded` and body
    `query={__typename}` (tests whether browser-simple form POSTs bypass CORS preflight).
 
-If accepted (`200 OK` with `__typename` data) on a cookie-authenticated endpoint lacking
-anti-CSRF tokens or `SameSite=Strict` protection, record a CSRF finding (`medium`/`high`,
-citing cookie/CORS state from `header-review` without duplicating header findings).
+Acceptance (`200 OK` with `__typename` data) proves only that a browser-simple transport
+can reach the executor. Record `needs_follow_up`, citing cookie/CORS state from
+`header-review` without duplicating header findings. Emit a CSRF finding only after an
+approved, reversible mutation on a test-owned object demonstrates a cross-site side effect,
+or concrete sensitive-read / XS-Search impact is reproduced. Evaluate cookie delivery per
+request method: `SameSite=Lax` ordinarily blocks cross-site form POST cookies but can allow
+cookies on top-level safe-method navigation; do not require `SameSite=Strict` universally.
 
 ## Batching (array & alias) and deep queries: observe, never volume-test
 
@@ -141,15 +149,16 @@ citing cookie/CORS state from `header-review` without duplicating header finding
   `[{"query": "query PartexBatch1 { __typename }"}, {"query": "query PartexBatch2 { __typename }"}]`.
   Array batching (`allowBatchedHttpRequests`) lets attackers pack OTP/login/coupon attempts
   into a single HTTP request and can trigger batch state/2FA races. Rejection (`400` /
-  `"batching is not allowed"`) is `no_issue_found`; acceptance is an `info`/`low`
-  observation (note: disabling array batching does **not** disable alias batching).
+  `"batching is not allowed"`) is `no_issue_found`; acceptance is a capability/coverage
+  observation, not a finding (note: disabling array batching does **not** disable aliases).
 - **Alias batching (1 probe per role):** One small aliased read (`a1`..`a3` on a benign
   field). An alias-count/cost error is `no_issue_found`. Claiming a **rate-limit bypass**
   requires a documented per-request limit (config excerpt) or an observed refusal of the
   un-aliased form.
 - **Depth / complexity (at most 1 moderately nested query per role):** An explicit depth
   or complexity error (`"query is too nested"`, cost/complexity limit metadata) is
-  `no_issue_found`; no limit message is an `info`/`low` observation only.
+  `no_issue_found` for the selected query. Acceptance means only that this low-cost query
+  was accepted; record coverage without inferring that no higher threshold exists.
 
 ## Guardrails
 

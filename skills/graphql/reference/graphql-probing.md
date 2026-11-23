@@ -46,7 +46,7 @@ Clairvoyance-style brute-forcing.)*
 | `2xx` with `__schema` or `__type` data | `info`/`low` finding: schema exposed `<unauthenticated / to role>`; reconnaissance input, often accepted risk — never phrase as an exploit |
 | `403`/`404` or GraphQL policy error (`"introspection is disabled"`, GraphQL Shield/plugin rejection) | `no_issue_found`: enforcement observed (follow with §1.2 suggestion check) |
 | Validation error containing `"Did you mean ...?"` while introspection is disabled | `info`/`low` finding: field suggestions leak schema names (Clairvoyance reconstruction vector; WSTG-APIT-01) |
-| `2xx` returning `_service.sdl` on a directly reachable endpoint | `medium` finding (escalate to `high` if `_entities` also resolves cross-tenant data bypassing gateway authz): exposed federation subgraph leaks full SDL even with `__schema` disabled |
+| `2xx` returning `_service.sdl` on a directly reachable endpoint | `info`/`low`, like introspection, plus a configuration/coverage note that the subgraph is directly reachable; `_entities` becomes `medium`/`high` only after two-role cross-tenant replay confirms unauthorized entity data |
 | `"PersistedQueryNotFound"` in response to a **hash-only** request | **Not** an allowlist! This is an **APQ cache miss**; send the full `"query"` text before concluding free-form queries are blocked |
 | Rejection of a request containing **full `"query"` text** (`"PersistedQueryOnly"`, `"PersistedQueryNotSupported"`, allowlist/safelist error) | `no_issue_found` + coverage note: Trusted Documents / persisted-query allowlist enforced; playbook is constrained to harvested operation hashes/names |
 | Non-production host answers, production host refuses | Two separate coverage rows; never escalate the production verdict from staging |
@@ -124,8 +124,11 @@ bypassing `.edges` filters) and inline fragments (`... on AdminUser`):
 - Always send the widened/nested query under **Role A** first (confirming the fields exist
   and resolve for the authorized role — a field that fails validation for Role A is schema
   drift, not a finding), then under **Role B**.
+- Treat absence from Role B's UI only as a discovery lead. Establish the expected boundary
+  from engagement role definitions, product policy, configuration, or object ownership;
+  UI omission alone does not prove that Role B is unauthorized.
 - Any field resolving with **Role A's non-null data** for Role B that Role B is not
-  authorized to read (and absent from Role B's public/low-privilege UI shape) is confirmed
+  entitled to read is confirmed
   property-level evidence: cite the field path (`$.data.user.ssn`), both roles, and both
   `ev_*` IDs (never echo sensitive values).
 - Also check **mutation return selection sets**: a benign mutation Role B may call (e.g.
@@ -170,7 +173,12 @@ cookies). Send at most two read-only `{ __typename }` requests **without**
 | Observed Response | Disposition |
 |---|---|
 | `400`/`403`/`405`/`415` or Apollo `csrfPrevention` error (`"blocked as a potential Cross-Site Request Forgery"`) | `no_issue_found`: transport/preflight CSRF protection observed |
-| `200 OK` with `{"data": {"__typename": ...}}` on form-urlencoded POST (or GET) with cookie auth and no anti-CSRF token / weak `SameSite` | `medium` finding (escalate to `high` if cookie lacks `SameSite=Strict`/`Lax` or mutations execute over GET/form POST; cite `header-review` cookie evidence) |
+| `200 OK` with `{"data": {"__typename": ...}}` on form-urlencoded POST or GET | `needs_follow_up`: simple-request execution is reachable, but this harmless query does not prove CSRF impact; cite `header-review` cookie evidence and evaluate whether the browser sends the cookie for this method/context |
+
+Confirm CSRF only with an approved, reversible mutation against a test-owned object, or
+with concrete sensitive-read / XS-Search impact. `SameSite=Lax` ordinarily blocks cookies
+on cross-site form POSTs but can allow them on top-level safe-method navigation, so assess
+GET and POST separately rather than requiring `SameSite=Strict` for every deployment.
 
 ---
 
@@ -187,9 +195,9 @@ cookies). Send at most two read-only `{ __typename }` requests **without**
 
 - `400`/`403` or `"batching is not allowed"` → `no_issue_found` (array batching disabled;
   note this does **not** disable alias batching).
-- `200 OK` returning a 2-element JSON array `[{"data": ...}, {"data": ...}]` → `info`/`low`
-  observation that HTTP array batching is enabled (OWASP API4-adjacent; note risk on
-  auth/OTP mutations).
+- `200 OK` returning a 2-element JSON array `[{"data": ...}, {"data": ...}]` → capability
+  / coverage observation that HTTP array batching is enabled, not a finding. Emit a finding
+  only when a sensitive operation bypasses an established per-operation control.
 
 ### 6.2 Alias batching (1 small-N probe per role)
 
@@ -199,7 +207,7 @@ cookies). Send at most two read-only `{ __typename }` requests **without**
 *(Or 3–5 aliases of a benign read field harvested from the target.)*
 
 - Explicit alias/complexity limit error → `no_issue_found`.
-- Acceptance → `info`/`low` observation only. A **rate-limit-bypass claim** requires a
+- Acceptance → capability/coverage observation only. A **rate-limit-bypass claim** requires a
   documented per-request limit (`ConfigExcerpt`) or an observed refusal of the equivalent
   un-aliased form.
 
@@ -208,7 +216,8 @@ cookies). Send at most two read-only `{ __typename }` requests **without**
 - Use a single moderately nested query derived from an observed cyclic relationship (e.g.
   depth 5–6, never deep sweeps).
 - Depth/complexity error (`"query is too nested"`, cost/complexity `maximum` metadata) →
-  `no_issue_found`. Absence → `info`/`low` observation only.
+  `no_issue_found` for the selected query. Acceptance means only that this depth-5/6 query
+  was accepted; record coverage without claiming that no higher limit or cost control exists.
 
 ### 6.4 Explicit DoS / out-of-scope boundary
 
