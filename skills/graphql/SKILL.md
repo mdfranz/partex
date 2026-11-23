@@ -34,7 +34,7 @@ depth controls — never volume or DoS testing.
 1. **Client bundle harvesting (`js-analysis`).** Harvest GraphQL operations from captured
    JS and HTML assets as **coverage leads** (never findings or synthetic operation keys) —
    see [js-analysis reference/analysis-rules.md](../js-analysis/reference/analysis-rules.md)
-   §3 for rules covering raw strings and anonymous shorthand (`{ user { id } }`), compiled
+   §5 for rules covering raw strings and anonymous shorthand (`{ user { id } }`), compiled
    `graphql-tag` `DocumentNode` ASTs (`kind: "Document"`), Relay `ConcreteRequest`
    artifacts, SSR hydration stores (`__APOLLO_STATE__`, `__NEXT_DATA__`, `__URQL_DATA__`,
    `__RELAY_STORE__`), and persisted-query manifests.
