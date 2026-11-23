@@ -38,6 +38,7 @@
 #                            opens with one initial GET per listed target, each captured as evidence and shown live on a
 #                            terminal (--max-requests is raised automatically when the import needs the room). Merges
 #                            with -u. <target-url> is then optional: the first imported entry is the baseline target.
+#       --logfire            also send traces to Logfire [PARTEX_LOGFIRE=1]; needs LOGFIRE_TOKEN (local log is always kept)
 #   -l, --list               list the runs saved in the database (same as the word `list`) and exit
 #   -n, --max-requests N     request budget for the session [PARTEX_MAX_REQUESTS, default 50; ceiling 100000;
 #                            0 = unlimited, still paced by --max-rps]
@@ -52,7 +53,7 @@
 #   -h, --help
 # Required for the chat step: PYDANTIC_AI_GATEWAY_API_KEY when the model goes through the Gateway (a bare model
 # name, or gateway/...); a direct provider string such as openai:... needs that provider's own key (OPENAI_API_KEY).
-# Request spans are written to the local trace log by default. Set PARTEX_LOGFIRE=1 to opt into remote export.
+# Request spans are written to the local trace log by default. Pass --logfire (or set PARTEX_LOGFIRE=1) to opt into remote export.
 #
 # Traffic: the session opens with 3 GETs (TARGET_URL, /robots.txt, /partex-nonexistent-probe-0); after that
 # only what you ask for in the chat (GET/HEAD/OPTIONS). 2 req/s, budget 50 per session (--max-rps /
@@ -95,6 +96,7 @@ while [[ $# -gt 0 ]]; do
     -u|--urls-file) URLS_FILE=${2?$1 needs a value}; shift 2 ;;
     -N|--nmap-file) NMAP_FILE=${2?$1 needs a value}; shift 2 ;;
     -k|--insecure) INSECURE=1; shift ;;
+    --logfire) export PARTEX_LOGFIRE=1; shift ;;
     -l|--list) LIST=1; shift ;;
     -n|--max-requests) MAX_REQUESTS=${2?$1 needs a value}; shift 2 ;;
     -R|--max-rps) MAX_RPS=${2?$1 needs a value}; shift 2 ;;
