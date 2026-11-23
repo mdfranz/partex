@@ -9,7 +9,7 @@ import json
 import stat
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic_ai import Agent
@@ -348,9 +348,9 @@ async def test_run_agent_opens_clai2_on_a_live_session(
     (call,) = calls
     assert call['agent'].name == 'partex_tester_agent'
     assert call['settings'].code_mode is False
-    # Only partex's own /scope plugin loads, from a private settings store (never the user's saved/drop-in ones).
+    # Only partex's own /scope and /targets plugins load, from a private settings store (never saved/drop-in ones).
     assert call['load_plugins'] is True
-    assert [plugin.id for plugin in call['builtin_plugins']] == ['partex_scope']
+    assert [plugin.id for plugin in call['builtin_plugins']] == ['partex_scope', 'partex_targets']
     assert 'partex-clai2-' in str(call['store'].path) and call['store'].path.name == 'config.db'
     assert call['deps'].run_id == run_id
     async with await RunStore.open(db) as store:
@@ -643,9 +643,10 @@ def test_the_model_has_no_scope_tool() -> None:
 
 def test_tester_carries_operator_google_safety_settings() -> None:
     """The operator's Gemini filter opt-in (#218) reaches the live agent; default is none."""
-    safety: ModelSettings = {
-        'google_safety_settings': [{'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_ONLY_HIGH'}]
-    }
+    safety = cast(
+        'ModelSettings',
+        {'google_safety_settings': [{'category': 'HARM_CATEGORY_HARASSMENT', 'threshold': 'BLOCK_ONLY_HIGH'}]},
+    )
     assert build_tester_agent('test', model_settings=safety).model_settings == safety
     assert build_tester_agent('test').model_settings is None
 

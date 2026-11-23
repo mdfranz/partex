@@ -1,9 +1,9 @@
 """Agent adapter — the only package that imports ``pydantic_clai2`` (PLAN §2, §9).
 
 ``run_chat`` opens one run read-only, prints an opening briefing from the reviewer, then hands the
-reviewer to the CLAI2 terminal with every plugin off: no coding tools, no filesystem, no shell, no
-network beyond the model provider. ``run_agent`` does the same over a new live session, with the
-tester's scoped ``http_request`` and ``run_check`` added (#54).
+reviewer to the CLAI2 terminal with only the operator-only ``partex_targets`` plugin loaded: no coding
+tools, no filesystem, no shell, no network beyond the model provider. ``run_agent`` does the same over a
+new live session, adding ``partex_scope`` and the tester's scoped ``http_request`` and ``run_check`` (#54).
 """
 
 import tempfile
@@ -34,6 +34,7 @@ from .approval import WriteGate
 from .reviewer import BRIEFING_PROMPT, build_reviewer_agent
 from .scope_plugin import SCOPE_PLUGIN_FACTORY, SCOPE_PLUGIN_ID, ScopeControl, current_control
 from .search import WebSearcher, build_search_agent
+from .targets_plugin import TARGETS_PLUGIN_FACTORY, TARGETS_PLUGIN_ID, TargetsControl, current_targets
 from .tester import TesterDeps, build_tester_agent
 from .tools import ReviewDeps
 from .usage import UsageRecordingModel
@@ -124,14 +125,20 @@ async def run_chat(
         # CLAI2 stores conversations, input history, and telemetry beside its settings database.
         chat_dir = db_path.with_name(f'{db_path.name}.clai2')
         chat_dir.mkdir(mode=0o700, exist_ok=True)
-        await chat(
-            agent,
-            deps=deps,
-            load_plugins=False,
-            store=SettingsStore(chat_dir / 'config.db'),
-            console=console,
-            settings=CHAT_SETTINGS,
-        )
+        targets_control = await TargetsControl.for_reader(reader, run_id)
+        token = current_targets.set(targets_control)
+        try:
+            await chat(
+                agent,
+                deps=deps,
+                load_plugins=True,
+                store=SettingsStore(chat_dir / 'config.db'),
+                builtin_plugins=(PluginSettings(id=TARGETS_PLUGIN_ID, factory=TARGETS_PLUGIN_FACTORY),),
+                console=console,
+                settings=CHAT_SETTINGS,
+            )
+        finally:
+            current_targets.reset(token)
 
 
 async def run_agent(
@@ -241,17 +248,22 @@ async def run_agent(
             # private, empty settings store keeps the operator's saved and drop-in CLAI2 plugins out, and
             # only the partex plugin is declared, so the session loads nothing else (#64).
             with tempfile.TemporaryDirectory(prefix='partex-clai2-') as config_dir:
-                token = current_control.set(ScopeControl(session, write_gate=write_gate))
+                scope_token = current_control.set(ScopeControl(session, write_gate=write_gate))
+                targets_token = current_targets.set(TargetsControl.for_session(session))
                 try:
                     await chat(
                         agent,
                         deps=deps,
                         load_plugins=True,
                         store=SettingsStore(Path(config_dir) / 'config.db'),
-                        builtin_plugins=(PluginSettings(id=SCOPE_PLUGIN_ID, factory=SCOPE_PLUGIN_FACTORY),),
+                        builtin_plugins=(
+                            PluginSettings(id=SCOPE_PLUGIN_ID, factory=SCOPE_PLUGIN_FACTORY),
+                            PluginSettings(id=TARGETS_PLUGIN_ID, factory=TARGETS_PLUGIN_FACTORY),
+                        ),
                         console=console,
                         settings=CHAT_SETTINGS,
                     )
                 finally:
-                    current_control.reset(token)
+                    current_targets.reset(targets_token)
+                    current_control.reset(scope_token)
         return session.run_id

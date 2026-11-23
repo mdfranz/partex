@@ -9,7 +9,7 @@ import subprocess
 from collections.abc import AsyncIterator, Callable, Iterator
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import logfire
 import pytest
@@ -467,15 +467,18 @@ async def test_search_agent_has_only_native_web_search_tool() -> None:
 
 async def test_search_agent_carries_operator_google_safety_settings() -> None:
     """The operator's Gemini filter opt-in (#218) rides the search agent into every request."""
-    safety: ModelSettings = {
-        'google_safety_settings': [{'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'OFF'}]
-    }
+    safety = cast(
+        'ModelSettings',
+        {'google_safety_settings': [{'category': 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold': 'OFF'}]},
+    )
     agent = build_search_agent('test', provider='google', model_settings=safety)
     assert agent.model_settings == safety
     fake = FakeNativeSearchModel(name='fake-google')
     agent = build_search_agent(fake, provider='google-cloud', model_settings=safety)
     await agent.run('nginx 1.24.0 cve')
-    assert (fake.seen_settings[0] or {}).get('google_safety_settings') == safety['google_safety_settings']
+    assert (fake.seen_settings[0] or {}).get('google_safety_settings') == cast('dict[str, Any]', safety)[
+        'google_safety_settings'
+    ]
     # No opt-in → the per-provider default: none for Google providers.
     assert build_search_agent('test', provider='google').model_settings is None
     assert build_search_agent('test', provider='anthropic').model_settings == SEARCH_ANTHROPIC_SETTINGS

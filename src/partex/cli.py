@@ -308,7 +308,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.set_defaults(handler=_cmd_verify)
 
     chat = subparsers.add_parser(
-        'chat', parents=[with_db], help='read-only review chat over a saved run (CLAI2 terminal, no plugins)'
+        'chat', parents=[with_db], help='read-only review chat over a saved run (CLAI2 terminal)'
     )
     chat.add_argument('run_id', help='run id (run_…)')
     chat.add_argument(
