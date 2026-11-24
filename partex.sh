@@ -23,8 +23,10 @@
 #   -d, --db PATH            database [PARTEX_DB, default partex.db in the state directory]
 #                            Set PARTEX_STATE_DIR to override the state directory for all local files.
 #   -f, --from RUN_ID        let the new session read an earlier run [RUN_ID]
-#       --resume [RUN_ID]    read-only chat on an earlier run, no traffic and no target URL needed; the
-#                            latest run if RUN_ID is omitted [CHAT_ONLY=1, RUN_ID]
+#       --resume [RUN_ID]    continue testing: a new session on the earlier run's target, scope and recorded
+#                            authorization (no target URL or attestation needed), reading that run; the latest
+#                            run if RUN_ID is omitted. -n, -R, -k, -M/-w/-W and the model flags apply as usual [RUN_ID]
+#       --read-only [RUN_ID] chat on an earlier run with no traffic and no target URL [CHAT_ONLY=1, RUN_ID]
 #   -k, --insecure           accept invalid TLS certificates (self-signed, expired, mismatch) for the target
 #                            [PARTEX_INSECURE=1]; recorded on the run, never available to the model
 #   -u, --urls-file PATH     file of authorized URLs, one per line (# comments; a trailing /* allows a path prefix)
@@ -82,6 +84,8 @@ RECURSIVE=${PARTEX_RECURSIVE:+1}
 LIST=
 INSECURE=${PARTEX_INSECURE:+1}
 RESUME=${CHAT_ONLY:+1}
+READ_ONLY=${CHAT_ONLY:+1}
+MAX_REQUESTS_SET= MAX_RPS_SET=
 NO_TUI=${NO_TUI:-}
 MAX_REQUESTS=${PARTEX_MAX_REQUESTS:-50}
 MAX_RPS=${PARTEX_MAX_RPS:-2}
@@ -100,6 +104,7 @@ while [[ $# -gt 0 ]]; do
     -d|--db) DB=${2?$1 needs a value}; shift 2 ;;
     -f|--from) RUN_ID=${2?$1 needs a value}; shift 2 ;;
     --resume) RESUME=1; shift; if [[ ${1:-} == run_* ]]; then RUN_ID=$1; shift; fi ;;
+    --read-only) RESUME=1 READ_ONLY=1; shift; if [[ ${1:-} == run_* ]]; then RUN_ID=$1; shift; fi ;;
     --recursive) RECURSIVE=1; shift ;;
     -u|--urls-file) URLS_FILE=${2?$1 needs a value}; shift 2 ;;
     -N|--nmap-file) NMAP_FILE=${2?$1 needs a value}; shift 2 ;;
@@ -107,8 +112,8 @@ while [[ $# -gt 0 ]]; do
     --logfire) export PARTEX_LOGFIRE=1; shift ;;
     --logfire-content) export PARTEX_LOGFIRE_CONTENT=1; shift ;;
     -l|--list) LIST=1; shift ;;
-    -n|--max-requests) MAX_REQUESTS=${2?$1 needs a value}; shift 2 ;;
-    -R|--max-rps) MAX_RPS=${2?$1 needs a value}; shift 2 ;;
+    -n|--max-requests) MAX_REQUESTS=${2?$1 needs a value}; MAX_REQUESTS_SET=1; shift 2 ;;
+    -R|--max-rps) MAX_RPS=${2?$1 needs a value}; MAX_RPS_SET=1; shift 2 ;;
     -M|--method) METHOD=${2?$1 needs a value}; shift 2 ;;
     -w|--allow-method) ALLOW_METHODS+=("${2?$1 needs a value}"); shift 2 ;;
     -W|--max-writes) MAX_WRITES=${2?$1 needs a value}; shift 2 ;;
@@ -176,7 +181,7 @@ for s in json.load(sys.stdin):
   exit 0
 fi
 
-if [[ -n $RESUME ]]; then  # review an earlier run read-only: no traffic
+if [[ -n $RESUME ]]; then  # an earlier run: --read-only reviews it (no traffic), otherwise a new session continues from it
   if [[ -z ${RUN_ID:-} ]]; then  # default to the most recent usable run in the DB
     RUN_ID=$(partex runs --db "$DB" --json | python3 -c 'import json, sys
 runs = [r for r in json.load(sys.stdin) if r["state"] != "invalid"]
@@ -184,7 +189,11 @@ print(runs[-1]["id"] if runs else "")')
     [[ -n $RUN_ID ]] || { echo "no runs in $DB to resume" >&2; exit 1; }
     echo "resuming $RUN_ID (pick another with --resume RUN_ID)"
   fi
-  exec uv run --quiet partex chat "$RUN_ID" --db "$DB" --model "$MODEL" ${ROUTE:+--gateway-route "$ROUTE"}
+  if [[ -n $READ_ONLY ]]; then
+    exec uv run --quiet partex chat "$RUN_ID" --db "$DB" --model "$MODEL" ${ROUTE:+--gateway-route "$ROUTE"}
+  fi
+  TARGET_URL=$(python3 "$SCRIPT_DIR/scripts/resume_engagement.py" "$DB" "$RUN_ID" --target) || exit 1
+  echo "continuing $RUN_ID on $TARGET_URL (a new run; the earlier one stays unchanged)"
 fi
 
 [[ -z $URLS_FILE || -f $URLS_FILE ]] || { echo "URLs file not found: $URLS_FILE" >&2; exit 1; }
@@ -231,7 +240,7 @@ if [[ -z $TARGET_URL && -n $URLS_FILE ]]; then  # no <target-url>: the first URL
   echo "target: $TARGET_URL (first URL in $URLS_FILE)"
 fi
 [[ -n $TARGET_URL ]] || { echo "usage: $0 [options] [<target-url> | -u URLS_FILE | -N NMAP_XML]  (-h for options)" >&2; exit 2; }
-if [[ -z $ATTESTATION ]]; then
+if [[ -z $ATTESTATION && -z $RESUME ]]; then  # a resumed session reuses the run's recorded authorization
   [[ -t 0 ]] || { echo "pass --attestation (or set PARTEX_ATTESTATION): who authorized testing $TARGET_URL" >&2; exit 1; }
   echo "Testing $TARGET_URL sends live requests; partex needs a written authorization on record."
   [[ -z $nmap_urls ]] || echo "This session would request only $nmap_urls_count URL target(s) across $nmap_hosts host(s) imported from $NMAP_FILE — attest that the scanned range is authorized."
@@ -244,6 +253,10 @@ host=${BASH_REMATCH[2]} port=${BASH_REMATCH[4]:-$([[ ${BASH_REMATCH[1]} == https
 json_str() { python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$1"; }
 
 TLS_JSON=; [[ -z $INSECURE ]] || TLS_JSON='"tls": {"verify": false},'
+if [[ -n $RESUME ]]; then
+  python3 "$SCRIPT_DIR/scripts/resume_engagement.py" "$DB" "$RUN_ID" ${MAX_REQUESTS_SET:+--max-requests "$MAX_REQUESTS"} \
+    ${MAX_RPS_SET:+--max-rps "$MAX_RPS"} ${INSECURE:+--insecure} > "$eng/engagement.json" || exit 1
+else
 cat > "$eng/engagement.json" <<JSON
 {
   "schema_version": 1,
@@ -261,6 +274,7 @@ cat > "$eng/engagement.json" <<JSON
   "suggested_checks": ["version-disclosure"]
 }
 JSON
+fi
 
 if [[ -n $NO_TUI ]]; then
   rc=0
