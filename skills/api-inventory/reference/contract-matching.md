@@ -3,7 +3,7 @@
 > Provenance: condensed from `strix/strix/skills/custom/api_spec_testing.md` (OpenAPI
 > `$ref`/`allOf` traversal and implied-method checks) and
 > `communitytools/skills/api-security/SKILL.md` (normalized operation templates). The
-> declared-vs.-observed split originates in `PARTX_SKILL_PLAN.md` §4 (P1.1), not in
+> declared-vs.-observed split originates in `docs/skills/PLAN.md` §4 (P1.1), not in
 > third-party skill text.
 
 ## 1. Contract Ingestion and Schema Resolution (`ConfigExcerpt`)

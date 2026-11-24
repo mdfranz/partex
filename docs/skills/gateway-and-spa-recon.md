@@ -2,7 +2,7 @@
 
 - **Priority / Milestones:**
   - **M7 (`PLAN.md` §13.6 & §15, `DEPS.md` §5–§8):** Browser Capture Harness (`src/partex/browser.py` + `playwright-cli` agent guidance port) — primary evidence feeder for `api-inventory` (P1.1) and `authorization-testing` (P1.2) on modern SPAs.
-  - **P2.2 / S5 (`PARTX_SKILL_PLAN.md` §4):** `gateway-policy` skill + check (rate/size limits, API deprecation/sunset lifecycle, OWASP API4:2023 & API9:2023).
+  - **P2.2 / S5 (`docs/skills/PLAN.md` §4):** `gateway-policy` skill + check (rate/size limits, API deprecation/sunset lifecycle, OWASP API4:2023 & API9:2023).
 - **Standards & References:**
   - OWASP API Security Top 10 (2023):
     - [API4:2023 — Unrestricted Resource Consumption](https://owasp.org/API-Security/editions/2023/en/0xa4-unrestricted-resource-consumption/)
@@ -34,7 +34,7 @@ headers:
 | **Legacy De-Facto** | `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` (or `X-Rate-Limit-*`) | Note semantic split on `Reset`: GitHub/Twitter send Unix epoch seconds, whereas other gateways send delta seconds! |
 | **Throttle Enforcement** | HTTP `429 Too Many Requests` + `Retry-After` | `Retry-After` is either an HTTP-date or non-negative integer seconds (RFC 9110 §10.2.3) |
 
-**Three-Way Distinction (`PARTX_SKILL_PLAN.md` §4 P2.2):**
+**Three-Way Distinction (`docs/skills/PLAN.md` §4 P2.2):**
 1. **Declared policy only:** Rate/payload limit appears in OpenAPI (`x-ratelimit-*`, `429`
    response definition, `maxLength`/`maxItems`) or gateway `ConfigExcerpt`, with **no**
    runtime header or `429` evidence in captures → report as declared-unverified (`CoverageEntry`).

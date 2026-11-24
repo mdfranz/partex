@@ -14,7 +14,7 @@
 |---|---|
 | `PLAN.md` §3.1 | Owns the environment contract (uv, local path sources, dev toolchain). This doc's amendments are **applied** to `PLAN.md` (§1 non-goals, §2 layer rules, §3.1 deps, §5 source convention, §8 CLI, §13.4, §13.6, §15 M7, §16, §17.5, §18); the review questions are resolved in §8 below. |
 | `RUNTIME.md` | Owns execution environments (Monty Code Mode, microVM deferral). The browser capture harness gained its section there (M7). |
-| `PARTX_SKILL_PLAN.md` §4 | Owns slice sequencing. The S1 `api-inventory` skill is the first consumer of the harness's captures. |
+| `docs/skills/PLAN.md` §4 | Owns slice sequencing. The S1 `api-inventory` skill is the first consumer of the harness's captures. |
 
 ## 2. What the locked stack already provides
 
@@ -190,7 +190,7 @@ Why paths 2 and 3 are load-bearing: the S1 `api-inventory` skill builds its obse
 from `HttpExchange` records, and path 1 alone cannot produce the hundreds of authenticated
 XHR/fetch exchanges a real SPA emits during ordinary use — a plain HTTP client has no JS
 runtime, no session bootstrapping, and no way to walk UI trigger points.
-`PARTX_SKILL_PLAN.md` §2 declined to port the forks' `scripts/` tree *as scripts* — which
+`docs/skills/PLAN.md` §2 declined to port the forks' `scripts/` tree *as scripts* — which
 is exactly why the capability must return as engine machinery (a harness), not as a
 data-only skill's leftover Node tooling.
 
@@ -268,7 +268,7 @@ All three §5 paths ship. The proposal below sequences them and picks the path-2
 4. **Agent-driven active probing via browser, after the harness.** Expose a small
    `browser_*` toolset over the harness (open/snapshot/click/fill/wait), with the
    interaction model as data-only skill guidance — the same port the forks' `playwright-cli`
-   skill already gets in `PARTX_SKILL_PLAN.md` §7, minus the Bash tool gate. Do not give
+   skill already gets in `docs/skills/PLAN.md` §7, minus the Bash tool gate. Do not give
    the agent a shell to a browser CLI (the strix model); give it constrained tools scoped
    and audited like `http_request`. Deterministic `ActiveCheck`s stay on the scoped client
    in the near term; whether checks ever gain browser access (a protocol variant receiving
@@ -336,7 +336,7 @@ above stay terse.
    browser-driven active testing enters via the agent `browser_*` tools, where
    nondeterminism is acceptable. If a DOM-dependent check is ever needed, the shape is a
    new evidence kind (a harness-captured DOM snapshot) plus a passive check over it —
-   revisited through the D-series amendment process (`PARTX_SKILL_PLAN.md` §5) with a
+   revisited through the D-series amendment process (`docs/skills/PLAN.md` §5) with a
    concrete skill in hand, not before.
 9. **JS AST parsing (`#69`) — decided**: add `tree-sitter` (`>=0.26`) and `tree-sitter-javascript`
    (`>=0.25`) as locked PyPI runtime dependencies (prebuilt wheels, no `[tool.uv.sources]`

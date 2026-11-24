@@ -1,6 +1,6 @@
 # Research: `authorization-testing` (`authz-boundary`)
 
-- **Priority / Slice:** P1.2 — Second post-M6 integration slice (S2, `PARTX_SKILL_PLAN.md` §4)
+- **Priority / Slice:** P1.2 — Second post-M6 integration slice (S2, `docs/skills/PLAN.md` §4)
 - **Skill Path:** `skills/authorization-testing/SKILL.md` (`reference/role-pair-probing.md`)
 - **Check ID & Protocol:** `authz-boundary` (`ActiveCheck` with two-request `verify_recipe` + passive pre-review prioritization)
 - **Engagement Requirement (`PLAN.md` §4.1 D2):** `engagement.roles` mapping at least two distinct scoped role handles (e.g. `owner` + `guest`, or `tenant_a` + `tenant_b`), resolved from `PARTEX_CRED_*` env vars.

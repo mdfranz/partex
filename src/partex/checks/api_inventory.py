@@ -1,6 +1,6 @@
 """api-contract-conformance — built-in passive check for OpenAPI inventory and contract conformance.
 
-Issue #24 (Slice S1, PARTX_SKILL_PLAN §4 P1.1).  Pure function over validated evidence: no I/O,
+Issue #24 (Slice S1, docs/skills/PLAN.md §4 P1.1).  Pure function over validated evidence: no I/O,
 network, model, or storage access.  Registered via the ``partex.checks`` entry point; guidance lives
 in ``skills/api-inventory/`` (data, never executed).
 

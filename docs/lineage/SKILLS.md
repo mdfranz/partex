@@ -1,6 +1,6 @@
 # ARTEX Skill Inventory
 
-> **Historical Reference:** This document inventories the skills shipped in the external ARTEX Go forks studied during initial design. For `partex`'s own data-only skill contract and roadmap, see [`PARTX_SKILL_PLAN.md`](../../PARTX_SKILL_PLAN.md) and [`docs/skills/README.md`](../skills/README.md).
+> **Historical Reference:** This document inventories the skills shipped in the external ARTEX Go forks studied during initial design. For `partex`'s own data-only skill contract and roadmap, see [`docs/skills/PLAN.md`](../skills/PLAN.md) and [`docs/skills/README.md`](../skills/README.md).
 
 An inventory of the agent skills shipped in the three Go forks (`artex-global/`,
 `BaaRai/ARTEX/`, `failsafe/artex/`). The Python `ARTEX/` prototype has no skill
