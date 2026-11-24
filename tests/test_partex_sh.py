@@ -148,3 +148,65 @@ def test_urls_file_without_any_url_is_refused(tmp_path: Path) -> None:
     result = _run_urls(tmp_path, '# nothing here\n\n')
     assert result.returncode == 1
     assert 'no URLs in' in result.stderr
+
+
+RESUME_RUN = 'run_' + 'b' * 32
+RESUME_SCOPE = (
+    '{"hosts":["app.test"],"path_prefixes":["/"],"exclusions":[],"ports":[443],"max_rps":2,"max_requests":50}'
+)
+
+
+def _resume_db(tmp_path: Path) -> Path:
+    import json
+    import sqlite3
+
+    db = tmp_path / 'resume.db'
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            'CREATE TABLE engagements (id TEXT, name TEXT, base_url TEXT, scope TEXT, attestation TEXT, operator TEXT)'
+        )
+        conn.execute('CREATE TABLE runs (id TEXT, engagement_id TEXT)')
+        conn.execute(
+            'INSERT INTO engagements VALUES (?, ?, ?, ?, ?, ?)',
+            ('eng_1', 'app.test', 'https://app.test', RESUME_SCOPE, 'I own app.test', 'op'),
+        )
+        conn.execute('INSERT INTO runs VALUES (?, ?)', (RESUME_RUN, 'eng_1'))
+        conn.execute('INSERT INTO runs VALUES (?, ?)', ('run_' + 'c' * 32, None))
+    assert json.loads(RESUME_SCOPE)
+    return db
+
+
+def test_resume_rebuilds_the_engagement_and_continues_from_the_run(tmp_path: Path) -> None:
+    """--resume starts a new agent session on the run's stored engagement; -n and -k override it (#253)."""
+    db = _resume_db(tmp_path)
+    stub = tmp_path / 'uv'  # record the agent call and the engagement it was handed
+    log = tmp_path / 'agent.log'
+    stub.write_text(f'#!/bin/sh\nif [ "$4" = agent ]; then echo "$@" > {log}; cat "$5/engagement.json" >> {log}; fi\n')
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    env = {**os.environ, 'PATH': f'{tmp_path}{os.pathsep}{os.environ["PATH"]}', 'PYDANTIC_AI_GATEWAY_API_KEY': 'k'}
+    result = subprocess.run(
+        ['bash', str(SCRIPT), '-d', str(db), '--resume', RESUME_RUN, '-k', '-n', '0'],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    recorded = log.read_text()
+    assert f'--from {RESUME_RUN}' in recorded and '--authorized' in recorded
+    assert '"base_url": "https://app.test"' in recorded and '"attestation": "I own app.test"' in recorded
+    assert '"max_requests": 0' in recorded and '"verify": false' in recorded
+
+
+def test_resume_refuses_a_run_without_a_stored_engagement(tmp_path: Path) -> None:
+    db = _resume_db(tmp_path)
+    result = subprocess.run(
+        ['bash', str(SCRIPT), '-d', str(db), '--resume', 'run_' + 'c' * 32],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 1
+    assert '--read-only' in result.stderr

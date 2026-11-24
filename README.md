@@ -102,19 +102,19 @@ The version-disclosure check looks for evidence like this:
 | `GET /robots.txt` | A response header reveals the software version, such as `Server: FixtureTarget/2.3.1`. |
 | `GET /partex-nonexistent-probe-0` | A `404` response includes internal details, such as a stack trace. |
 
-To review that run with a model, resume the latest saved run in read-only chat. This example uses OpenRouter and requires `OPENROUTER_API_KEY`.
+To review that run with a model, open the latest saved run in read-only chat with `--read-only`. This example uses OpenRouter and requires `OPENROUTER_API_KEY`.
 
 ```sh
-./partex.sh -m openrouter:deepseek/deepseek-v4.1-flash-1017 --resume
+./partex.sh -m openrouter:deepseek/deepseek-v4.1-flash-1017 --read-only
 ```
 
 To use Z.ai's GLM-5.3 through Pydantic AI Gateway, set `PYDANTIC_AI_GATEWAY_API_KEY` and select the `doubleword` route. If the key's region cannot be inferred or you need a specific endpoint, set `PYDANTIC_AI_GATEWAY_BASE_URL` to the URL from your Gateway Connect page. The launcher accepts a URL that already ends in `/doubleword`.
 
 ```sh
-./partex.sh -m zai-org/GLM-5.3 -r doubleword --resume
+./partex.sh -m zai-org/GLM-5.3 -r doubleword --read-only
 ```
 
-To run a live session using Gemini directly for both the main model (`-m`) and native `web_search` (`-S`), set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and use the `google:` provider prefix. No Gateway key is needed when using a direct `google:` model string; omit `-S` to leave web search off (or pass `--resume` without `-S` for read-only chat).
+To run a live session using Gemini directly for both the main model (`-m`) and native `web_search` (`-S`), set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and use the `google:` provider prefix. No Gateway key is needed when using a direct `google:` model string; omit `-S` to leave web search off (or pass `--read-only` without `-S` for chat only).
 
 ```sh
 ./partex.sh -m google:gemini-3.8-flash -S google:gemini-3.8-flash http://127.0.0.1:8765/
@@ -143,7 +143,7 @@ To inspect a saved run, copy its ID from `./partex.sh list` and substitute it be
 uv run partex show RUN_ID --format text
 ```
 
-This prints the saved evidence and findings. To open a particular run in chat, pass its ID after `--resume`.
+This prints the saved evidence and findings. To open a particular run in chat with no traffic, pass its ID after `--read-only`. To keep testing the same target, pass it after `--resume` (for example `./partex.sh --resume RUN_ID -k -n 0`): partex starts a new session on the run's recorded target, scope and authorization, reads the earlier run, and leaves it unchanged. `-n`, `-R` and `-k` override the stored budget, rate and TLS policy.
 
 ## Local state
 

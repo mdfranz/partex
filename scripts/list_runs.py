@@ -20,4 +20,6 @@ for r in runs:
         f'  {r["id"]:<36}  {when:<19}  {r["state"]:<15}  {r["findings_count"]:>3}  '
         f'{r.get("requests_spent", 0):>3}  {target}'
     )
-print(f'resume one read-only: {script} --resume RUN_ID   (no RUN_ID = the latest)')
+print(
+    f'continue testing: {script} --resume RUN_ID -k   (no RUN_ID = the latest); chat only, no traffic: --read-only RUN_ID'
+)
