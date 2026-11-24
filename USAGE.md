@@ -65,9 +65,30 @@ The `version-disclosure` check probes for evidence such as:
 - `uv run partex reports RUN_ID` lists Markdown reports saved by the agent's `save_report` tool; `uv run partex reports RUN_ID NAME` prints one report (both accept `--db PATH` and `--json`).
 - `./partex.sh --resume [RUN_ID]` opens a read-only CLAI2 chat session over a saved run (defaults to the most recent usable run if `RUN_ID` is omitted). No network traffic is sent.
 
-## Model providers & optional web search
+## Multi-model configuration: analyst vs. search models
 
-`partex review` and `partex test` are model-free by default. `partex chat`, `partex agent`, and the interactive `./partex.sh` launcher require a model.
+`partex review` and `partex test` are model-free by default. `partex chat`, `partex agent`, and the interactive `./partex.sh` launcher split LLM configuration into two independent roles:
+
+- **Analyst / reviewer model (`--model` / `-m`, plus optional `--gateway-route` / `-r`):** Drives investigation, tool calls, Monty `run_code` evidence correlation, and read-only chat. Accepts any Pydantic AI `provider:model` string or Pydantic AI Gateway route. Because runs live in `partex.db`, you can probe live with one model and later `--resume` the exact same run in read-only chat with another model or provider.
+- **Web search model (`--search-model` / `-S`):** Optional and off by default. Backs only the `web_search` tool in an isolated zero-tool agent using provider-native search, so you can give an open-weights or Gateway-routed analyst access to live public reference lookups — or omit it for zero search egress.
+
+### Mixing analyst and search models
+
+You can combine providers freely per session or across stages of a run:
+
+```sh
+# Open-weights / Gateway analyst + fast direct Gemini web search
+./partex.sh -m zai-org/GLM-5.3 -r doubleword -S google:gemini-3.8-flash http://127.0.0.1:8765/
+
+# OpenRouter analyst + Anthropic Haiku web search
+./partex.sh -m openrouter:deepseek/deepseek-v4.1-flash-1017 -S anthropic:claude-haiku-4-5 http://127.0.0.1:8765/
+
+# Direct Gemini for both roles (or omit -S to leave web search off)
+./partex.sh -m google:gemini-3.8-flash -S google:gemini-3.8-flash http://127.0.0.1:8765/
+
+# Switch analyst models later when reviewing the saved run in read-only chat
+./partex.sh -m anthropic:claude-sonnet-5-5 --resume
+```
 
 ### OpenRouter
 
@@ -101,12 +122,15 @@ PARTEX_GOOGLE_SAFETY_SETTINGS=off ./partex.sh -m google:gemini-3.8-flash http://
 
 ### Optional web search (`--search-model` / `-S`)
 
-Web search is off unless `--search-model` (or `-S` in `partex.sh`, or `PARTEX_SEARCH_MODEL`) is set. When enabled, `web_search` runs in a separate one-shot `Agent` with `WebSearch(local=None)` and zero host tools, DB handles, or filesystem access. Search queries leave this machine directly to the provider and never pass through Pydantic AI Gateway:
+Web search is off unless `--search-model` (or `-S` in `partex.sh`, or `PARTEX_SEARCH_MODEL`) is set. When enabled, `web_search` runs in a separate one-shot `Agent` with `WebSearch(local=None)` and zero host tools, DB handles, target-client access, or filesystem mounts:
 
-- `anthropic:<model>` (`ANTHROPIC_API_KEY`)
-- `google:<model>` (`GOOGLE_API_KEY` or `GEMINI_API_KEY`)
-- `google-cloud:<model>` (Application Default Credentials and `GOOGLE_CLOUD_PROJECT`; defaults to `global` location, overridable via `GOOGLE_CLOUD_LOCATION`)
-- `openai:<model>` (`OPENAI_API_KEY`, Responses API; has no per-query search limit and costs more per query than the others, so prefer a small model)
+- **Supported providers (never Gateway):**
+  - `anthropic:<model>` (`ANTHROPIC_API_KEY`) — pins `allowed_callers=['direct']` (disables server-side code execution so citations stay intact and Zero Data Retention applies) and caps server-side tool invocations at `max_uses=3` per query.
+  - `google:<model>` (`GOOGLE_API_KEY` or `GEMINI_API_KEY`).
+  - `google-cloud:<model>` (Application Default Credentials and `GOOGLE_CLOUD_PROJECT`; defaults to `global` location, overridable via `GOOGLE_CLOUD_LOCATION`).
+  - `openai:<model>` (`OPENAI_API_KEY`, Responses API) — sets `openai_include_web_search_sources=True` so citations are returned (`openai-chat:` is rejected at startup); has no per-query search limit and costs more per query than the others, so prefer a small model.
+- **Startup validation:** Fails fast at startup on bare model names, `gateway/...` prefixes, `openai-chat:`, or missing credentials/Vertex ADC (without echoing credential or token contents).
+- **Outbound query & budget guardrails:** Search queries leave this machine directly to the provider and never pass through Pydantic AI Gateway. Before a query is sent, `validate_search_query` enforces a 200-character limit and blocks URLs, internal `ev_`/`fn_` IDs, and known engagement secrets. Sessions are capped at 20 `web_search` calls and 20 sources per query (recording `sources_total` if trimmed); results return framed as untrusted data and persist in `web_research`.
 
 ## Target scoping: URL lists & `nmap` imports
 
