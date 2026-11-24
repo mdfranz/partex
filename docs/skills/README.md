@@ -7,14 +7,14 @@ While `skills/<name>/SKILL.md` and `skills/<name>/reference/*.md` hold compact,
 agent-facing operational playbooks (to be surfaced to the agent as deferred capabilities
 via `defer_loading=True`, `PLAN.md` §9–§10, #59), this
 `docs/skills/` directory records the **engineering and security research** behind each
-skill and its paired `PassiveCheck` / `ActiveCheck` implementation (`PARTX_SKILL_PLAN.md`,
+skill and its paired `PassiveCheck` / `ActiveCheck` implementation ([`docs/skills/PLAN.md`](PLAN.md),
 `DEPS.md`).
 
 ---
 
 ## 1. Corpus Index and Testing Order
 
-Skills are sequenced by milestone and slice (`PLAN.md` §15, `PARTX_SKILL_PLAN.md` §4):
+Skills are sequenced by milestone and slice (`PLAN.md` §15, [`docs/skills/PLAN.md`](PLAN.md) §4):
 P0 establishes the passive and active check contracts in M1–M3; P1.1–P1.3 form the first
 post-M6 offensive/defensive web & API slices (S1–S3); P2.2 and M7 extend surface capture
 and gateway policy verification.

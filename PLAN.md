@@ -1154,7 +1154,7 @@ class TargetClient(Protocol):   # implemented by target.ScopedHttpClient
    hold across replays before `confirmed`.
 6. Staged (drafted in `skills/`, not yet enabled): `auth-session-controls` +
    `session-cookie-config` / `token-weakness` (#26, #195) — the remaining P1.3 slice from
-   `PARTX_SKILL_PLAN.md` §4. It activates only when its checks register (warning, not error, at
+   `docs/skills/PLAN.md` §4. It activates only when its checks register (warning, not error, at
    `partex checks` time until then) and its fixture triad lands (clean case, one per finding
    class, insufficient-evidence case), one slice at a time post-M6. Data-only playbooks ship
    without checks: `graphql` (#192) and `regression-verify` (#187).
@@ -1478,7 +1478,7 @@ for evidence-backed auditability and replayable verification. The shipped skill 
 `openapi-spec-review` (#156), and `authorization-testing` (live with `authz-boundary`, #27),
 plus the data-only playbooks `graphql` (#192) and `regression-verify` (#187). The remaining
 P1.3 skill (`auth-session-controls`, #26) is **drafted and staged** in `skills/` per
-`PARTX_SKILL_PLAN.md` §4; it stays unenabled until its checks register and its fixture triad
+`docs/skills/PLAN.md` §4; it stays unenabled until its checks register and its fixture triad
 lands, one slice at a time post-M6. Further skill content — including offensive playbooks
 from the BaaRai inventory — follows the same gate. Capture and probing run through the same
 three paths the ARTEX lineage ran — the scoped client (M3), operator HAR import (M3), and

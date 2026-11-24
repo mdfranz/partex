@@ -1,6 +1,6 @@
 """authz-boundary — built-in active check for BOLA/IDOR/BFLA role-pair probing.
 
-Issue #27 (Slice S2, PARTX_SKILL_PLAN §4 P1.2).  Guidance lives in
+Issue #27 (Slice S2, docs/skills/PLAN.md §4 P1.2).  Guidance lives in
 ``skills/authorization-testing/`` (data, never executed).  The two-role rule is
 absolute (skill §2): an access-control finding is never claimed from a single
 response — it compares at least two role-scoped identities from

@@ -1,6 +1,6 @@
 """Tests for S1 api-inventory / api-contract-conformance passive check (issue #24).
 
-Covers the PARTX_SKILL_PLAN §6 fixture triad, normalized operation keys (PLAN §12),
+Covers the docs/skills/PLAN.md §6 fixture triad, normalized operation keys (PLAN §12),
 finding ID stability across bundle revisions and route reordering, GraphQL/RPC single-endpoint
 collapsing, surface_nodes + coverage_entries persistence, secret/value redaction, and passive
 byte-identical export determinism.

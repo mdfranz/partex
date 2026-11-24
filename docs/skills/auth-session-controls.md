@@ -1,6 +1,6 @@
 # Research: `auth-session-controls` (`session-cookie-config` & `token-weakness`)
 
-- **Priority / Slice:** P1.3 — Third post-M6 integration slice (S3, `PARTX_SKILL_PLAN.md` §4)
+- **Priority / Slice:** P1.3 — Third post-M6 integration slice (S3, `docs/skills/PLAN.md` §4)
 - **Skill Path:** `skills/auth-session-controls/SKILL.md` (`reference/session-and-token-checks.md`)
 - **Check IDs & Protocols:**
   - `session-cookie-config` (`PassiveCheck` — session semantics & URL/header token leakage)

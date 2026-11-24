@@ -1,15 +1,16 @@
 # ParTEx skill plan: structure, synthesis, and priorities
 
-> Status: active skill roadmap for `partex` (P0 built-in skills `header-review`,
-> `version-disclosure`, and `js-analysis`, plus P1.1 `api-inventory` (#24), are shipped; S2–S3
-> skills are drafted and staged
-> in `skills/`). Consolidates and supersedes `WEB_API_SKILL_PRIORITIES.md` and
-> `SOURCE_SKILL_SYNTHESIS.md` (preserved in git history at 39c1028). The engine contract
-> targeted here is `PLAN.md`: **full offensive scope**, two execution modes — passive review
-> of offline bundles and active live testing with probe → verify → replay — and three
-> capture/probe paths (scoped HTTP client and HAR import landed in M3, browser capture
-> harness in M7; `DEPS.md` §5), with skills as data-only Markdown and checks as entry-point
-> code (`PLAN.md` §10).
+> Status: active skill roadmap for `partex` (shipped skills with paired checks: `header-review`,
+> `version-disclosure`, `server-error` (#128), `js-analysis` (#69, #193), `api-inventory` (#24),
+> `openapi-spec-review` (#156), `authorization-testing` (#27), and `privacy-review` (#224);
+> shipped data-only playbooks: `regression-verify` (#187) and `graphql` (#192); staged in
+> `skills/`: `auth-session-controls` (#26)). Consolidates and supersedes
+> `WEB_API_SKILL_PRIORITIES.md` and `SOURCE_SKILL_SYNTHESIS.md` (preserved in git history at
+> 39c1028). The engine contract targeted here is `PLAN.md`: **full offensive scope**, two
+> execution modes — passive review of offline bundles and active live testing with probe →
+> verify → replay — and three capture/probe paths (scoped HTTP client and HAR import landed in
+> M3, browser capture harness in M7; `DEPS.md` §5), with skills as data-only Markdown and checks
+> as entry-point code (`PLAN.md` §10).
 
 ## 1. Reading order
 

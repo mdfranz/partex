@@ -157,7 +157,7 @@ URL-token leakage through `session-cookie-config` (`auth-session-controls`).
 ## 3. Implementation Refinements Identified for `header_security.py`
 
 Comparing current `src/partex/checks/header_security.py` against the research above highlights
-targeted hardening opportunities when extending the P0 fixture (`PARTX_SKILL_PLAN.md` §4):
+targeted hardening opportunities when extending the P0 fixture (`docs/skills/PLAN.md` §4):
 
 1. **Wire-order header pairs & case-insensitive helpers (addressed in #39):** HTTP header
    field names are case-insensitive (RFC 9110 §5.1) and responses often emit multiple

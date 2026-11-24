@@ -1,6 +1,6 @@
 # Research: `api-inventory` (`api-contract-conformance`) & `openapi-spec-review`
 
-- **Priority / Slice:** P1.1 — First post-M6 integration slice (S1, `PARTX_SKILL_PLAN.md` §4, #24, #153, #155, #156)
+- **Priority / Slice:** P1.1 — First post-M6 integration slice (S1, `docs/skills/PLAN.md` §4, #24, #153, #155, #156)
 - **Skill Paths:**
   - `skills/api-inventory/SKILL.md` (`reference/contract-matching.md`)
   - `skills/openapi-spec-review/SKILL.md`
@@ -25,7 +25,7 @@
 
 ## 1. Architectural Role in ParTEx
 
-`api-inventory` is sequenced first in P1 (`PARTX_SKILL_PLAN.md` §4) because every downstream
+`api-inventory` is sequenced first in P1 (`docs/skills/PLAN.md` §4) because every downstream
 API check (`authorization-testing` in S2, `auth-session-controls` in S3, `gateway-policy` in
 S5) depends on **canonical operation keys** and **declared-vs-observed surface nodes**
 (`surface_nodes` / `surface_edges` + `coverage_entries` in `PLAN.md` §7 & §12).
