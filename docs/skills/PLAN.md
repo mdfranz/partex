@@ -4,7 +4,7 @@
 > `version-disclosure`, `server-error` (#128), `js-analysis` (#69, #193), `api-inventory` (#24),
 > `openapi-spec-review` (#156), `authorization-testing` (#27), and `privacy-review` (#224);
 > shipped data-only playbooks: `regression-verify` (#187) and `graphql` (#192); staged in
-> `skills/`: `auth-session-controls` (#26)). Consolidates and supersedes
+> `skills/` (no registered check yet): `auth-session-controls` (#26)). Consolidates and supersedes
 > `WEB_API_SKILL_PRIORITIES.md` and `SOURCE_SKILL_SYNTHESIS.md` (preserved in git history at
 > 39c1028). The engine contract targeted here is `PLAN.md`: **full offensive scope**, two
 > execution modes — passive review of offline bundles and active live testing with probe →

@@ -63,13 +63,14 @@ The `version-disclosure` check probes for evidence such as:
 - `./partex.sh list` (or `./partex.sh -l`) lists saved runs from the default database along with detected host sandboxes.
 - `uv run partex show RUN_ID --format text` prints saved evidence, findings, coverage gaps, and `llm_usage`.
 - `uv run partex reports RUN_ID` lists Markdown reports saved by the agent's `save_report` tool; `uv run partex reports RUN_ID NAME` prints one report (both accept `--db PATH` and `--json`).
-- `./partex.sh --resume [RUN_ID]` opens a read-only CLAI2 chat session over a saved run (defaults to the most recent usable run if `RUN_ID` is omitted). No network traffic is sent.
+- `./partex.sh --read-only [RUN_ID]` opens a read-only CLAI2 chat session over a saved run with no network traffic (defaults to the most recent usable run if `RUN_ID` is omitted).
+- `./partex.sh --resume [RUN_ID]` continues testing: opens a new live session on the earlier run's recorded target, scope, and authorization (leaving the earlier run unchanged); `-n`, `-R`, `-k`, `-M`/`-w`/`-W`, and model flags apply as usual.
 
 ## Multi-model configuration: analyst vs. search models
 
 `partex review` and `partex test` are model-free by default. `partex chat`, `partex agent`, and the interactive `./partex.sh` launcher split LLM configuration into two independent roles:
 
-- **Analyst / reviewer model (`--model` / `-m`, plus optional `--gateway-route` / `-r`):** Drives investigation, tool calls, Monty `run_code` evidence correlation, and read-only chat. Accepts any Pydantic AI `provider:model` string or Pydantic AI Gateway route. Because runs live in `partex.db`, you can probe live with one model and later `--resume` the exact same run in read-only chat with another model or provider.
+- **Analyst / reviewer model (`--model` / `-m`, plus optional `--gateway-route` / `-r`):** Drives investigation, tool calls, Monty `run_code` evidence correlation, and read-only chat. Accepts any Pydantic AI `provider:model` string or Pydantic AI Gateway route. Because runs live in `partex.db`, you can probe live with one model, review the saved run read-only with another (`--read-only`), or continue live testing with a different model (`--resume`).
 - **Web search model (`--search-model` / `-S`):** Optional and off by default. Backs only the `web_search` tool in an isolated zero-tool agent using provider-native search, so you can give an open-weights or Gateway-routed analyst access to live public reference lookups — or omit it for zero search egress.
 
 ### Mixing analyst and search models
@@ -86,8 +87,11 @@ You can combine providers freely per session or across stages of a run:
 # Direct Gemini for both roles (or omit -S to leave web search off)
 ./partex.sh -m google:gemini-3.8-flash -S google:gemini-3.8-flash http://127.0.0.1:8765/
 
-# Switch analyst models later when reviewing the saved run in read-only chat
-./partex.sh -m anthropic:claude-sonnet-5-5 --resume
+# Switch analyst models later when reviewing a saved run in read-only chat
+./partex.sh -m anthropic:claude-sonnet-5-5 --read-only
+
+# Or continue live testing a saved run with another model and overridden limits
+./partex.sh -m anthropic:claude-sonnet-5-5 --resume RUN_ID -k -n 0
 ```
 
 ### OpenRouter
@@ -95,7 +99,7 @@ You can combine providers freely per session or across stages of a run:
 Set `OPENROUTER_API_KEY` and pass an `openrouter:` model string:
 
 ```sh
-./partex.sh -m openrouter:deepseek/deepseek-v4.1-flash-1017 --resume
+./partex.sh -m openrouter:deepseek/deepseek-v4.1-flash-1017 --read-only
 ```
 
 ### Pydantic AI Gateway (Doubleword)
@@ -103,12 +107,12 @@ Set `OPENROUTER_API_KEY` and pass an `openrouter:` model string:
 To use a model served via Pydantic AI Gateway (such as `zai-org/GLM-5.3` on the `doubleword` route), set `PYDANTIC_AI_GATEWAY_API_KEY`. If the Gateway region cannot be inferred or you need a specific endpoint, set `PYDANTIC_AI_GATEWAY_BASE_URL` to the URL from your Gateway Connect page (a trailing `/doubleword` is handled automatically):
 
 ```sh
-./partex.sh -m zai-org/GLM-5.3 -r doubleword --resume
+./partex.sh -m zai-org/GLM-5.3 -r doubleword --read-only
 ```
 
 ### Direct Google Gemini & safety settings
 
-Set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and use the `google:` prefix for the main model (`-m`) and/or native `web_search` (`-S`). No Gateway key is needed for direct `google:` strings; omit `-S` to keep web search off:
+Set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) and use the `google:` prefix for the main model (`-m`) and/or native `web_search` (`-S`). No Gateway key is needed for direct `google:` strings; omit `-S` to keep web search off (or pass `--read-only` without `-S` for chat only):
 
 ```sh
 ./partex.sh -m google:gemini-3.8-flash -S google:gemini-3.8-flash http://127.0.0.1:8765/

@@ -891,7 +891,7 @@ observability for the process (§11.1).
 ## 9. Agent and CLAI2 integration
 
 Two model surfaces, both built on the locked pydantic-ai agent stack. Interactive mode embeds
-the agent in the CLAI2 [`chat()` terminal client](pydantic-ai/src/pydantic_clai2/pydantic_clai2/app.py#L165)
+the agent in the CLAI2 `chat()` terminal client (`pydantic_clai2.chat`)
 (`chat()` is a TUI conversation API that returns `None`); `--auto` drives the agent directly
 via `agent.run()`/`agent.iter()` with `UsageLimits` inside `async with agent:`, never through
 the terminal:
