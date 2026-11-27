@@ -148,6 +148,11 @@ def _run_record(
     )
 
 
+def _text(value: object) -> str:
+    """Plain text of a status segment: Pax may return a ``StatusLink`` (``.text`` + ``.url``) instead of a string."""
+    return value if isinstance(value, str) else str(getattr(value, 'text', value))
+
+
 def _engagement(tmp_path: Path, server: Any, *, urls: list[str] | None = None, **scope_extra: Any) -> Path:
     scope_data: dict[str, Any] = {
         'hosts': ['127.0.0.1'],
@@ -805,7 +810,7 @@ async def test_live_session_targets_control_updates_on_probe_check_and_scope_imp
             (cmd,) = plugin.get_commands()
             (seg,) = plugin.get_status_segments()
             assert cmd.name == 'targets'
-            assert seg() == 'targets: 1/2 up'
+            assert _text(seg()) == 'targets: 1/2 up'
 
             initial = await _invoke(cmd, [])
             assert f'http://127.0.0.1:{port}' in initial
@@ -814,7 +819,7 @@ async def test_live_session_targets_control_updates_on_probe_check_and_scope_imp
 
             # Perform a check and stage/confirm an nmap scan mid-session.
             await session.run_check('version-disclosure')
-            assert 'finding' in seg()
+            assert 'finding' in _text(seg())
 
             scan = tmp_path / 'scan.xml'
             scan.write_text(
@@ -827,7 +832,7 @@ async def test_live_session_targets_control_updates_on_probe_check_and_scope_imp
             scope_ctrl = ScopeControl(session)
             await scope_ctrl.handle(['nmap', str(scan)])
             await scope_ctrl.handle(['confirm'])
-            assert seg().startswith('targets: 1/3 up')
+            assert _text(seg()).startswith('targets: 1/3 up')
 
             updated = await control.handle([])
             assert 'http://10.0.0.99:8080  unprobed' in updated
@@ -859,7 +864,7 @@ async def test_chat_reader_targets_control_is_read_only(tmp_store: RunStore, tmp
             plugin = TargetsPlugin.from_host(_FakeHost())  # pyright: ignore[reportArgumentType]
             assert plugin.get_capabilities() == ()
             (seg,) = plugin.get_status_segments()
-            assert seg().startswith('targets: 1/1 up, ')
+            assert _text(seg()).startswith('targets: 1/1 up, ')
             overview = await _invoke(plugin.get_commands()[0], [])
             all_runs = await _invoke(plugin.get_commands()[0], ['--all'])
             assert f'http://127.0.0.1:{port}' in overview and f'http://127.0.0.1:{port}' in all_runs

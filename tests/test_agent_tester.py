@@ -1058,8 +1058,8 @@ def test_session_context_lists_authorized_urls() -> None:
     )
     text = _authorized_urls(scope)
     assert 'http://a.test:8080/*' in text and 'http://b.test:80/*' in text
-    assert _authorized_urls(Scope(hosts=['a.test'])) == ''
-    many = Scope(hosts=['a.test'], urls=[f'http://a.test/p{i}' for i in range(25)])
+    assert _authorized_urls(Scope(hosts=['a.test'], ports=[])) == ''
+    many = Scope(hosts=['a.test'], ports=[], urls=[f'http://a.test/p{i}' for i in range(25)])
     assert '… and 5 more' in _authorized_urls(many)
 
 

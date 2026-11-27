@@ -143,6 +143,8 @@ class FakeDecisionModel(FunctionModel):
                 raise UnexpectedModelBehavior('synthetic malformed decision response')
             case 'uncalibrated' | 'answered':
                 pass
+            case _:
+                raise ValueError(f'unknown fake decision mode: {self._mode!r}')
 
         field_probs: dict[str, dict[str, float]] = {}
         if self._responder is not None:
