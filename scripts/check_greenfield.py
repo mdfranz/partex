@@ -38,7 +38,7 @@ STACK_DISTRIBUTIONS = (
     'pydantic-ai-slim',
     'pydantic-graph',
     'pydantic-ai-harness',
-    'pydantic-clai2',
+    'pydantic-ai-pax',
     'pydantic-monty',
     'pydantic-monty-client',
     'pydantic-monty-runtime',

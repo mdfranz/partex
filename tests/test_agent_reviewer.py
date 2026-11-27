@@ -1,6 +1,6 @@
 """``partex_reviewer_agent`` — read-only, run-scoped, redacted tools (issue #49, PLAN §9).
 
-Driven headlessly with a scripted ``FunctionModel``; the CLAI2 terminal itself is not started
+Driven headlessly with a scripted ``FunctionModel``; the Pax terminal itself is not started
 (PLAN §14: one manual tmux pass per release).
 """
 
@@ -257,7 +257,7 @@ async def test_saved_report_tools_frame_content(
     assert INJECTION not in str(read.content)
 
 
-async def test_run_chat_hands_clai2_the_reviewer_with_only_targets_plugin(
+async def test_run_chat_hands_pax_the_reviewer_with_only_targets_plugin(
     seeded: tuple[RunReader, str, str, HttpEvidence, HttpEvidence, Finding],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -277,7 +277,7 @@ async def test_run_chat_hands_clai2_the_reviewer_with_only_targets_plugin(
     assert call['load_plugins'] is True
     assert [plugin.id for plugin in call['builtin_plugins']] == ['partex_targets']
     assert call['store'].path == tmp_path / 'partex.db.clai2' / 'config.db'
-    # Saved CLAI2 preferences can't swap the model or fold tools into a run_code sandbox.
+    # Saved Pax preferences can't swap the model or fold tools into a run_code sandbox.
     assert (call['settings'].model, call['settings'].code_mode, call['settings'].speculative_code_mode) == (
         None,
         False,
@@ -285,7 +285,7 @@ async def test_run_chat_hands_clai2_the_reviewer_with_only_targets_plugin(
     )
     assert call['agent'].name == 'partex_reviewer_agent'
     assert call['deps'].run_id == run_id
-    # chat() ignores CLAI2's request_limit setting, so without this pydantic-ai's default of 50 applies.
+    # chat() ignores Pax's request_limit setting, so without this pydantic-ai's default of 50 applies.
     assert call['usage_limits'].request_limit == DEFAULT_REQUEST_LIMIT
     assert DEFAULT_REQUEST_LIMIT > 50
 
@@ -437,7 +437,7 @@ async def test_failed_briefing_still_opens_the_chat(
 async def test_terminal_waits_for_enter_after_the_briefing(
     seeded: tuple[RunReader, str, str, HttpEvidence, HttpEvidence, Finding], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """CLAI2 takes over the screen, so a terminal pauses on the briefing before the chat opens."""
+    """Pax takes over the screen, so a terminal pauses on the briefing before the chat opens."""
     from io import StringIO
 
     from rich.console import Console

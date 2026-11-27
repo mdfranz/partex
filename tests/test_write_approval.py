@@ -317,12 +317,12 @@ def test_only_an_explicit_approve_option_approves(response: AskUserResponse, exp
     assert decision_from(response) == expected
 
 
-# ── the terminal picker leans on CLAI2's TerminalAnswerer: a bump must not break it silently ──
+# ── the terminal picker leans on Pax's TerminalAnswerer: a bump must not break it silently ──
 
 
-def test_terminal_asker_matches_the_pinned_clai2_answerer_api() -> None:
+def test_terminal_asker_matches_the_pinned_pax_answerer_api() -> None:
     """``terminal_asker`` subclasses ``TerminalAnswerer`` and calls its private ``_ask``; check both still exist."""
-    from pydantic_clai2.builtin_plugins.ask_user_menu import (  # pyright: ignore[reportMissingTypeStubs]
+    from pydantic_ai_pax.builtin_plugins.ask_user_menu import (  # pyright: ignore[reportMissingTypeStubs]
         TerminalAnswerer,
     )
 

@@ -1,6 +1,6 @@
 """Operator-only ``/scope`` command for a live session — PLAN §4.2, §9; issues #64, #215.
 
-CLAI2 slash commands are handled by the terminal shell and never reach the model, so this is a channel
+Pax slash commands are handled by the terminal shell and never reach the model, so this is a channel
 only the operator can use. ``/scope add <host[:port]|url>`` *stages* a change and shows exactly what
 would be added; nothing takes effect until the operator types ``/scope confirm``. ``/scope nmap
 <scan.xml>`` stages a whole nmap ``-oX`` import the same way (#215) — one confirm applies the batch
@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import anyio
-from pydantic_clai2.commands import Command  # pyright: ignore[reportMissingTypeStubs]
-from pydantic_clai2.plugins import NoSettings, Plugin  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax.commands import Command  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax.plugins import NoSettings, Plugin  # pyright: ignore[reportMissingTypeStubs]
 
 from ..engine import LiveSession
 from ..errors import PartexError
@@ -210,7 +210,7 @@ class ScopeControl:
 
 
 current_control: ContextVar[ScopeControl | None] = ContextVar('partex_scope_control', default=None)
-"""Set by ``run_agent`` before the chat starts; the plugin reads it when CLAI2 loads it."""
+"""Set by ``run_agent`` before the chat starts; the plugin reads it when Pax loads it."""
 
 
 class ScopePlugin(Plugin[NoSettings]):

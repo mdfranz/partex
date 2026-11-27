@@ -1,9 +1,9 @@
-"""Operator-only ``/targets`` command and status badge as a CLAI2 plugin.
+"""Operator-only ``/targets`` command and status badge as a Pax plugin.
 
 Supports three modes:
 - live ``partex agent`` session (reads current session's store + live scope, updates status row live);
 - read-only ``partex chat`` session (reads through ``RunReader`` without writing anything);
-- standalone ``clai2`` (reads from ``TargetsPluginSettings.db`` / ``$PARTEX_DB`` / default ``partex.db``).
+- standalone ``pax`` (reads from ``TargetsPluginSettings.db`` / ``$PARTEX_DB`` / default ``partex.db``).
 
 ``get_capabilities()`` always returns ``()`` so cross-target discoveries never reach any model context.
 """
@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
-from pydantic_clai2.commands import Command  # pyright: ignore[reportMissingTypeStubs]
-from pydantic_clai2.plugins import Plugin  # pyright: ignore[reportMissingTypeStubs]
-from pydantic_clai2.ui.rendering.status import StatusSegment  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax.commands import Command  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax.plugins import Plugin  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax.ui.rendering.status import StatusSegment  # pyright: ignore[reportMissingTypeStubs]
 
 from ..engine import LiveSession
 from ..errors import PartexError
@@ -53,7 +53,7 @@ _HELP = (
 
 
 class TargetsPluginSettings(BaseModel):
-    """Optional settings for standalone CLAI2 use; empty when loaded inside partex."""
+    """Optional settings for standalone Pax use; empty when loaded inside partex."""
 
     model_config = ConfigDict(extra='forbid', frozen=True)
 
@@ -95,7 +95,7 @@ class TargetsControl:
 
     @classmethod
     def for_db(cls, db_path: Path) -> TargetsControl:
-        """Bind to a database path for standalone CLAI2 use."""
+        """Bind to a database path for standalone Pax use."""
         return cls(db_path=db_path)
 
     def _live_counts(self) -> tuple[int, int, int, list[tuple[str, str]]]:
@@ -215,7 +215,7 @@ class TargetsControl:
 
 
 current_targets: ContextVar[TargetsControl | None] = ContextVar('partex_targets_control', default=None)
-"""Set by ``run_agent`` and ``run_chat`` before the chat starts; ``None`` in standalone CLAI2."""
+"""Set by ``run_agent`` and ``run_chat`` before the chat starts; ``None`` in standalone Pax."""
 
 
 class TargetsPlugin(Plugin[TargetsPluginSettings]):

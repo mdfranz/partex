@@ -1,7 +1,10 @@
 """Default local trace log (PLAN §11.1): path resolution, JSONL span export, file mode."""
 
 import json
+import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -115,3 +118,29 @@ async def test_agent_tool_span_secret_is_scrubbed_through_real_instrumentation(t
     tool_spans = [s for s in spans if s['attributes'].get('gen_ai.tool.name') == 'probe']
     assert tool_spans
     assert all('hunter2' not in json.dumps(s['attributes']) for s in tool_spans)
+
+
+def test_suppress_unconfigured_warning_silences_noop_span_in_clean_process() -> None:
+    env = {k: v for k, v in os.environ.items() if k != 'LOGFIRE_IGNORE_NO_CONFIG'}
+    proc = subprocess.run(
+        [
+            sys.executable,
+            '-W',
+            'default',
+            '-c',
+            (
+                'import logfire\n'
+                'from partex.telemetry import suppress_unconfigured_warning\n'
+                'suppress_unconfigured_warning()\n'
+                "with logfire.span('test.noop'):\n"
+                '    pass\n'
+            ),
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert proc.returncode == 0
+    assert 'LogfireNotConfiguredWarning' not in proc.stderr

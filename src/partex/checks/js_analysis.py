@@ -25,7 +25,7 @@ from ..models import ArtifactEvidence, Evidence, FindingDraft, HttpEvidence, Sco
 from ..scope import ScopeViolation, check_url
 
 CHECK_ID = 'js-analysis'
-CHECK_VERSION = '0.2'
+CHECK_VERSION = '0.3'
 CHECK_TITLE = 'JavaScript Bundle Analysis'
 CHECK_DESCRIPTION = (
     'Analyze downloaded or captured JavaScript offline with tree-sitter for API endpoints, '
@@ -45,6 +45,8 @@ _SECRET_VALUE_RE = re.compile(
     r'ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|'
     r'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})$'
 )
+_PLAIN_URL_RE = re.compile(r'^(?:https?:)?//[^\s/@]+(?:[/?#]\S*)?$', re.IGNORECASE)
+"""An ``http(s)://host/...`` link with no ``user:pass@`` userinfo: a destination, not a credential (#274)."""
 _PLACEHOLDERS = frozenset(
     {'<redacted>', 'changeme', 'placeholder', 'example', 'your_api_key', 'todo', 'null', 'undefined', 'test', 'dummy'}
 )
@@ -179,13 +181,21 @@ def _entropy(value: str) -> float:
     return -sum(n / len(value) * math.log2(n / len(value)) for n in counts.values())
 
 
-def _looks_like_secret(value: str) -> bool:
+def _same_identifier(key: str, value: str) -> bool:
+    """Whether *value* is just *key* spelled again (``write_api_key: 'write_api_key'``), ignoring case and ``_``/``-``."""
+    return key.lower().replace('-', '_') == value.lower().replace('-', '_')
+
+
+def _looks_like_secret(value: str, key: str | None = None) -> bool:
     """Value-shape check for a secret-named key: one token (no spaces), long enough, and not a plain word.
 
-    UI strings (``'Enter your password'``), enum words (``'Bearer'``) and short labels do not qualify.
+    UI strings (``'Enter your password'``), enum words (``'Bearer'``), short labels, plain links to docs or
+    settings pages, and a key's own name used as its value (an identity map of scope labels) do not qualify (#274).
     """
     value = value.strip()
     if not 8 <= len(value) <= 512 or any(ch.isspace() for ch in value) or value.lower() in _PLACEHOLDERS:
+        return False
+    if _PLAIN_URL_RE.match(value) or (key is not None and _same_identifier(key, value)):
         return False
     has_digit = any(ch.isdigit() for ch in value)
     has_alpha = any(ch.isalpha() for ch in value)
@@ -298,7 +308,7 @@ def _analyze(source: bytes) -> JsAnalysisResult:
         # reported once, as ``token-literal``, by the string visitor below, so it is not repeated here.
         stripped = val.strip()
         kind: str | None = None
-        if _SECRET_KEY_RE.search(key) and _looks_like_secret(val):
+        if _SECRET_KEY_RE.search(key) and _looks_like_secret(val, key):
             kind = key
         elif (
             not _NON_SECRET_KEY_RE.search(key)

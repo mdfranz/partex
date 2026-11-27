@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from logfire import ScrubMatch
 
 LOG_FILE_ENV = 'PARTEX_LOG_FILE'
+LOGFIRE_ENV = 'PARTEX_LOGFIRE'
+LOGFIRE_CONTENT_ENV = 'PARTEX_LOGFIRE_CONTENT'
 LOGGED_COMMANDS = frozenset({'review', 'test', 'verify', 'chat', 'agent'})
 """Commands that log to a file by default; the read-only listing/export commands do not."""
 
@@ -147,6 +149,13 @@ def configure_telemetry(*, log_path: Path | None, remote: bool, service_version:
         scrubbing=logfire.ScrubbingOptions(callback=keep_content) if content else None,
     )
     logfire.instrument_pydantic_ai()
+
+
+def suppress_unconfigured_warning() -> None:
+    """Silence ``LogfireNotConfiguredWarning`` when telemetry is intentionally disabled."""
+    import logfire
+
+    logfire.DEFAULT_LOGFIRE_INSTANCE.config.ignore_no_config = True
 
 
 def announce(path: Path | None) -> None:

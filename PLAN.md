@@ -13,7 +13,7 @@ See [RUNTIME.md](RUNTIME.md) for execution environments, access boundaries, and 
 ## 1. Scope
 
 Build a Python package, `partex` (import name `partex`), using locked PyPI releases of the
-Pydantic AI and CLAI2 stack. Use Artex as a reference for workflow patterns — engagement
+Pydantic AI and Pax stack. Use Artex as a reference for workflow patterns — engagement
 lifecycle, evidence-linked findings, exploit verification, skill playbooks, and reporting — and
 for its skill content format. The package has no dependency on any Artex fork, service, schema,
 or runtime.
@@ -41,7 +41,7 @@ or runtime.
     drift. Live evidence commits at capture time (see §6.1), so a crash mid-run never loses
     exchanges already paid for in requests.
 - **An agent layer** over the run, built on the locked pydantic-ai agent stack: an interactive
-  operator-driven mode embedded in the CLAI2 `chat()` terminal client, and a `--auto`
+  operator-driven mode embedded in the Pax `chat()` terminal client, and a `--auto`
   autonomous loop (planner → tool calls → evidence-gated findings) that drives the same agent
   directly via `agent.run()`/`agent.iter()` — not through `chat()`, which is a TUI-only
   conversation API returning `None`. Both are confined to the engagement scope by the tool
@@ -88,7 +88,7 @@ Several initial assumptions in earlier drafts have been explicitly amended as im
 
 ### Constraints
 
-- Dependent `pydantic-*` packages (`pydantic-ai-slim`, `pydantic-ai-harness`, `pydantic-clai2`)
+- Dependent `pydantic-*` packages (`pydantic-ai-slim`, `pydantic-ai-harness`, `pydantic-ai-pax`)
   resolve from PyPI, pinned with hashes in `uv.lock` and installed with `uv sync --frozen`
   (issue #13). Given the November 2026 prebuilt-image backdoor in the Artex lineage (see
   `README.md`), the lockfile hashes and the §13.1 check are the supply-chain control, and the
@@ -116,11 +116,11 @@ Several initial assumptions in earlier drafts have been explicitly amended as im
 flowchart TD
     CLI["partex CLI — engage, review, test, verify, runs, show, summarize, checks, agent, chat"]
     Engine["Engine — load + validate, evidence registry, passive/active checks, verify runner, findings commit"]
-    Adapter["Agent adapter — Pydantic AI agent + scoped tools over CLAI2 chat(), interactive + --auto"]
+    Adapter["Agent adapter — Pydantic AI agent + scoped tools over Pax chat(), interactive + --auto"]
     Store[("RunStore — SQLite (engagements, runs, evidence, findings, verifications, tool_calls, coverage_entries, web_research) + JSON export")]
     Skills["Skill registry — skill dirs (data) + entry-point checks"]
     Target["Target client — ScopedHttpClient (scope gate, capture, rate limiting)"]
-    PydanticAI["pydantic-ai core — Agent, TestModel, FunctionModel, pydantic_clai2"]
+    PydanticAI["pydantic-ai core — Agent, TestModel, FunctionModel, pydantic_ai_pax"]
 
     CLI --> Engine
     CLI --> Adapter
@@ -141,7 +141,7 @@ Layer rules:
 | Registry | discover checks (entry points) and skills (directories), join by `check_id` | contain testing logic |
 | Target client | scope enforcement, request execution, evidence capture, rate limiting | decide what to request; bypass scope for any caller |
 | Browser harness (M7) | browser-driven capture and probing into `RunStore`; role contexts; route-interception scope gate | intercept network traffic (MITM); serve as the client for checks or verification (they stay on the scoped client) |
-| Agent adapter | agent construction, scoped tools, CLAI2 wiring, `--auto` loop | mutate run state; construct raw HTTP outside the scoped tool |
+| Agent adapter | agent construction, scoped tools, Pax wiring, `--auto` loop | mutate run state; construct raw HTTP outside the scoped tool |
 | Checks (passive) | deterministic review logic over validated evidence | I/O, network, model calls, storage access |
 | Checks (active) | probe logic expressed through the target client | construct their own HTTP stack; write storage |
 
@@ -196,7 +196,7 @@ the root where they already are:
     storage.py             # SQLite RunStore, schema v5, version gate
     export.py              # JSON export with default secret redaction
     summarize.py           # model-backed ReviewSummary generation + reference validation
-    agent_adapter/         # the only package that imports pydantic_clai2
+    agent_adapter/         # the only package that imports pydantic_ai_pax
       __init__.py          # AgentDeps, build helpers, public entry points
       tools.py             # shared run-scoped read tools, redaction + untrusted-data envelope
       reviewer.py          # partex_reviewer_agent (chat <run-id>), CodeMode wiring
@@ -233,7 +233,7 @@ or executed. `fixtures/` and `tests/` are not shipped.
 The module splits above (`errors.py`, one module per built-in check, and
 `agent_adapter/` as a package) exist so independent work items own disjoint files; the
 architectural boundaries in §2 are unchanged (`agent_adapter` is still the only importer of
-`pydantic_clai2`, `target.py` still the only engine socket-opening module, with the M7
+`pydantic_ai_pax`, `target.py` still the only engine socket-opening module, with the M7
 `browser.py` harness as the one sanctioned exception described in §2).
 
 ### 3.1 Environment and dependencies
@@ -245,7 +245,7 @@ architectural boundaries in §2 are unchanged (`agent_adapter` is still the only
 - A standalone uv project with no `[tool.uv.sources]` or `[tool.uv.overrides]`: direct dependencies
   carry minimum-version bounds (`pydantic-ai-harness[repair-tool-arguments]` for `json-repair`),
   and `pydantic-monty` with its exact-pinned client and runtime arrives transitively through
-  `pydantic-clai2` as prebuilt wheels (no Rust/Maturin build). CLAI2 requires
+  `pydantic-ai-pax` as prebuilt wheels (no Rust/Maturin build). Pax requires
   `pydantic-monty>=1.0.0,<2` even when Code Mode is disabled. Upgrading the stack is an explicit,
   reviewed `uv.lock` change (`DEPS.md` §4.1).
 - Other runtime dependencies: the target client uses **httpx2** (decided, `DEPS.md` §8.1: the
@@ -254,7 +254,7 @@ architectural boundaries in §2 are unchanged (`agent_adapter` is still the only
   verification on a pre-resolved address are security-critical; `follow_redirects=False` and
   a custom transport provide them without hand-rolling sockets/`ssl`. M0 runs the
   API-equivalence gate on that custom-transport surface (§4.2); on failure the fallback is
-  `httpx` 0.28.x (present via `pydantic-clai2` until its own httpx2 migration). No other
+  `httpx` 0.28.x (present via `pydantic-ai-pax` until its own httpx2 migration). No other
   HTTP library is introduced; anything beyond the locked set is a reviewed `uv.lock` addition. Dev dependencies: `pytest`, `anyio`, `ruff`, `pyright`,
   `inline-snapshot`, plus `coverage`/`pytest-cov` (the 100% branch target) and the
   `capfire` fixture for Logfire span assertions. The M0–M6 milestones add **no other PyPI
@@ -379,7 +379,7 @@ tool — is validated immediately before send:
    committed), it is not an error.
 
 **Operator exports (`/report`, `/secrets`, #88).** Two more operator-only slash commands live in the
-same partex CLAI2 plugin as `/scope`; the model has no tool for either. `/report [path]` writes a
+same partex Pax plugin as `/scope`; the model has no tool for either. `/report [path]` writes a
 Markdown report of the run from the redacted export payload (default
 `<db>.exports/<run_id>.report.md`). `/secrets [path]` writes the values partex redacts everywhere
 else, JavaScript secret candidates re-extracted from stored artifacts and the `secret_fields` of
@@ -428,14 +428,14 @@ like any other request header. A verification replay presents the original reque
 unless `verify --user-agent` is given. No rotation: one consistent value keeps evidence stable.
 
 **Live scope extension (operator only).** In a live `agent` session the operator can add a host
-and port with the CLAI2 slash command `/scope add <host[:port]|url>`, which only *stages* the
+and port with the Pax slash command `/scope add <host[:port]|url>`, which only *stages* the
 change and shows the exact additions (ports apply to every host in scope); `/scope confirm`
 applies it, `/scope cancel` drops it. Slash commands are handled by the terminal shell and never
 reach the model, and the model has no scope tool, so a chat message cannot widen scope. The scope
 only grows (`ScopedHttpClient.set_scope` rejects any removal, budget, or method-policy change and
 re-runs E3), each amendment is recorded on the run as a `scope_amend` tool call, and
-`runs.scope_snapshot` holds the current scope. The command is a small partex-owned CLAI2 plugin;
-the session uses a private settings store so the operator's saved and drop-in CLAI2 plugins stay
+`runs.scope_snapshot` holds the current scope. The command is a small partex-owned Pax plugin;
+the session uses a private settings store so the operator's saved and drop-in Pax plugins stay
 out (#64).
 
 **State-changing actions (operator approval, #119).** Safe HTTP methods (`GET`, `HEAD`, `OPTIONS`),
@@ -612,7 +612,7 @@ Contract rules:
   the export boundary and the model/telemetry boundary enforce redaction**: exports redact
   `secret_fields` to `<redacted>` by default (`--include-secrets` emits them and prints a
   warning), and agent/chat tools (`http_request`, `lookup_evidence`) always return redacted
-  `Evidence` so cleartext credentials never leak into LLM provider requests, CLAI2 transcripts,
+  `Evidence` so cleartext credentials never leak into LLM provider requests, Pax transcripts,
   or OpenTelemetry spans. Browser captures (M7) blanket-mark `Cookie`/`Authorization`
   headers — the browser holds sessions partex never provisioned — and mark `Set-Cookie`
   **value-only**, so cookie attributes stay visible to `session-cookie-config` and survive
@@ -888,10 +888,10 @@ findings by severity and status) and writes the full export when `--out` is give
 JSON when stdout is not a TTY. Any command may also pass `--logfire` to enable Logfire
 observability for the process (§11.1).
 
-## 9. Agent and CLAI2 integration
+## 9. Agent and Pax integration
 
 Two model surfaces, both built on the locked pydantic-ai agent stack. Interactive mode embeds
-the agent in the CLAI2 `chat()` terminal client (`pydantic_clai2.chat`)
+the agent in the Pax `chat()` terminal client (`pydantic_ai_pax.chat`)
 (`chat()` is a TUI conversation API that returns `None`); `--auto` drives the agent directly
 via `agent.run()`/`agent.iter()` with `UsageLimits` inside `async with agent:`, never through
 the terminal:
@@ -909,8 +909,12 @@ Markdown saved with `save_report`. A report handle consists of its run ID and na
 accept the current run and, when supplied, the explicit `--from` run. Results are framed as
 untrusted data and file reads are capped at 256 KiB. Live-session audit rows contain the report
 name and run for reads, along with the outcome. Standalone chat uses a read-only store.
+`save_report` refuses a report citing an `ev_`/`fn_`/`wr_` ID that does not exist in the current
+or `--from` run (nothing is written; the audit row lists the IDs), and appends an engine-written
+run record (requests and write budget spent, finding counts by severity, authorized URLs or
+host:port, exclusions) so budget and scope figures never rest on the model's estimate (#268).
 
-**Code Mode settings.** For `partex chat <run-id>`, attach `CodeMode(tools=['list_findings', 'get_finding', 'lookup_evidence'], eager=True, speculate=['list_findings', 'get_finding', 'lookup_evidence'] if speculate else None, mount=None, os_access=None)` directly on `partex_reviewer_agent` and keep CLAI2's `run.code_mode` and `run.speculative_code_mode` off (so CLAI2's `WorkspaceCodeMode` does not mount the host working directory and its `SpeculativeExecution` allowlist does not filter out `partex`'s tools). Keep speculation off by default and evaluate it as a reviewer opt-in. Headless `agent.run()` and `agent.iter()` use the capabilities supplied to the agent. See [RUNTIME.md](RUNTIME.md).
+**Code Mode settings.** For `partex chat <run-id>`, attach `CodeMode(tools=['list_findings', 'get_finding', 'lookup_evidence'], eager=True, speculate=['list_findings', 'get_finding', 'lookup_evidence'] if speculate else None, mount=None, os_access=None)` directly on `partex_reviewer_agent` and keep Pax's `run.code_mode` and `run.speculative_code_mode` off (so Pax's `WorkspaceCodeMode` does not mount the host working directory and its `SpeculativeExecution` allowlist does not filter out `partex`'s tools). Keep speculation off by default and evaluate it as a reviewer opt-in. Headless `agent.run()` and `agent.iter()` use the capabilities supplied to the agent. See [RUNTIME.md](RUNTIME.md).
 
 **`agent <engagement>` — operator in the loop or `--auto`**: an agent with tools over the live
 engagement. `agent` runs the **same deterministic pipeline as `test`** first — baseline capture
@@ -994,8 +998,9 @@ def build_agent(model: Model | str, skills: Sequence[Capability],
 
 Design rules:
 
-- **Role-based model routing & provider resilience (`models_config.py`)**: `--model` (and optional role overrides `--search-model`, plus future `--planner-model`, `--verifier-model`, `--summarizer-model`, `--judge-model` and CLAI2-style `PROVIDER[@PROFILE]:MODEL` or comma-separated fallback chains) resolve in `models_config.py`. Per-call metrics (tokens, cache hits, latency) are recorded on spans; `runs` keeps aggregate totals (`model_calls`, `input_tokens`, `output_tokens`; §7).
+- **Role-based model routing & provider resilience (`models_config.py`)**: `--model` (and optional role overrides `--search-model`, `--decision-model` / `-D`, plus future `--planner-model`, `--verifier-model`, `--summarizer-model`, `--judge-model` and Pax-style `PROVIDER[@PROFILE]:MODEL` or comma-separated fallback chains) resolve in `models_config.py`. Per-call metrics (tokens, cache hits, latency) are recorded on spans; `runs` keeps aggregate totals (`model_calls`, `input_tokens`, `output_tokens`; §7) across roles while auxiliary roles (`search`, `decision`, `judge`) never set or overwrite `runs.model`.
 - **Optional native-only web search (`search` role, `#111`)**: `partex agent --search-model MODEL` enables a `web_search(query)` tool on `partex_tester_agent` backed by an isolated one-shot `partex_search_agent` with `WebSearch(local=None)` and zero function tools, deps, DB, target-client, or file access. Only direct native-search providers (`anthropic:`, `google:`, `google-cloud:` via ADC, and `openai:` / `openai-responses:` on the Responses API, `#144`) are accepted — never `gateway/...`, bare gateway-route names, or local search fallbacks (preserving the `target.py`-only host-socket boundary). Queries are whitespace-collapsed, capped at 200 chars, limited to 20 per session (with Anthropic also passing `max_uses`; Google and OpenAI take no `max_uses`, so the session cap is their only bound), and rejected if they contain a registered capture secret, an `ev_`/`fn_` ID, or a URL with credentials or query strings. Refusals are audited without echoing secrets; successful calls audit query, provider/auth mode, source URLs, and `truncated` flag (never result bodies), count search tokens toward the run's token totals, emit a `partex.web_search` span, and return length-capped results (answer at most 4,000 chars; at most 20 sources in first-seen order, with `sources_total` recorded when more were found, `#146`) framed in `<partex_untrusted_data kind="web_search">`. Successful results are also persisted in `web_research` (§7, #113) and readable later through `list_research` / `lookup_research`. Off unless `--search-model` is set.
+- **Optional single-pass decision model (`decision` role, `#256`)**: `partex agent --decision-model MODEL` (`-D` / `PARTEX_DECISION_MODEL`, off by default) configures an isolated `DecisionRunner` (`agent_adapter/decide.py`) backed by a calibrated single-pass `DecisionModel` (`google-decisions:` via `GOOGLE_API_KEY`/`GEMINI_API_KEY` or `openai-decisions:` via `OPENAI_API_KEY`; extensible for local System One backends) or degraded uncalibrated `anthropic:` (`ANTHROPIC_API_KEY`, `NativeOutput`, `calibrated=False`, `top_p=None`). Turning `-D` on enables no feature by itself (each consumer has its own switch). Gateway routes and bare names are rejected at startup because Pydantic AI Gateway proxies generative endpoints rather than dedicated `/decisions` endpoints; `google-cloud-decisions:` (no Vertex ADC backend) and `PARTEX_GOOGLE_SAFETY_SETTINGS` (no `safetySettings` on Decisions) are likewise excluded. Calls run in a zero-tool, zero-deps one-shot `Agent` with per-call timeouts, a session call cap, positive-predicate validation (`assert_positive_predicate`), metadata-only spans (`InstrumentationSettings(include_content=False)` by default, `#238`), and one shared redaction + `<partex_untrusted_data>` excerpt helper (`frame_decision_excerpt`). `DecisionResult` preserves the full `probs` distribution, `calibrated` flag, latency, and typed `outcome` (`answered | handoff | refused | timeout | error`), maps `DecisionHandOff` / `ContentFilterError` / timeouts / API errors to non-raising "no answer", requires explicit `allow_uncalibrated=True` opt-in for uncalibrated providers, and never fakes `p=1.0` for uncalibrated fallbacks. **Egress:** sends bounded, secret-redacted evidence excerpts (the same data class the analyst already sees) to one additional configured provider. Usage records under `LlmRole` `'decision'` and never overwrites `runs.model` (even before the analyst's first turn); post-run/passive callers do not write usage onto finalized passive `runs`.
 - **No plugins**: `load_plugins=False`; no coding tools, no filesystem access, no network
   except the scoped `http_request` tool.
 - **Explicit agent metadata, caching, and lifecycle**: every `Agent` (`partex_tester_agent`,
@@ -1048,8 +1053,8 @@ Design rules:
   The model sees only the compact capability catalog initially and calls the framework-managed
   `load_capability` tool when a playbook is relevant. No tool reads arbitrary files from disk.
 - **Terminal behavior**: Esc cancels the current turn; failed/cancelled turns retain history
-  (CLAI2 semantics); committed findings are unaffected by construction.
-- The agent adapter module is the only file that imports `pydantic_clai2`. Tests drive both
+  (Pax semantics); committed findings are unaffected by construction.
+- The agent adapter module is the only file that imports `pydantic_ai_pax`. Tests drive both
   surfaces with `TestModel` / `FunctionModel` via `agent.override()` and
   `Console(file=StringIO())`, plus one manual tmux pass per release (§14).
 
@@ -1323,10 +1328,19 @@ cross-run IDs via `ToolFailed`; cancellation mid-turn keeps findings readable an
 history; summary timeout is retryable. All with `TestModel`/`FunctionModel` via
 `agent.override()` and `capture_run_messages()`; real model calls blocked globally.
 
-Verify through embedded CLAI2 that the reviewer receives Code Mode with only its three read
+Verify through embedded Pax that the reviewer receives Code Mode with only its three read
 tools, no mounts, and fresh state per review invocation. Exercise cancellation and resource
 limits on stored fixture evidence. Compare direct calls, eager Code Mode, and opt-in
 speculation as specified in [RUNTIME.md](RUNTIME.md).
+
+For the optional decision-model role (`#256`), verify hermetically with `FakeDecisionModel`:
+credential-free startup failure on disallowed prefixes/missing keys, non-raising `DecisionResult`
+across `DecisionHandOff`/`ContentFilterError`/timeout/API error, uncalibrated fallback refusal
+without faking `p=1.0`, `runs` usage recording under role `'decision'` without overwriting
+`runs.model` (including before the analyst's first turn), and metadata-only spans by default.
+An opt-in eval suite (`fixtures/decisions/cases.json` + `scripts/eval_decisions.py`, never run in
+CI) measures accuracy, Brier score, refusal rate, and adversarial prompt-injection spoofing rate
+per provider.
 
 ### 13.6 Browser capture harness (M7)
 
@@ -1369,7 +1383,7 @@ client-issued ones.
 - **Priority**: integration over unit — full `run_review`/`run_test` calls with test models,
   real SQLite on tmp paths, real cancel scopes, the real fixture app.
 - **Terminal**: headless in CI (`Console(file=StringIO())`); interactive behavior (Esc,
-  prompt, transcript) verified manually in tmux before each release, per the CLAI2 project's
+  prompt, transcript) verified manually in tmux before each release, per the Pax project's
   own testing rule.
 
 ## 15. Milestones
@@ -1409,7 +1423,7 @@ No §13 experiment is recorded as passed here until its gate has evidence.
 |---|---|
 | The tool is used outside authorized engagements | Hard gates: attestation + `--authorized` required before any traffic; scope enforced in the one module that opens sockets (plus the harness route hook, M7); README and `engage init` template make the authorization requirement unmissable. (This deters accidents and casual misuse, not a determined operator — same posture as the original Artex skills' standing rules.) |
 | Scope bypass (redirect, DNS rebinding, URL parsing edge) | No automatic redirects; pinned per-run resolution; canonicalization tested with hostile URL fixtures; 13.4 asserts nothing reaches the wire on violation |
-| CLAI2 `chat()` is an API that moves between releases | Adapter is one module + one integration test; stack is lockfile-pinned; seam exercised by 13.4/13.5 rather than assumed |
+| Pax `chat()` is an API that moves between releases | Adapter is one module + one integration test; stack is lockfile-pinned; seam exercised by 13.4/13.5 rather than assumed |
 | Terminal tests flaky in CI | Headless-only in CI; interactive checks are manual tmux gates |
 | Live mode's non-determinism hides regressions | Passive mode keeps byte-determinism; live findings always carry evidence + replay recipe; `verify` re-tests reproducibility on demand |
 | Secrets leak through exports, logs, telemetry, or prompts | Secret marking at capture; redaction by default on both exports and model-facing tool returns (`http_request`, `lookup_evidence`); no `logfire.instrument_httpx()` on `target.py`; summarizer sees findings only; chat/agent evidence framing; 13.4 tests redaction across export and tool returns |
@@ -1450,7 +1464,7 @@ No §13 experiment is recorded as passed here until its gate has evidence.
    exposed read-only to `partex agent --bundle`.
 6. **Chat annotation**: should `chat` gain append-only operator notes (never findings
    mutation), needing a notes table and a read-only-plus-notes store handle?
-7. **CLAI2 session reuse**: should the run record store the agent/chat `session_id` so
+7. **Pax session reuse**: should the run record store the agent/chat `session_id` so
    re-invocation resumes the conversation?
 8. **Post-M6 skill port**: the `graphql` (#192) and `regression-verify` (#187) data-only
    playbooks have shipped, and `authorization-testing` is live with its check (#27). Remaining:

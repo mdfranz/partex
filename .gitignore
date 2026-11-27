@@ -53,3 +53,7 @@ htmlcov/
 *.db.exports/
 *.db.reports/
 *.clai2/
+
+# Nmap stuff
+nmap*.xml
+partex*.xml

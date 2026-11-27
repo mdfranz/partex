@@ -6,6 +6,7 @@ import pytest
 from pydantic_ai.models.openai import OpenAIChatModel
 
 from partex.models_config import (
+    DECISION_MODEL_ENV,
     GATEWAY_BASE_URL_ENV,
     GOOGLE_SAFETY_CATEGORIES,
     GOOGLE_SAFETY_ENV,
@@ -13,6 +14,7 @@ from partex.models_config import (
     google_safety_summary,
     normalize_gateway_base_url,
     parse_google_safety_settings,
+    resolve_decision_model,
     resolve_google_safety_settings,
     resolve_model,
 )
@@ -179,3 +181,78 @@ def test_safety_summary_says_mixed_thresholds_without_a_single_note() -> None:
     settings = resolve_google_safety_settings('google:gemini-x', env={GOOGLE_SAFETY_ENV: raw})
     summary = google_safety_summary(settings)
     assert summary is not None and 'BLOCK_NONE / BLOCK_ONLY_HIGH' in summary
+
+
+# ── Decision-model resolution (issue #256) ────────────────────────────────────
+
+
+def test_resolve_decision_model_accepts_google_and_openai_decisions() -> None:
+    goog = resolve_decision_model('google-decisions:gemini-decision-1', env={'GOOGLE_API_KEY': 'AIza-secret-val'})
+    assert goog.provider == 'google-decisions'
+    assert goog.model_name == 'gemini-decision-1'
+    assert goog.calibrated is True
+    assert 'AIza-secret-val' not in goog.startup_summary()
+
+    goog_gemini = resolve_decision_model('google-decisions:gemini-decision-1', env={'GEMINI_API_KEY': 'AIza-gemini'})
+    assert goog_gemini.spec == 'google-decisions:gemini-decision-1'
+
+    oai = resolve_decision_model('openai-decisions:gpt-6-luna', env={'OPENAI_API_KEY': 'sk-secret-val'})
+    assert oai.provider == 'openai-decisions'
+    assert oai.model_name == 'gpt-6-luna'
+    assert oai.calibrated is True
+    assert 'sk-secret-val' not in oai.startup_summary()
+
+    anth = resolve_decision_model('anthropic:claude-haiku-5-5', env={'ANTHROPIC_API_KEY': 'ant-secret-val'})
+    assert anth.provider == 'anthropic'
+    assert anth.model_name == 'claude-haiku-5-5'
+    assert anth.calibrated is False
+    assert 'uncalibrated' in anth.startup_summary()
+    assert 'ant-secret-val' not in anth.startup_summary()
+    assert DECISION_MODEL_ENV == 'PARTEX_DECISION_MODEL'
+
+
+@pytest.mark.parametrize(
+    ('spec', 'fragment'),
+    [
+        ('', 'empty'),
+        ('   ', 'empty'),
+        ('gemini-decision-1', 'gateway'),
+        ('gateway/google:gemini-decision-1', 'Gateway'),
+        ('gateway/openai-decisions:gpt-6-luna', 'Gateway'),
+        ('google-cloud-decisions:gemini-decision-1', 'Vertex AI ADC'),
+        ('google:gemini-3.8-flash', 'not supported'),
+        ('openai:gpt-6-sol', 'not supported'),
+        ('google-decisions:', 'missing a model name'),
+        ('openai-decisions:   ', 'missing a model name'),
+        ('anthropic:', 'missing a model name'),
+    ],
+)
+def test_resolve_decision_model_rejects_disallowed_specs(spec: str, fragment: str) -> None:
+    env = {'GOOGLE_API_KEY': 'AIza-k', 'OPENAI_API_KEY': 'sk-k', 'ANTHROPIC_API_KEY': 'ant-k'}
+    with pytest.raises(ModelConfigError, match=fragment) as excinfo:
+        resolve_decision_model(spec, env=env)
+    assert excinfo.value.rule_code == 'model-config'
+    for secret in env.values():
+        assert secret not in str(excinfo.value)
+
+
+def test_resolve_decision_model_missing_credentials_never_echoes_secrets() -> None:
+    with pytest.raises(ModelConfigError, match='GOOGLE_API_KEY') as exc_g:
+        resolve_decision_model(
+            'google-decisions:gemini-decision-1', env={'GOOGLE_API_KEY': '  ', 'OPENAI_API_KEY': 'sk-unrelated'}
+        )
+    assert 'sk-unrelated' not in str(exc_g.value)
+
+    with pytest.raises(ModelConfigError, match='OPENAI_API_KEY') as exc_o:
+        resolve_decision_model('openai-decisions:gpt-6-luna', env={'OPENAI_API_KEY': ''})
+    assert exc_o.value.rule_code == 'model-config'
+
+    with pytest.raises(ModelConfigError, match='ANTHROPIC_API_KEY') as exc_a:
+        resolve_decision_model('anthropic:claude-haiku-5-5', env={'ANTHROPIC_API_KEY': ' '})
+    assert exc_a.value.rule_code == 'model-config'
+
+
+def test_google_safety_settings_do_not_apply_to_google_decisions() -> None:
+    assert resolve_google_safety_settings('google-decisions:gemini-decision-1', env={}) is None
+    with pytest.raises(ModelConfigError, match='google:/google-cloud:'):
+        resolve_google_safety_settings('google-decisions:gemini-decision-1', env={GOOGLE_SAFETY_ENV: 'off'})

@@ -95,6 +95,28 @@ def test_absolute_path_in_error_body_is_a_finding() -> None:
     assert len(drafts) == 1
 
 
+def test_default_page_mentioning_paths_is_not_an_error_page() -> None:
+    """#267: a 200 stock Apache/Ubuntu index names /var/www/html as documentation, not a leak."""
+    body = (
+        '<title>Apache2 Ubuntu Default Page: It works</title> ... replace this file (located at '
+        '/var/www/html/index.html) ... configuration in /etc/apache2/'
+    )
+    assert version_disclosure_check._drafts_for(exchange(status=200, body=body)) == []
+
+
+def test_stack_markers_on_2xx_are_not_an_error_page() -> None:
+    """Skill §2 flags 4xx/5xx error bodies only."""
+    assert version_disclosure_check._drafts_for(exchange(status=200, body='Fatal error: /var/www/app died')) == []
+
+
+def test_verify_match_error_page_needs_an_error_status() -> None:
+    original = exchange('/x', status=404, body='Traceback (most recent call last): boom')
+    draft = version_disclosure_check._drafts_for(original)[0]
+    finding = Finding(id='fn_test', status='reported', **draft.model_dump())
+    served_as_200 = exchange('/x', status=200, body='Traceback (most recent call last): boom')
+    assert version_disclosure_check.verify_match(finding, original, served_as_200) is False
+
+
 # ── The probe flow ────────────────────────────────────────────────────────────
 
 

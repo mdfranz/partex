@@ -8,10 +8,10 @@ version = "0.1.0"
 description = "Offline web application security evidence review"
 requires-python = ">=3.14"
 dependencies = [
-    "logfire>=5.6",  # cli.py --logfire (§11.1); already locked via pydantic-clai2, now declared since partex imports it
-    "pydantic-ai-slim[google]>=2.68",
+    "logfire>=5.6",  # cli.py --logfire (§11.1); already locked via pydantic-ai-pax, now declared since partex imports it
+    "pydantic-ai-slim[google]>=2.75",
     "pydantic-ai-harness[repair-tool-arguments]>=0.68",
-    "pydantic-clai2>=0.68",
+    "pydantic-ai-pax>=0.76",
     "pyyaml>=6",  # registry.py skill frontmatter (already locked transitively)
     "referencing>=0.37.0",  # openapi_resolver.py $ref resolution (already locked via mcp)
     "tree-sitter>=0.26.1",
@@ -39,7 +39,7 @@ version-disclosure = "partex.checks.version_disclosure:version_disclosure_check"
 # releases (#107). Each exempt package is listed by name; do not widen this to a global override.
 [tool.uv]
 exclude-newer = "2 days"
-exclude-newer-package = { pydantic-ai-slim = false, pydantic-graph = false, pydantic-ai-harness = false, pydantic-clai2 = false, pydantic-ai-pax = false, pydantic-monty = false, pydantic-monty-client = false, pydantic-monty-runtime = false }
+exclude-newer-package = { pydantic-ai-slim = false, pydantic-graph = false, pydantic-ai-harness = false, pydantic-ai-pax = false, pydantic-monty = false, pydantic-monty-client = false, pydantic-monty-runtime = false }
 
 [dependency-groups]
 dev = ["anyio", "inline-snapshot", "pyright", "pytest", "pytest-cov", "ruff"]

@@ -36,11 +36,17 @@ from .registry import build_registry
 from .report import gather_report_payload, render_report_text
 from .sandboxes import detect_sandboxes, sandboxes_as_dicts
 from .storage import RunReader, RunRecord, RunStore, list_reports, read_report
-from .telemetry import LOG_FILE_ENV, announce, configure_telemetry, resolve_log_path
+from .telemetry import (
+    LOG_FILE_ENV,
+    LOGFIRE_CONTENT_ENV,
+    LOGFIRE_ENV,
+    announce,
+    configure_telemetry,
+    resolve_log_path,
+    suppress_unconfigured_warning,
+)
 
 DB_ENV = 'PARTEX_DB'
-LOGFIRE_ENV = 'PARTEX_LOGFIRE'
-LOGFIRE_CONTENT_ENV = 'PARTEX_LOGFIRE_CONTENT'
 SKILL_DIR_ARGS: dict[str, Any] = {
     'action': 'append',
     'default': [],
@@ -337,7 +343,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.set_defaults(handler=_cmd_verify)
 
     chat = subparsers.add_parser(
-        'chat', parents=[with_db], help='read-only review chat over a saved run (CLAI2 terminal)'
+        'chat', parents=[with_db], help='read-only review chat over a saved run (Pax terminal)'
     )
     chat.add_argument('run_id', help='run id (run_…)')
     chat.add_argument(
@@ -361,7 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent = subparsers.add_parser(
         'agent',
         parents=[with_db],
-        help='live session: direct further probes from the CLAI2 terminal (requires --authorized)',
+        help='live session: direct further probes from the Pax terminal (requires --authorized)',
     )
     agent.add_argument('engagement', help='engagement directory or engagement.json path')
     agent.add_argument('--authorized', action='store_true', help='required: attests authorization to test')
@@ -379,6 +385,13 @@ def build_parser() -> argparse.ArgumentParser:
         '--search-model',
         default=None,
         help='optional separate model for web_search (anthropic:, google:, google-cloud:, or openai:<name>)',
+    )
+    agent.add_argument(
+        '-D',
+        '--decision-model',
+        default=None,
+        help='optional decision model for closed-set judgements (google-decisions:<name>, '
+        'openai-decisions:<name>, or uncalibrated anthropic:<name>; or set PARTEX_DECISION_MODEL). Off by default',
     )
     agent.add_argument(
         '--checks',
@@ -875,7 +888,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
 def _cmd_agent(args: argparse.Namespace) -> int:
     from .agent_adapter import run_agent
-    from .models_config import resolve_model, resolve_search_model
+    from .models_config import DECISION_MODEL_ENV, resolve_decision_model, resolve_model, resolve_search_model
 
     if args.recursive and args.urls_file is None:
         print('partex: usage: --recursive requires --urls-file', file=sys.stderr)
@@ -891,6 +904,12 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         anyio.run(check_from)  # unknown store or run: exit 1 before a model, a run row, or a socket
     model = resolve_model(args.model, gateway_route=args.gateway_route)
     search_model = resolve_search_model(args.search_model) if args.search_model is not None else None
+    raw_decision = (
+        args.decision_model
+        if args.decision_model is not None
+        else (os.environ.get(DECISION_MODEL_ENV) or '').strip() or None
+    )
+    decision_model = resolve_decision_model(raw_decision) if raw_decision is not None else None
     bundle = Path(args.bundle) if args.bundle is not None else None
     run_id = anyio.run(
         partial(
@@ -911,6 +930,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             briefing=not args.no_briefing,
             skills=_session_skills(args),
             search_model=search_model,
+            decision_model=decision_model,
             thinking=args.thinking,
             **_request_limit_kwargs(args),
         )
@@ -982,6 +1002,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if args.command in {'chat', 'agent'}:
                 announce(log_path)
+        else:
+            suppress_unconfigured_warning()
         return handler(args)
     except CheckSelectionError as exc:
         print(f'partex: {exc.rule_code}: {exc}', file=sys.stderr)

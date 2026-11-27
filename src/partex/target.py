@@ -67,6 +67,7 @@ from partex.models import (
     get_header,
 )
 from partex.scope import check_url, normalize_host, parse_scoped_url, validate_scope
+from partex.telemetry import suppress_unconfigured_warning
 
 type Resolver = Callable[[str], str]
 
@@ -409,6 +410,7 @@ class ScopedHttpClient:
     def _request_span(self, request: httpx2.Request) -> Generator[logfire.LogfireSpan]:
         """Record only request metadata, before the transport substitutes the pinned address."""
         path = urlsplit(str(request.url)).path or '/'
+        suppress_unconfigured_warning()
         with ExitStack() as stack:
             span = stack.enter_context(
                 logfire.span(

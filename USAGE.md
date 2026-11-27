@@ -63,15 +63,16 @@ The `version-disclosure` check probes for evidence such as:
 - `./partex.sh list` (or `./partex.sh -l`) lists saved runs from the default database along with detected host sandboxes.
 - `uv run partex show RUN_ID --format text` prints saved evidence, findings, coverage gaps, and `llm_usage`.
 - `uv run partex reports RUN_ID` lists Markdown reports saved by the agent's `save_report` tool; `uv run partex reports RUN_ID NAME` prints one report (both accept `--db PATH` and `--json`).
-- `./partex.sh --read-only [RUN_ID]` opens a read-only CLAI2 chat session over a saved run with no network traffic (defaults to the most recent usable run if `RUN_ID` is omitted).
+- `./partex.sh --read-only [RUN_ID]` opens a read-only Pax chat session over a saved run with no network traffic (defaults to the most recent usable run if `RUN_ID` is omitted).
 - `./partex.sh --resume [RUN_ID]` continues testing: opens a new live session on the earlier run's recorded target, scope, and authorization (leaving the earlier run unchanged); `-n`, `-R`, `-k`, `-M`/`-w`/`-W`, and model flags apply as usual.
 
-## Multi-model configuration: analyst vs. search models
+## Multi-model configuration: analyst, search, and decision models
 
-`partex review` and `partex test` are model-free by default. `partex chat`, `partex agent`, and the interactive `./partex.sh` launcher split LLM configuration into two independent roles:
+`partex review` and `partex test` are model-free by default. `partex chat`, `partex agent`, and the interactive `./partex.sh` launcher split LLM configuration into up to three independent roles:
 
 - **Analyst / reviewer model (`--model` / `-m`, plus optional `--gateway-route` / `-r`):** Drives investigation, tool calls, Monty `run_code` evidence correlation, and read-only chat. Accepts any Pydantic AI `provider:model` string or Pydantic AI Gateway route. Because runs live in `partex.db`, you can probe live with one model, review the saved run read-only with another (`--read-only`), or continue live testing with a different model (`--resume`).
 - **Web search model (`--search-model` / `-S`):** Optional and off by default. Backs only the `web_search` tool in an isolated zero-tool agent using provider-native search, so you can give an open-weights or Gateway-routed analyst access to live public reference lookups — or omit it for zero search egress.
+- **Decision model (`--decision-model` / `-D` / `PARTEX_DECISION_MODEL`):** Optional and off by default. Backs closed-set single-pass judgements (`google-decisions:gemini-decision-1` or `openai-decisions:gpt-6-luna` returning calibrated probabilities with zero output tokens, or degraded uncalibrated `anthropic:claude-haiku-5-5` via `NativeOutput` with `calibrated=False`, `top_p=None`). Turning `-D` on enables no feature by itself (individual features have their own switches).
 
 ### Mixing analyst and search models
 
@@ -136,6 +137,22 @@ Web search is off unless `--search-model` (or `-S` in `partex.sh`, or `PARTEX_SE
 - **Startup validation:** Fails fast at startup on bare model names, `gateway/...` prefixes, `openai-chat:`, or missing credentials/Vertex ADC (without echoing credential or token contents).
 - **Outbound query & budget guardrails:** Search queries leave this machine directly to the provider and never pass through Pydantic AI Gateway. Before a query is sent, `validate_search_query` enforces a 200-character limit and blocks URLs, internal `ev_`/`fn_` IDs, and known engagement secrets. Sessions are capped at 20 `web_search` calls and 20 sources per query (recording `sources_total` if trimmed); results return framed as untrusted data and persist in `web_research`.
 
+### Optional decision model (`--decision-model` / `-D`)
+
+Closed-set decision scoring is off unless `--decision-model` (or `-D` in `partex.sh`, or `PARTEX_DECISION_MODEL`) is set. Each call runs in an isolated zero-tool `DecisionRunner` with per-call timeout and session call caps:
+
+- **Supported providers (never Gateway):**
+  - `google-decisions:<model>` (e.g. `google-decisions:gemini-decision-1`, requires `GOOGLE_API_KEY` or `GEMINI_API_KEY`).
+  - `openai-decisions:<model>` (e.g. `openai-decisions:gpt-6-luna`, requires `OPENAI_API_KEY`).
+  - `anthropic:<model>` (e.g. `anthropic:claude-haiku-5-5`, requires `ANTHROPIC_API_KEY`) — degraded uncalibrated option using `NativeOutput` (`calibrated=False`, `top_p=None`; never fakes `p=1.0`, and callers must explicitly opt into uncalibrated responses with `allow_uncalibrated=True`).
+- **Excluded paths:** `gateway/...` and bare names are rejected because Pydantic AI Gateway proxies generative endpoints rather than dedicated `/decisions` endpoints. `google-cloud-decisions:` (Vertex ADC is not supported by Gemini Decisions) and `PARTEX_GOOGLE_SAFETY_SETTINGS` (no `safetySettings` field on Decisions) are rejected at startup.
+- **Egress & privacy:** Decision calls send bounded, secret-redacted evidence excerpts framed in `<partex_untrusted_data>` directly to the configured provider — the same data class the analyst (`-m`) already sees, sent to one additional provider. Local spans record metadata only by default (`--logfire-content` is required to include prompt/answer content).
+- **Security eval harness (opt-in, never in CI):** Benchmark a provider on the bundled security + adversarial spoofing fixture (`fixtures/decisions/cases.json`) with:
+
+```sh
+uv run python scripts/eval_decisions.py -D google-decisions:gemini-decision-1 --ab-unsure --check-order-invariance
+```
+
 ## Target scoping: URL lists & `nmap` imports
 
 Every live run enforces scope in code inside `ScopedHttpClient` (`src/partex/target.py`) rather than via prompts.
@@ -155,7 +172,18 @@ Restrict a session to exact URLs listed in a file (one per line, `#` comments, t
 
 ### Importing `nmap -oX` scans (`-N` / `partex nmap`)
 
-Import authorized HTTP(S) targets directly from `nmap -oX` XML scan output:
+Generate the scan XML with TCP service detection (`-sV`) and XML output (`-oX`):
+
+```sh
+nmap -sV -oX scan.xml <targets>
+```
+
+(Add `-p <ports>` or `-p-` to scan non-default ports, `-sT` if unprivileged or `-sS` with privileges, and `-Pn` if targets block host-discovery probes. `-n` is fine unless you plan to pass `--use-hostnames` to `partex nmap`.)
+
+- **Why `-sV` matters:** `partex` imports open TCP ports (`protocol="tcp"`, `state="open"`) on up hosts whose `<service>` name is `http`, `https`, `http-alt`, `https-alt`, or `http-proxy`, promoting HTTP services with `tunnel="ssl"` to `https://` while skipping non-HTTP TLS services (such as `ajp13` or `xmpp`). Without `-sV`, non-standard ports are not probed for HTTP or TLS, and ports with no service name only fall back to `{80: http, 443: https}`.
+- **File requirements:** UTF-8 nmap XML (`<nmaprun>` root, ≤ 64 MiB); entity declarations and external DTDs are refused.
+
+Import the scan directly into a live session:
 
 ```sh
 ./partex.sh -N scan.xml
@@ -165,13 +193,15 @@ Import authorized HTTP(S) targets directly from `nmap -oX` XML scan output:
 - The session opens with one initial `GET` per imported target, captured as evidence and shown live on a terminal; `partex.sh` automatically raises `--max-requests` when the import needs room.
 - `<target-url>` is optional with `-N`, and `-N` can be combined with `-u` (or passed via `PARTEX_NMAP_FILE`).
 
-To inspect or edit the converted target list before starting a session, run the standalone converter:
+To inspect or edit the converted target list before starting a session (or combine a fast TCP discovery sweep with a targeted `-sV` pass), run the standalone converter:
 
 ```sh
 uv run partex nmap scan.xml [--use-hostnames] [--out targets.txt]
+# or multiple passes together:
+uv run partex nmap sweep.xml sv.xml --out targets.txt
 ```
 
-`partex nmap` accepts multiple scan files (for example, a discovery sweep plus a `-sV` pass), writes `# source:` lines recording each scan file and its SHA-256 hash, and defaults to scanned IPs (pass `--use-hostnames` to use scan PTR hostnames instead).
+`partex nmap` unions entries across multiple scan files in first-seen order, writes `# source:` lines recording each scan file and its SHA-256 hash, and defaults to scanned IPv4/IPv6 addresses (pass `--use-hostnames` to use scan PTR hostnames instead).
 
 ## Budgets, write policy, turn limits, thinking & telemetry
 
@@ -189,13 +219,13 @@ uv run partex nmap scan.xml [--use-hostnames] [--out targets.txt]
 
 ## Interactive operator commands & agent tools
 
-### Operator-only slash commands (CLAI2 plugins)
+### Operator-only slash commands (Pax plugins)
 
-Slash commands are intercepted by the CLAI2 terminal host and never exposed to the model:
+Slash commands are intercepted by the Pax terminal host and never exposed to the model:
 
 | Command | Availability | What it does |
 | --- | --- | --- |
-| `/targets [host \| --all \| --findings]` | `agent`, `chat`, standalone CLAI2 | Deterministic, secret-redacted rollup of discovered targets, paths, banners, findings, and coverage gaps across the current run or saved runs. Usable standalone in CLAI2 via `partex.agent_adapter.targets_plugin:TargetsPlugin`. |
+| `/targets [host \| --all \| --findings]` | `agent`, `chat`, standalone Pax | Deterministic, secret-redacted rollup of discovered targets, paths, banners, findings, and coverage gaps across the current run or saved runs. Usable standalone in Pax via `partex.agent_adapter.targets_plugin:TargetsPlugin`. |
 | `/scope` | `agent` | Shows the current scope and engagement limits. |
 | `/scope add <host[:port]\|url>` | `agent` | Stages a scope extension (and announces `-k` insecure TLS status if active); takes effect only after `/scope confirm`. |
 | `/scope nmap <scan.xml>` | `agent` | Stages an `nmap -oX` import batch; `/scope confirm` applies it atomically and records the scan path and SHA-256 hash. |
@@ -223,8 +253,8 @@ Run `uv run partex --help` or `uv run partex <command> --help` for full options:
 | `partex review <bundle>` | Offline, model-free | Run deterministic passive checks (`--checks` or `--all`) over an offline bundle |
 | `partex test <engagement>` | Live, model-free | Run baseline/active/passive checks against an authorized target (`--authorized` required) |
 | `partex verify <run-id> <finding-id>` | Live, model-free | Replay a finding's verification recipe to test reproducibility (`--authorized` required) |
-| `partex agent <engagement>` | Live, interactive TUI | Open a scoped CLAI2 live testing session (`--authorized` and `--model` required) |
-| `partex chat <run-id>` | Offline, interactive TUI | Open a read-only CLAI2 reviewer over a saved run (`--model` required) |
+| `partex agent <engagement>` | Live, interactive TUI | Open a scoped Pax live testing session (`--authorized` and `--model` required) |
+| `partex chat <run-id>` | Offline, interactive TUI | Open a read-only Pax reviewer over a saved run (`--model` required) |
 | `partex runs` | Offline | List runs stored in the database (`--json` supported) |
 | `partex show <run-id>` | Offline | Export or display a saved run (`--format text\|json`, `--include-secrets`, `--out`) |
 | `partex report` | Offline | Cross-run rollup of findings, model spend, and tool calls |
