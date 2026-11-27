@@ -384,8 +384,8 @@ def build_parser() -> argparse.ArgumentParser:
         '-D',
         '--decision-model',
         default=None,
-        help='optional decision model for closed-set judgements (google-decisions:<name> or '
-        'openai-decisions:<name>; or set PARTEX_DECISION_MODEL). Off by default',
+        help='optional decision model for closed-set judgements (google-decisions:<name>, '
+        'openai-decisions:<name>, or uncalibrated anthropic:<name>; or set PARTEX_DECISION_MODEL). Off by default',
     )
     agent.add_argument(
         '--checks',

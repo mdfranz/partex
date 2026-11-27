@@ -201,6 +201,13 @@ def test_resolve_decision_model_accepts_google_and_openai_decisions() -> None:
     assert oai.model_name == 'gpt-6-luna'
     assert oai.calibrated is True
     assert 'sk-secret-val' not in oai.startup_summary()
+
+    anth = resolve_decision_model('anthropic:claude-haiku-5-5', env={'ANTHROPIC_API_KEY': 'ant-secret-val'})
+    assert anth.provider == 'anthropic'
+    assert anth.model_name == 'claude-haiku-5-5'
+    assert anth.calibrated is False
+    assert 'uncalibrated' in anth.startup_summary()
+    assert 'ant-secret-val' not in anth.startup_summary()
     assert DECISION_MODEL_ENV == 'PARTEX_DECISION_MODEL'
 
 
@@ -213,11 +220,11 @@ def test_resolve_decision_model_accepts_google_and_openai_decisions() -> None:
         ('gateway/google:gemini-decision-1', 'Gateway'),
         ('gateway/openai-decisions:gpt-6-luna', 'Gateway'),
         ('google-cloud-decisions:gemini-decision-1', 'Vertex AI ADC'),
-        ('anthropic:claude-sonnet-5-5', 'ModelFallback'),
         ('google:gemini-3.8-flash', 'not supported'),
         ('openai:gpt-6-sol', 'not supported'),
         ('google-decisions:', 'missing a model name'),
         ('openai-decisions:   ', 'missing a model name'),
+        ('anthropic:', 'missing a model name'),
     ],
 )
 def test_resolve_decision_model_rejects_disallowed_specs(spec: str, fragment: str) -> None:
@@ -239,6 +246,10 @@ def test_resolve_decision_model_missing_credentials_never_echoes_secrets() -> No
     with pytest.raises(ModelConfigError, match='OPENAI_API_KEY') as exc_o:
         resolve_decision_model('openai-decisions:gpt-6-luna', env={'OPENAI_API_KEY': ''})
     assert exc_o.value.rule_code == 'model-config'
+
+    with pytest.raises(ModelConfigError, match='ANTHROPIC_API_KEY') as exc_a:
+        resolve_decision_model('anthropic:claude-haiku-5-5', env={'ANTHROPIC_API_KEY': ' '})
+    assert exc_a.value.rule_code == 'model-config'
 
 
 def test_google_safety_settings_do_not_apply_to_google_decisions() -> None:

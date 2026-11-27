@@ -264,6 +264,7 @@ async def evaluate_cases(
             question=spec.question,
             options=spec.options,
             context=context,
+            allow_uncalibrated=not runner.config.calibrated,
         )
         outcomes.append(_to_outcome(case, result))
     return outcomes
@@ -300,6 +301,7 @@ def _pct(value: float | None) -> str:
 
 def _render_report(report: dict[str, Any]) -> str:
     base = report['baseline']
+    brier_str = 'n/a (uncalibrated)' if base['brier_score'] is None else str(base['brier_score'])
     lines = [
         f'model: {report["model"]}  cases: {base["total"]}  answered: {base["answered"]}',
         (
@@ -307,19 +309,22 @@ def _render_report(report: dict[str, Any]) -> str:
             f'adversarial: {_pct(base["adversarial_accuracy"])}  spoofing: {_pct(base["spoofing_rate"])}'
         ),
         (
-            f'brier: {base["brier_score"]}  refusal: {_pct(base["refusal_rate"])}  '
+            f'brier: {brier_str}  refusal: {_pct(base["refusal_rate"])}  '
             f'handoff: {_pct(base["handoff_rate"])}  timeout: {_pct(base["timeout_rate"])}  error: {_pct(base["error_rate"])}'
         ),
         f'latency p50/p95 (ms): {base["latency_p50_ms"]} / {base["latency_p95_ms"]}',
-        'threshold sweep:',
     ]
-    for row in base['threshold_sweep']:
-        acc = _pct(row['selective_accuracy'])
-        spoof = _pct(row['spoofing_rate_among_accepted'])
-        lines.append(
-            f'  T={row["threshold"]:.2f}  coverage={row["coverage"]:.1%} ({row["accepted"]}/{base["total"]})  '
-            f'acc={acc}  adv_spoof={spoof}'
-        )
+    if base['brier_score'] is None:
+        lines.append('threshold sweep: n/a (uncalibrated model — no probabilities)')
+    else:
+        lines.append('threshold sweep:')
+        for row in base['threshold_sweep']:
+            acc = _pct(row['selective_accuracy'])
+            spoof = _pct(row['spoofing_rate_among_accepted'])
+            lines.append(
+                f'  T={row["threshold"]:.2f}  coverage={row["coverage"]:.1%} ({row["accepted"]}/{base["total"]})  '
+                f'acc={acc}  adv_spoof={spoof}'
+            )
     if 'ab_unsure' in report:
         unsure = report['ab_unsure']
         unsure_picked = sum(1 for item in report['ab_unsure_outcomes'] if item['top_label'] == UNSURE_LABEL)
@@ -369,7 +374,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         '-D',
         '--decision-model',
         required=True,
-        help='decision model spec (google-decisions:<name> or openai-decisions:<name>)',
+        help='decision model spec (google-decisions:<name>, openai-decisions:<name>, or anthropic:<name>)',
     )
     parser.add_argument('--fixture', type=Path, default=DEFAULT_FIXTURE, help='labelled cases JSON path')
     parser.add_argument('--ab-unsure', action='store_true', help='A/B test explicit unsure choice vs thresholding')

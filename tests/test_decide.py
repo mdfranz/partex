@@ -10,17 +10,20 @@ from typing import Any
 import anyio
 import anyio.lowlevel
 import pytest
+from anthropic import AsyncAnthropic
 from google.genai import Client as GenAIClient
 from openai import AsyncOpenAI
 from plugins.decision import NO_ANSWER_FAILURE_MODES, FakeDecisionMode, FakeDecisionModel
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
+from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.decision import ChoiceQuestion, DecisionRequest
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.google import GoogleModel
 from pydantic_ai.models.google_decisions import GoogleDecisionsModel
 from pydantic_ai.models.openai_decisions import OpenAIDecisionsModel
 from pydantic_ai.models.wrapper import WrapperModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.usage import RequestUsage
@@ -251,10 +254,56 @@ def test_decision_models_subclass_model_and_wrap_in_wrapper_model() -> None:
         'gpt-6-luna',
         provider=OpenAIProvider(openai_client=AsyncOpenAI(api_key='test-only')),
     )
+    anthropic_model = AnthropicModel(
+        'claude-haiku-5-5',
+        provider=AnthropicProvider(anthropic_client=AsyncAnthropic(api_key='test-only')),
+    )
     assert isinstance(google_model, Model)
     assert isinstance(openai_model, Model)
+    assert isinstance(anthropic_model, Model)
     assert isinstance(WrapperModel(google_model), Model)
     assert isinstance(WrapperModel(openai_model), Model)
+    assert isinstance(WrapperModel(anthropic_model), Model)
+
+
+async def test_anthropic_native_output_is_uncalibrated_and_requires_opt_in(
+    decision_runner_factory: Callable[..., DecisionRunner],
+) -> None:
+    fake = FakeDecisionModel(probs={'safe': 0.2, 'destructive': 0.8})
+    runner = decision_runner_factory(
+        fake,
+        spec='anthropic:claude-haiku-5-5',
+        provider='anthropic',
+        calibrated=False,
+    )
+    rejected = await runner.choose(
+        question='Which risk level applies to this pending write?',
+        options={'safe': 'Read-only operation', 'destructive': 'Deletes data'},
+        context=frame_decision_excerpt('pending_write', 'DELETE /api/users/42'),
+    )
+    assert rejected.outcome == 'error'
+    assert rejected.calibrated is False
+    assert rejected.top_p is None
+    assert rejected.probs == {}
+    assert rejected.answered() is False
+
+    opted_in = await runner.choose(
+        question='Which risk level applies to this pending write?',
+        options={'safe': 'Read-only operation', 'destructive': 'Deletes data'},
+        context=frame_decision_excerpt('pending_write', 'DELETE /api/users/42'),
+        allow_uncalibrated=True,
+    )
+    assert opted_in.outcome == 'answered'
+    assert opted_in.top_label == 'destructive'
+    assert opted_in.calibrated is False
+    assert opted_in.top_p is None
+    assert opted_in.probs == {}
+    assert opted_in.answered() is True
+    assert opted_in.answered(min_p=0.5) is False
+    instr = fake.recorded_calls[-1].instructions or ''
+    assert DECISION_UNTRUSTED_INSTRUCTIONS in instr
+    assert 'Which risk level applies to this pending write?' in instr
+    assert 'Deletes data' in instr
 
 
 async def test_decision_usage_recorded_before_analyst_never_sets_runs_model(

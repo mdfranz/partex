@@ -24,7 +24,7 @@ from typing import Annotated, Any, Literal, cast
 import anyio
 import logfire
 from pydantic import BaseModel, ConfigDict, Field, create_model
-from pydantic_ai import Agent
+from pydantic_ai import Agent, NativeOutput
 from pydantic_ai.exceptions import AgentRunError, ContentFilterError, ModelAPIError, UnexpectedModelBehavior, UserError
 from pydantic_ai.framing import wrap
 from pydantic_ai.messages import ModelMessage, ModelResponse
@@ -304,6 +304,20 @@ def _extract_results(
     return results
 
 
+def _uncalibrated_instructions(questions: Mapping[str, ChoiceSpec]) -> str:
+    """Append explicit questions and option meanings for generative ``NativeOutput`` models."""
+    lines = [
+        DECISION_UNTRUSTED_INSTRUCTIONS,
+        '',
+        'Questions to answer (pick one exact option label per field):',
+    ]
+    for name, spec in questions.items():
+        lines.append(f'- {name}: {spec.question}')
+        for label, desc in spec.options.items():
+            lines.append(f'  - {label!r}: {desc}')
+    return '\n'.join(lines)
+
+
 @dataclass(slots=True)
 class DecisionRunner:
     """Session-scoped isolated runner for closed-set decision questions (#256)."""
@@ -315,14 +329,20 @@ class DecisionRunner:
     include_content_in_spans: bool = False
     calls_used: int = 0
 
-    def _build_agent(self, output_model: type[BaseModel]) -> Agent[None, BaseModel]:
+    def _build_agent(
+        self, output_model: type[BaseModel], questions: Mapping[str, ChoiceSpec]
+    ) -> Agent[None, BaseModel]:
+        output_spec: Any = output_model if self.config.calibrated else NativeOutput(output_model)
+        instructions = (
+            DECISION_UNTRUSTED_INSTRUCTIONS if self.config.calibrated else _uncalibrated_instructions(questions)
+        )
         agent = cast(
             'Agent[None, BaseModel]',
             Agent(
                 self.model,
                 name='partex_decision_agent',
-                output_type=output_model,
-                instructions=DECISION_UNTRUSTED_INSTRUCTIONS,
+                output_type=output_spec,
+                instructions=instructions,
                 tools=(),
                 defer_model_check=True,
             ),
@@ -384,7 +404,7 @@ class DecisionRunner:
             )
 
         output_model = _build_output_model(questions)
-        agent = self._build_agent(output_model)
+        agent = self._build_agent(output_model, questions)
         self.calls_used += 1
         start = time.perf_counter()
 

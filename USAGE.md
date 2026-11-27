@@ -72,7 +72,7 @@ The `version-disclosure` check probes for evidence such as:
 
 - **Analyst / reviewer model (`--model` / `-m`, plus optional `--gateway-route` / `-r`):** Drives investigation, tool calls, Monty `run_code` evidence correlation, and read-only chat. Accepts any Pydantic AI `provider:model` string or Pydantic AI Gateway route. Because runs live in `partex.db`, you can probe live with one model, review the saved run read-only with another (`--read-only`), or continue live testing with a different model (`--resume`).
 - **Web search model (`--search-model` / `-S`):** Optional and off by default. Backs only the `web_search` tool in an isolated zero-tool agent using provider-native search, so you can give an open-weights or Gateway-routed analyst access to live public reference lookups — or omit it for zero search egress.
-- **Decision model (`--decision-model` / `-D` / `PARTEX_DECISION_MODEL`):** Optional and off by default. Backs closed-set single-pass judgements (`google-decisions:gemini-decision-1` or `openai-decisions:gpt-6-luna`) returning calibrated probabilities in one prefill pass with zero output tokens. Turning `-D` on enables no feature by itself (individual features have their own switches).
+- **Decision model (`--decision-model` / `-D` / `PARTEX_DECISION_MODEL`):** Optional and off by default. Backs closed-set single-pass judgements (`google-decisions:gemini-decision-1` or `openai-decisions:gpt-6-luna` returning calibrated probabilities with zero output tokens, or degraded uncalibrated `anthropic:claude-haiku-5-5` via `NativeOutput` with `calibrated=False`, `top_p=None`). Turning `-D` on enables no feature by itself (individual features have their own switches).
 
 ### Mixing analyst and search models
 
@@ -144,7 +144,8 @@ Closed-set decision scoring is off unless `--decision-model` (or `-D` in `partex
 - **Supported providers (never Gateway):**
   - `google-decisions:<model>` (e.g. `google-decisions:gemini-decision-1`, requires `GOOGLE_API_KEY` or `GEMINI_API_KEY`).
   - `openai-decisions:<model>` (e.g. `openai-decisions:gpt-6-luna`, requires `OPENAI_API_KEY`).
-- **Excluded paths:** `gateway/...` and bare names are rejected because Pydantic AI Gateway proxies generative endpoints rather than dedicated `/decisions` endpoints. `google-cloud-decisions:` (Vertex ADC is not supported by Gemini Decisions), `PARTEX_GOOGLE_SAFETY_SETTINGS` (no `safetySettings` field on Decisions), and standalone `anthropic:` (no calibrated probabilities) are rejected at startup.
+  - `anthropic:<model>` (e.g. `anthropic:claude-haiku-5-5`, requires `ANTHROPIC_API_KEY`) — degraded uncalibrated option using `NativeOutput` (`calibrated=False`, `top_p=None`; never fakes `p=1.0`, and callers must explicitly opt into uncalibrated responses with `allow_uncalibrated=True`).
+- **Excluded paths:** `gateway/...` and bare names are rejected because Pydantic AI Gateway proxies generative endpoints rather than dedicated `/decisions` endpoints. `google-cloud-decisions:` (Vertex ADC is not supported by Gemini Decisions) and `PARTEX_GOOGLE_SAFETY_SETTINGS` (no `safetySettings` field on Decisions) are rejected at startup.
 - **Egress & privacy:** Decision calls send bounded, secret-redacted evidence excerpts framed in `<partex_untrusted_data>` directly to the configured provider — the same data class the analyst (`-m`) already sees, sent to one additional provider. Local spans record metadata only by default (`--logfire-content` is required to include prompt/answer content).
 - **Security eval harness (opt-in, never in CI):** Benchmark a provider on the bundled security + adversarial spoofing fixture (`fixtures/decisions/cases.json`) with:
 

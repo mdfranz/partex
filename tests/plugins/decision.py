@@ -5,6 +5,7 @@ Registered through ``pytest_plugins`` in ``tests/conftest.py``. Subclasses
 ``UsageRecordingModel`` or ``InstrumentedModel``) with zero network or API calls.
 """
 
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -12,7 +13,7 @@ from typing import Any, Literal
 import anyio
 import pytest
 from pydantic_ai.exceptions import ContentFilterError, ModelAPIError, UnexpectedModelBehavior
-from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, UserPromptPart
 from pydantic_ai.models.decision import UnfillableRoute, UnsureRoute
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.usage import RequestUsage
@@ -65,9 +66,13 @@ def _extract_prompt_text(messages: list[ModelMessage]) -> str:
 
 
 def _options_by_field(info: AgentInfo) -> dict[str, list[str]]:
-    if not info.output_tools:
+    schema: dict[str, Any] | None = None
+    if info.output_tools:
+        schema = info.output_tools[0].parameters_json_schema
+    elif info.model_request_parameters.output_object is not None:
+        schema = info.model_request_parameters.output_object.json_schema
+    if schema is None:
         return {}
-    schema = info.output_tools[0].parameters_json_schema
     properties: dict[str, Any] = schema.get('properties', {})
     out: dict[str, list[str]] = {}
     for field_name, prop in properties.items():
@@ -155,6 +160,13 @@ class FakeDecisionModel(FunctionModel):
                     field_probs[field_name] = dist
 
         args = {field_name: max(dist, key=lambda key: dist[key]) for field_name, dist in field_probs.items() if dist}
+        if not info.output_tools and info.model_request_parameters.output_object is not None:
+            return ModelResponse(
+                parts=[TextPart(json.dumps(args))],
+                model_name=self.model_name,
+                provider_details=None,
+                usage=RequestUsage(input_tokens=self._input_tokens, output_tokens=5),
+            )
         tool_name = info.output_tools[0].name if info.output_tools else 'final_result'
         details = None if self._mode == 'uncalibrated' else {'probabilities': field_probs}
         return ModelResponse(
@@ -183,19 +195,21 @@ def decision_runner_factory() -> Callable[..., DecisionRunner]:
         model: FakeDecisionModel | None = None,
         *,
         spec: str = 'google-decisions:fake-decision-1',
-        provider: Literal['google-decisions', 'openai-decisions'] = 'google-decisions',
+        provider: Literal['google-decisions', 'openai-decisions', 'anthropic'] = 'google-decisions',
+        calibrated: bool | None = None,
         timeout_seconds: float = 1.0,
         max_calls: int = 20,
         include_content_in_spans: bool = False,
     ) -> DecisionRunner:
         active_model = model or FakeDecisionModel()
+        is_calibrated = (provider != 'anthropic') if calibrated is None else calibrated
         config = DecisionModelConfig(
             spec=spec,
             provider=provider,
             model_name=spec.split(':', 1)[1],
             auth_mode='api_key',
             model=active_model,
-            calibrated=True,
+            calibrated=is_calibrated,
         )
         return DecisionRunner(
             config=config,

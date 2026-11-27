@@ -16,8 +16,9 @@
 #                            leave this machine and never go through the Gateway.
 #   -D, --decision-model NAME
 #                            optional decision model for closed-set judgements [PARTEX_DECISION_MODEL]:
-#                            google-decisions:<name> or openai-decisions:<name>; off unless set. Bounded redacted
-#                            excerpts leave this machine directly to the provider (never Gateway).
+#                            google-decisions:<name>, openai-decisions:<name>, or degraded uncalibrated
+#                            anthropic:<name>; off unless set. Bounded redacted excerpts leave this
+#                            machine directly to the provider (never Gateway).
 #                            Gemini safety filters: partex disables the provider's configurable content filters by
 #                            default for google:/google-cloud: models (#218) — authorized testing carries exploit and
 #                            payload evidence they flag. Set PARTEX_GOOGLE_SAFETY_SETTINGS to change that: a preset
