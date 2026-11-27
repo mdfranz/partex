@@ -9,8 +9,9 @@ description = "Offline web application security evidence review"
 requires-python = ">=3.14"
 dependencies = [
     "logfire>=5.6",  # cli.py --logfire (§11.1); already locked via pydantic-clai2, now declared since partex imports it
-    "pydantic-ai-slim[google]>=2.68",
+    "pydantic-ai-slim[google]>=2.75",
     "pydantic-ai-harness[repair-tool-arguments]>=0.68",
+    "pydantic-ai-pax>=0.76",
     "pydantic-clai2>=0.68",
     "pyyaml>=6",  # registry.py skill frontmatter (already locked transitively)
     "referencing>=0.37.0",  # openapi_resolver.py $ref resolution (already locked via mcp)

@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
-from pydantic_clai2.commands import Command  # pyright: ignore[reportMissingTypeStubs]
-from pydantic_clai2.plugins import Plugin  # pyright: ignore[reportMissingTypeStubs]
-from pydantic_clai2.ui.rendering.status import StatusSegment  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax.commands import Command  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax.plugins import Plugin  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax.ui.rendering.status import StatusSegment  # pyright: ignore[reportMissingTypeStubs]
 
 from ..engine import LiveSession
 from ..errors import PartexError

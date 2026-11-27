@@ -11,6 +11,12 @@
 native web search (``anthropic:``, ``google:``, ``google-cloud:``, or ``openai:``). Search never goes through
 the Pydantic AI Gateway and fails fast at startup if the prefix or credentials/ADC are invalid.
 
+``resolve_decision_model`` resolves the optional ``--decision-model`` / ``-D`` role (#256) to a
+provider with a calibrated single-pass Decisions endpoint (``google-decisions:`` or
+``openai-decisions:``). Gateway routes, bare names, ``google-cloud-decisions:`` (no Vertex ADC
+endpoint in pydantic-ai), and standalone generative ``anthropic:`` (uncalibrated) are rejected at
+startup; missing credentials fail fast without echoing any secret.
+
 Credentials stay in the environment: pydantic-ai reads ``PYDANTIC_AI_GATEWAY_API_KEY``,
 ``PYDANTIC_AI_GATEWAY_BASE_URL``, ``ANTHROPIC_API_KEY``, ``GOOGLE_API_KEY`` / ``GEMINI_API_KEY``,
 ``OPENAI_API_KEY``, and Google ADC itself, and nothing here logs or stores them.
@@ -79,9 +85,18 @@ SEARCH_MODEL_PREFIXES: tuple[SearchProvider, ...] = ('anthropic', 'google', 'goo
 OPENAI_RESPONSES_ALIAS = 'openai-responses'
 """Also accepted for ``openai``; both resolve to the Responses API, the only OpenAI API with a full ``web_search`` tool."""
 
+DECISION_MODEL_ENV = 'PARTEX_DECISION_MODEL'
+"""Environment variable overriding ``--decision-model`` / ``-D`` (#256)."""
+
+type DecisionProvider = Literal['google-decisions', 'openai-decisions']
+type DecisionAuthMode = Literal['api_key']
+
+DECISION_MODEL_PREFIXES: tuple[DecisionProvider, ...] = ('google-decisions', 'openai-decisions')
+"""Providers accepted by ``--decision-model`` (calibrated single-pass Decisions endpoints, never Gateway)."""
+
 
 class ModelConfigError(PartexError):
-    """``--model`` / ``--gateway-route`` / ``--search-model`` cannot be resolved (rule code ``model-config``)."""
+    """``--model`` / ``--gateway-route`` / ``--search-model`` / ``--decision-model`` cannot be resolved (rule code ``model-config``)."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message, rule_code='model-config')
@@ -289,11 +304,118 @@ def resolve_search_model(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class DecisionModelConfig:
+    """Validated ``--decision-model`` configuration ready for :class:`~partex.agent_adapter.decide.DecisionRunner` (#256)."""
+
+    spec: str
+    provider: DecisionProvider
+    model_name: str
+    auth_mode: DecisionAuthMode
+    model: Model | str
+    calibrated: bool = True
+
+    def startup_summary(self) -> str:
+        """Operator-facing startup line (model and auth mode only — never credentials)."""
+        return f'{self.spec} (auth: {self.auth_mode}; bounded redacted excerpts leave this machine)'
+
+
+def _resolve_decision_provider(
+    provider: DecisionProvider,
+    model_name: str,
+    normalized: str,
+    environ: Mapping[str, str],
+) -> DecisionModelConfig:
+    """Validate credentials for one decision provider and return its config.
+
+    Kept as a dedicated dispatch helper so local decision backends (such as ``system-one:`` or
+    Ollama-backed System One endpoints) can be added here without changing the caller contract.
+    """
+    match provider:
+        case 'google-decisions':
+            if not ((environ.get('GOOGLE_API_KEY') or '').strip() or (environ.get('GEMINI_API_KEY') or '').strip()):
+                raise ModelConfigError(
+                    f'GOOGLE_API_KEY (or GEMINI_API_KEY) is required for --decision-model {normalized!r}'
+                )
+            return DecisionModelConfig(
+                spec=normalized,
+                provider='google-decisions',
+                model_name=model_name,
+                auth_mode='api_key',
+                model=normalized,
+                calibrated=True,
+            )
+        case 'openai-decisions':
+            if not (environ.get('OPENAI_API_KEY') or '').strip():
+                raise ModelConfigError(f'OPENAI_API_KEY is required for --decision-model {normalized!r}')
+            return DecisionModelConfig(
+                spec=normalized,
+                provider='openai-decisions',
+                model_name=model_name,
+                auth_mode='api_key',
+                model=normalized,
+                calibrated=True,
+            )
+
+
+def resolve_decision_model(model: str, *, env: Mapping[str, str] | None = None) -> DecisionModelConfig:
+    """Validate and resolve ``--decision-model`` / ``-D`` (``google-decisions:``, ``openai-decisions:``).
+
+    Rejects bare names and ``gateway/...`` explicitly: Pydantic AI Gateway proxies generative
+    chat/responses endpoints rather than dedicated provider ``/decisions`` endpoints, and decision
+    calls must bind directly to a verified calibrated Decisions endpoint instead of silently
+    downgrading to generative text output.
+
+    Also rejects ``google-cloud-decisions:`` (no Vertex ADC backend exists for Gemini Decisions in
+    ``pydantic-ai``; use ``google-decisions:`` with ``GOOGLE_API_KEY`` or ``GEMINI_API_KEY``) and
+    standalone ``anthropic:`` (generative model without calibrated probabilities; reserved for
+    future ``ModelFallback`` targets only). Error messages never include credential values.
+    """
+    accepted = ', '.join(f'{prefix}:<model>' for prefix in DECISION_MODEL_PREFIXES)
+    spec = model.strip()
+    if not spec:
+        raise ModelConfigError(f'--decision-model is empty; accepted prefixes: {accepted}')
+    if spec.startswith('gateway/') or ':' not in spec:
+        raise ModelConfigError(
+            f'--decision-model {spec!r} is not supported (gateway models and bare names are rejected: '
+            'Pydantic AI Gateway proxies generative endpoints rather than calibrated /decisions endpoints); '
+            f'accepted prefixes: {accepted}'
+        )
+    raw_prefix, _, raw_name = spec.partition(':')
+    model_name = raw_name.strip()
+    if raw_prefix == 'google-cloud-decisions':
+        raise ModelConfigError(
+            "--decision-model 'google-cloud-decisions:' is not supported: Vertex AI ADC is not supported "
+            f'for the Gemini Decisions API; use google-decisions:<model> with GOOGLE_API_KEY or GEMINI_API_KEY. '
+            f'Accepted prefixes: {accepted}'
+        )
+    if raw_prefix == 'anthropic':
+        raise ModelConfigError(
+            "--decision-model 'anthropic:' is not supported as a standalone decision model (generative "
+            'models do not provide calibrated probabilities and are reserved for ModelFallback targets); '
+            f'accepted prefixes: {accepted}'
+        )
+    if raw_prefix not in DECISION_MODEL_PREFIXES:
+        raise ModelConfigError(
+            f'--decision-model provider {raw_prefix!r} is not supported; accepted prefixes: {accepted}'
+        )
+    if not model_name:
+        raise ModelConfigError(f'--decision-model {spec!r} is missing a model name after {raw_prefix!r}:')
+
+    environ = os.environ if env is None else env
+    normalized = f'{raw_prefix}:{model_name}'
+    return _resolve_decision_provider(raw_prefix, model_name, normalized, environ)
+
+
 # ── Gemini configurable content filters (issue #218) ───────────────────────────
 
 
 def _is_google_model(model: Model | str) -> bool:
-    """Whether *model* is a Gemini request path: a ``google:``/``google-cloud:`` spec or a GoogleModel."""
+    """Whether *model* is a generative Gemini request path: ``google:``/``google-cloud:`` or ``GoogleModel``.
+
+    ``google-decisions:`` / ``GoogleDecisionsModel`` is intentionally excluded: the Gemini Decisions
+    endpoint accepts only ``{model, input, questions}`` with no ``safetySettings`` parameter (#256).
+    """
     if isinstance(model, str):
         return model.split(':', 1)[0] in ('google', 'google-cloud')
     from pydantic_ai.models.google import GoogleModel

@@ -322,7 +322,7 @@ def test_only_an_explicit_approve_option_approves(response: AskUserResponse, exp
 
 def test_terminal_asker_matches_the_pinned_clai2_answerer_api() -> None:
     """``terminal_asker`` subclasses ``TerminalAnswerer`` and calls its private ``_ask``; check both still exist."""
-    from pydantic_clai2.builtin_plugins.ask_user_menu import (  # pyright: ignore[reportMissingTypeStubs]
+    from pydantic_ai_pax.builtin_plugins.ask_user_menu import (  # pyright: ignore[reportMissingTypeStubs]
         TerminalAnswerer,
     )
 

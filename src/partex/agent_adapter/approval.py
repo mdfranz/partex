@@ -157,7 +157,7 @@ def terminal_asker(host: Any) -> Asker:
     inline picker and terminal hand-off as ``ask_user``. ``pydantic-clai2`` is locked in ``uv.lock``;
     ``tests/test_write_approval.py`` fails loudly if a bump changes the API this relies on.
     """
-    from pydantic_clai2.builtin_plugins.ask_user_menu import TerminalAnswerer  # pyright: ignore[reportMissingTypeStubs]
+    from pydantic_ai_pax.builtin_plugins.ask_user_menu import TerminalAnswerer  # pyright: ignore[reportMissingTypeStubs]
 
     class _WriteAnswerer(TerminalAnswerer):  # pyright: ignore[reportUntypedBaseClass]
         async def ask_write(self, action: WriteAction) -> AskUserResponse:

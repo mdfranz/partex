@@ -39,6 +39,16 @@ citations). On OpenAI it uses the Responses API and asks for each search's sourc
 current run's directory is mounted, so earlier runs' files (possibly from other targets) stay invisible. Wrapped calls still write their `tool_calls` audit rows. CLAI2's
 `run.code_mode` stays off and `coder` stays unloaded. State is fresh per session.
 
+**Decision model (`--decision-model` / `-D`, #256).** Optional and off by default (`google-decisions:`
+or `openai-decisions:`, never Gateway or Vertex ADC). Each decision call runs in a stateless,
+one-shot `partex_decision_agent` (`DecisionRunner` in `agent_adapter/decide.py`) with zero tools,
+deps, DB handles, target-client access, or filesystem mounts. Inputs are bounded, secret-redacted,
+and framed in `<partex_untrusted_data>` via `frame_decision_excerpt` alongside explicit
+untrusted-data instructions. Calls enforce per-call timeouts and a session cap, return a typed
+`DecisionResult` (`answered | handoff | refused | timeout | error`) without raising on failure,
+emit metadata-only spans by default (`include_content=False`, #238), and carry the same egress
+class as the analyst (bounded redacted evidence excerpts sent to the configured provider).
+
 Start with fresh sandbox state for each review invocation. State may live across turns within
 that invocation and is discarded on exit, including when conversation history is retained.
 Enforce time, memory, output, and tool-call limits. Cancel pending work when a turn is

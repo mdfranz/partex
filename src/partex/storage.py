@@ -51,7 +51,7 @@ DEFAULT_BUSY_TIMEOUT_MS = 5000
 type RunState = Literal['created', 'invalid', 'checks_complete', 'checks_failed', 'complete']
 type InputKind = Literal['bundle', 'engagement']
 type FindingStatus = Literal['reported', 'verified', 'verification_failed']
-type LlmRole = Literal['tester', 'verifier', 'summarizer', 'reviewer', 'judge', 'search']
+type LlmRole = Literal['tester', 'verifier', 'summarizer', 'reviewer', 'judge', 'search', 'decision']
 
 # Run states only move forward (§6). ``checks_complete -> complete`` is reserved for M4 summarization.
 _TRANSITIONS: dict[str, frozenset[str]] = {

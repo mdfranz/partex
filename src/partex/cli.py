@@ -381,6 +381,13 @@ def build_parser() -> argparse.ArgumentParser:
         help='optional separate model for web_search (anthropic:, google:, google-cloud:, or openai:<name>)',
     )
     agent.add_argument(
+        '-D',
+        '--decision-model',
+        default=None,
+        help='optional decision model for closed-set judgements (google-decisions:<name> or '
+        'openai-decisions:<name>; or set PARTEX_DECISION_MODEL). Off by default',
+    )
+    agent.add_argument(
         '--checks',
         default=','.join(engine.DEFAULT_AGENT_CHECKS),
         help='checks run before the chat opens (comma-separated; default: %(default)s). The passive discovery '
@@ -875,7 +882,7 @@ def _cmd_chat(args: argparse.Namespace) -> int:
 
 def _cmd_agent(args: argparse.Namespace) -> int:
     from .agent_adapter import run_agent
-    from .models_config import resolve_model, resolve_search_model
+    from .models_config import DECISION_MODEL_ENV, resolve_decision_model, resolve_model, resolve_search_model
 
     if args.recursive and args.urls_file is None:
         print('partex: usage: --recursive requires --urls-file', file=sys.stderr)
@@ -891,6 +898,12 @@ def _cmd_agent(args: argparse.Namespace) -> int:
         anyio.run(check_from)  # unknown store or run: exit 1 before a model, a run row, or a socket
     model = resolve_model(args.model, gateway_route=args.gateway_route)
     search_model = resolve_search_model(args.search_model) if args.search_model is not None else None
+    raw_decision = (
+        args.decision_model
+        if args.decision_model is not None
+        else (os.environ.get(DECISION_MODEL_ENV) or '').strip() or None
+    )
+    decision_model = resolve_decision_model(raw_decision) if raw_decision is not None else None
     bundle = Path(args.bundle) if args.bundle is not None else None
     run_id = anyio.run(
         partial(
@@ -911,6 +924,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             briefing=not args.no_briefing,
             skills=_session_skills(args),
             search_model=search_model,
+            decision_model=decision_model,
             thinking=args.thinking,
             **_request_limit_kwargs(args),
         )

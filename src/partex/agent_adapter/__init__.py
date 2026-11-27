@@ -20,19 +20,25 @@ from pydantic_ai.usage import UsageLimits
 
 # Imported at module level, before any tool frames text: CLAI2 registers its own framing tags at
 # import time, and a tag registered after escaping has started changes how earlier text renders.
-from pydantic_clai2 import chat  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
-from pydantic_clai2.config import PluginSettings, Settings  # pyright: ignore[reportMissingTypeStubs]
-from pydantic_clai2.config.settings_store import SettingsStore  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax import chat  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
+from pydantic_ai_pax.config import PluginSettings, Settings  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax.config.settings_store import SettingsStore  # pyright: ignore[reportMissingTypeStubs]
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.rule import Rule
 
 from .. import engine
 from ..bundle import LoadedBundle, load_bundle
-from ..models_config import SearchModelConfig, google_safety_summary, resolve_google_safety_settings
+from ..models_config import (
+    DecisionModelConfig,
+    SearchModelConfig,
+    google_safety_summary,
+    resolve_google_safety_settings,
+)
 from ..probes import plan_seed_probes, plan_summary, seed_lines
 from ..storage import RunReader, RunStore, run_artifact_dir
 from .approval import WriteGate
+from .decide import ChoiceSpec, DecisionResult, DecisionRunner, frame_decision_excerpt
 from .reviewer import BRIEFING_PROMPT, build_reviewer_agent
 from .scope_plugin import SCOPE_PLUGIN_FACTORY, SCOPE_PLUGIN_ID, ScopeControl, current_control
 from .search import WebSearcher, build_search_agent
@@ -56,6 +62,9 @@ does), so without an explicit ``usage_limits`` pydantic-ai's own default of 50 s
 __all__ = [
     'BRIEFING_PROMPT',
     'DEFAULT_REQUEST_LIMIT',
+    'ChoiceSpec',
+    'DecisionResult',
+    'DecisionRunner',
     'ReviewDeps',
     'TesterDeps',
     'WebSearcher',
@@ -63,6 +72,7 @@ __all__ = [
     'build_reviewer_agent',
     'build_search_agent',
     'build_tester_agent',
+    'frame_decision_excerpt',
     'run_agent',
     'run_chat',
 ]
@@ -175,6 +185,7 @@ async def run_agent(
     briefing: bool = True,
     skills: Sequence[AgentCapability[TesterDeps]] = (),
     search_model: SearchModelConfig | None = None,
+    decision_model: DecisionModelConfig | None = None,
     request_limit: int = DEFAULT_REQUEST_LIMIT,
     thinking: ThinkingLevel | None = None,
     console: Console | None = None,
@@ -240,6 +251,13 @@ async def run_agent(
                         recorded_search, provider=search_model.provider, model_settings=search_safety
                     ),
                 )
+            _decision_runner: DecisionRunner | None = None
+            if decision_model is not None:
+                console.print(f'[dim]decision model: {decision_model.startup_summary()}[/]')
+                recorded_decision = UsageRecordingModel(
+                    decision_model.model, store=store, run_id=session.run_id, role='decision'
+                )
+                _decision_runner = DecisionRunner(config=decision_model, model=recorded_decision)
 
             write_gate = WriteGate()
             deps = TesterDeps(

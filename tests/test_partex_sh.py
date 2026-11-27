@@ -148,3 +148,17 @@ def test_urls_file_without_any_url_is_refused(tmp_path: Path) -> None:
     result = _run_urls(tmp_path, '# nothing here\n\n')
     assert result.returncode == 1
     assert 'no URLs in' in result.stderr
+
+
+def test_partex_sh_help_mentions_decision_model() -> None:
+    proc = subprocess.run(
+        ['bash', str(SCRIPT), '--help'],
+        cwd=REPO,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 0
+    assert '-D, --decision-model' in proc.stdout
+    assert 'PARTEX_DECISION_MODEL' in proc.stdout

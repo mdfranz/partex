@@ -14,6 +14,10 @@
 #   -S, --search-model NAME  optional separate model for web_search [PARTEX_SEARCH_MODEL]: anthropic:<name>,
 #                            google:<name> (API key), google-cloud:<name> (ADC), or openai:<name>; off unless set. Queries
 #                            leave this machine and never go through the Gateway.
+#   -D, --decision-model NAME
+#                            optional decision model for closed-set judgements [PARTEX_DECISION_MODEL]:
+#                            google-decisions:<name> or openai-decisions:<name>; off unless set. Bounded redacted
+#                            excerpts leave this machine directly to the provider (never Gateway).
 #                            Gemini safety filters: partex disables the provider's configurable content filters by
 #                            default for google:/google-cloud: models (#218) — authorized testing carries exploit and
 #                            payload evidence they flag. Set PARTEX_GOOGLE_SAFETY_SETTINGS to change that: a preset
@@ -74,6 +78,7 @@ MODEL=${PARTEX_MODEL:-zai-org/GLM-5.3}
 ROUTE=${PARTEX_GATEWAY_ROUTE-doubleword}
 ROUTE_SET=${PARTEX_GATEWAY_ROUTE+1}
 SEARCH_MODEL=${PARTEX_SEARCH_MODEL:-}
+DECISION_MODEL=${PARTEX_DECISION_MODEL:-}
 DB=${PARTEX_DB:-}
 ATTESTATION=${PARTEX_ATTESTATION:-}
 URLS_FILE=${PARTEX_URLS_FILE:-}
@@ -97,6 +102,7 @@ while [[ $# -gt 0 ]]; do
     -m|--model) MODEL=${2?$1 needs a value}; shift 2 ;;
     -r|--route) ROUTE=${2?$1 needs a value}; ROUTE_SET=1; shift 2 ;;
     -S|--search-model) SEARCH_MODEL=${2?$1 needs a value}; shift 2 ;;
+    -D|--decision-model) DECISION_MODEL=${2?$1 needs a value}; shift 2 ;;
     -d|--db) DB=${2?$1 needs a value}; shift 2 ;;
     -f|--from) RUN_ID=${2?$1 needs a value}; shift 2 ;;
     --resume) RESUME=1; shift; if [[ ${1:-} == run_* ]]; then RUN_ID=$1; shift; fi ;;
@@ -278,4 +284,4 @@ if [[ -n $ROUTE || $MODEL == gateway/* || $MODEL != *:* ]] && [[ -z ${PYDANTIC_A
 fi
 echo "opening a partex agent session on $TARGET_URL (db: $DB)"
 uv run --quiet partex agent "$eng" --authorized --db "$DB" --model "$MODEL" --request-limit "$REQUEST_LIMIT" ${THINKING:+--thinking "$THINKING"} ${ROUTE:+--gateway-route "$ROUTE"} \
-  ${SEARCH_MODEL:+--search-model "$SEARCH_MODEL"} ${URLS_FILE:+--urls-file "$URLS_FILE"} ${RECURSIVE:+--recursive} ${WRITE_ARGS[@]+"${WRITE_ARGS[@]}"} ${RUN_ID:+--from "$RUN_ID"}
+  ${SEARCH_MODEL:+--search-model "$SEARCH_MODEL"} ${DECISION_MODEL:+--decision-model "$DECISION_MODEL"} ${URLS_FILE:+--urls-file "$URLS_FILE"} ${RECURSIVE:+--recursive} ${WRITE_ARGS[@]+"${WRITE_ARGS[@]}"} ${RUN_ID:+--from "$RUN_ID"}

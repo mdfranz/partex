@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import anyio
-from pydantic_clai2.commands import Command  # pyright: ignore[reportMissingTypeStubs]
-from pydantic_clai2.plugins import NoSettings, Plugin  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax.commands import Command  # pyright: ignore[reportMissingTypeStubs]
+from pydantic_ai_pax.plugins import NoSettings, Plugin  # pyright: ignore[reportMissingTypeStubs]
 
 from ..engine import LiveSession
 from ..errors import PartexError

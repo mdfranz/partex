@@ -66,12 +66,13 @@ The `version-disclosure` check probes for evidence such as:
 - `./partex.sh --read-only [RUN_ID]` opens a read-only CLAI2 chat session over a saved run with no network traffic (defaults to the most recent usable run if `RUN_ID` is omitted).
 - `./partex.sh --resume [RUN_ID]` continues testing: opens a new live session on the earlier run's recorded target, scope, and authorization (leaving the earlier run unchanged); `-n`, `-R`, `-k`, `-M`/`-w`/`-W`, and model flags apply as usual.
 
-## Multi-model configuration: analyst vs. search models
+## Multi-model configuration: analyst, search, and decision models
 
-`partex review` and `partex test` are model-free by default. `partex chat`, `partex agent`, and the interactive `./partex.sh` launcher split LLM configuration into two independent roles:
+`partex review` and `partex test` are model-free by default. `partex chat`, `partex agent`, and the interactive `./partex.sh` launcher split LLM configuration into up to three independent roles:
 
 - **Analyst / reviewer model (`--model` / `-m`, plus optional `--gateway-route` / `-r`):** Drives investigation, tool calls, Monty `run_code` evidence correlation, and read-only chat. Accepts any Pydantic AI `provider:model` string or Pydantic AI Gateway route. Because runs live in `partex.db`, you can probe live with one model, review the saved run read-only with another (`--read-only`), or continue live testing with a different model (`--resume`).
 - **Web search model (`--search-model` / `-S`):** Optional and off by default. Backs only the `web_search` tool in an isolated zero-tool agent using provider-native search, so you can give an open-weights or Gateway-routed analyst access to live public reference lookups — or omit it for zero search egress.
+- **Decision model (`--decision-model` / `-D` / `PARTEX_DECISION_MODEL`):** Optional and off by default. Backs closed-set single-pass judgements (`google-decisions:gemini-decision-1` or `openai-decisions:gpt-6-luna`) returning calibrated probabilities in one prefill pass with zero output tokens. Turning `-D` on enables no feature by itself (individual features have their own switches).
 
 ### Mixing analyst and search models
 
@@ -135,6 +136,21 @@ Web search is off unless `--search-model` (or `-S` in `partex.sh`, or `PARTEX_SE
   - `openai:<model>` (`OPENAI_API_KEY`, Responses API) — sets `openai_include_web_search_sources=True` so citations are returned (`openai-chat:` is rejected at startup); has no per-query search limit and costs more per query than the others, so prefer a small model.
 - **Startup validation:** Fails fast at startup on bare model names, `gateway/...` prefixes, `openai-chat:`, or missing credentials/Vertex ADC (without echoing credential or token contents).
 - **Outbound query & budget guardrails:** Search queries leave this machine directly to the provider and never pass through Pydantic AI Gateway. Before a query is sent, `validate_search_query` enforces a 200-character limit and blocks URLs, internal `ev_`/`fn_` IDs, and known engagement secrets. Sessions are capped at 20 `web_search` calls and 20 sources per query (recording `sources_total` if trimmed); results return framed as untrusted data and persist in `web_research`.
+
+### Optional decision model (`--decision-model` / `-D`)
+
+Closed-set decision scoring is off unless `--decision-model` (or `-D` in `partex.sh`, or `PARTEX_DECISION_MODEL`) is set. Each call runs in an isolated zero-tool `DecisionRunner` with per-call timeout and session call caps:
+
+- **Supported providers (never Gateway):**
+  - `google-decisions:<model>` (e.g. `google-decisions:gemini-decision-1`, requires `GOOGLE_API_KEY` or `GEMINI_API_KEY`).
+  - `openai-decisions:<model>` (e.g. `openai-decisions:gpt-6-luna`, requires `OPENAI_API_KEY`).
+- **Excluded paths:** `gateway/...` and bare names are rejected because Pydantic AI Gateway proxies generative endpoints rather than dedicated `/decisions` endpoints. `google-cloud-decisions:` (Vertex ADC is not supported by Gemini Decisions), `PARTEX_GOOGLE_SAFETY_SETTINGS` (no `safetySettings` field on Decisions), and standalone `anthropic:` (no calibrated probabilities) are rejected at startup.
+- **Egress & privacy:** Decision calls send bounded, secret-redacted evidence excerpts framed in `<partex_untrusted_data>` directly to the configured provider — the same data class the analyst (`-m`) already sees, sent to one additional provider. Local spans record metadata only by default (`--logfire-content` is required to include prompt/answer content).
+- **Security eval harness (opt-in, never in CI):** Benchmark a provider on the bundled security + adversarial spoofing fixture (`fixtures/decisions/cases.json`) with:
+
+```sh
+uv run python scripts/eval_decisions.py -D google-decisions:gemini-decision-1 --ab-unsure --check-order-invariance
+```
 
 ## Target scoping: URL lists & `nmap` imports
 

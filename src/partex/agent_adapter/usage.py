@@ -19,6 +19,16 @@ from pydantic_ai.usage import RequestUsage
 
 from ..storage import LlmRole, RunStore
 
+_PRIMARY_MODEL_ROLES: frozenset[LlmRole] = frozenset({'tester', 'reviewer'})
+"""Roles allowed to claim ``runs.model`` when it is still ``NULL``.
+
+Auxiliary roles (``'search'``, ``'decision'``, ``'judge'``) accumulate ``model_calls`` and token
+totals on ``runs`` without ever setting or overwriting ``runs.model`` — critical when decision calls
+fire at session startup before the analyst's first turn (#256). Post-run or passive triage callers
+(#258) must not wrap their decision model in :class:`UsageRecordingModel` against a finalized
+passive ``runs`` row so passive run exports (#159) stay immutable.
+"""
+
 
 class UsageRecordingModel(WrapperModel):
     """Wrap *wrapped* so each request accumulates call and token totals onto the run."""
@@ -31,7 +41,7 @@ class UsageRecordingModel(WrapperModel):
 
     async def _record(self, usage: RequestUsage | None, model_name: str | None) -> None:
         usage = usage or RequestUsage()
-        primary_model = (model_name or self.model_name) if self._role != 'search' else None
+        primary_model = (model_name or self.model_name) if self._role in _PRIMARY_MODEL_ROLES else None
         await self._store.record_model_usage(
             self._run_id,
             model=primary_model,
