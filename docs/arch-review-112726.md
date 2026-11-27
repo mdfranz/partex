@@ -13,10 +13,13 @@ available at this revision. [PR #266](https://github.com/mdfranz/partex/pull/266
 
 Registered checks produce findings. The engine validates their structure and evidence links before
 committing them. The model can select checks and request scoped actions through host tools. The
-verification runner records replay results and updates finding status. Skills can influence choices and
+verification runner records replay results and updates finding status. When `--search-model` is set,
+`web_search` persists capped third-party answers and source URLs in `web_research`, kept distinct from
+target evidence and never eligible as finding `evidence_ids`. Skills can influence choices and
 reports, and the live agent can save model-written prose with citation checks and a run-record footer.
 The strength of the validation depends on the artifact being written. [Draft validation](../src/partex/engine.py#L279-L349) ·
-[Verification storage](../src/partex/storage.py#L911-L960) · [Tester tools and report saving](../src/partex/agent_adapter/tester.py#L537-L645)
+[Verification storage](../src/partex/storage.py#L911-L960) · [Web research storage](../src/partex/storage.py#L988-L1045) ·
+[Tester tools and report saving](../src/partex/agent_adapter/tester.py#L537-L645)
 
 ## 1. Evidence and reproducibility
 
@@ -24,9 +27,13 @@ The strength of the validation depends on the artifact being written. [Draft val
   union. Evidence IDs use the first 16 hex characters of a SHA-256 hash of canonical JSON. The hash
   excludes `id`, `source`, `secret_fields`, `tls_verified`, and `file_path`. Hashes survive changes to
   those fields when the payload is identical. Default bundle export redacts marked payload values, and
-  bundle import recomputes IDs from the resulting content. [Evidence models](../src/partex/models.py) ·
-  [Hashing](../src/partex/ids.py#L37-L45) · [Bundle export](../src/partex/har_io.py#L435-L443) ·
-  [Bundle import](../src/partex/bundle.py#L224-L241)
+  bundle import recomputes IDs from the resulting content; for exchanges with `secret_fields`, a
+  default redacted round-trip therefore produces new `ev_` and `fn_` IDs while preserving `finding_key`
+  (`fk_`) and cookie attributes. In addition, `export_bundle` currently serializes `tls_verified: false`
+  on unverified HTTPS exchanges and `artifact` records as-is, whereas `load_bundle` accepts only
+  `http_exchange` and `config_excerpt` without `tls_verified` (`extra='forbid'`). [Evidence models](../src/partex/models.py) ·
+  [Hashing](../src/partex/ids.py#L35-L44) · [Bundle export](../src/partex/har_io.py#L435-L443) ·
+  [Bundle record schema](../src/partex/bundle.py#L79-L97) · [Bundle import](../src/partex/bundle.py#L224-L241)
 - **Passive determinism.** Given the same bundle input and check selection, the engine assembles
   results in selection order and serializes canonical exports. Tests separately check identical
   findings across fresh stores and byte-identical serialization of equivalent stored results. The
@@ -34,7 +41,7 @@ The strength of the validation depends on the artifact being written. [Draft val
   test uses `version-disclosure` to capture traffic and `header-security` to review the exported
   bundle. It establishes that the bundle is reviewable and yields the expected kind of finding.
   [PLAN §12](../PLAN.md#12-determinism-and-reproducibility) · [Engine test](../tests/test_engine.py#L111-L116) ·
-  [Export test](../tests/test_export.py#L228-L268) · [Round-trip tests](../tests/test_har_io.py#L280-L291) ·
+  [Export test](../tests/test_export.py#L228-L275) · [Round-trip tests](../tests/test_har_io.py#L280-L291) ·
   [Live round-trip test](../tests/test_har_io.py#L382-L424)
 - **Live auditability.** Capture records a structured exchange after the response is read, with a
   body cap and omission of binary or undecodable bodies. The capture callback commits each record
@@ -96,11 +103,15 @@ The strength of the validation depends on the artifact being written. [Draft val
   verb, while the server determines their actual effects. [Write gate](../src/partex/agent_adapter/approval.py#L60-L115) ·
   [PLAN §4.2](../PLAN.md#L441-L470) · [M5 status](../PLAN.md#L1403) ·
   [#119](https://github.com/mdfranz/partex/issues/119) · [#65](https://github.com/mdfranz/partex/issues/65)
-- **Scope changes.** The operator can stage and confirm live scope additions. The engine persists
-  the snapshot and audit row before applying the change. The model can relay a refusal and explain
-  the operator’s options. The monotonic scope rule means an operator who needs to retract an entry
-  must end the run and start with the corrected scope. [Scope amendment](../src/partex/engine.py#L1053-L1087) ·
-  [Scope client](../src/partex/target.py#L366-L398) · [PLAN operator controls](../PLAN.md#L430-L439)
+- **Scope changes.** The operator can stage and confirm live scope additions (`/scope add` and
+  `/scope nmap`). The engine persists the snapshot and audit row before applying the change. The model
+  can relay a refusal and explain the operator’s options. When `/scope nmap` activates `scope.urls` on a
+  session that previously had none, path-prefix matching on `scope.hosts` narrows to the explicit URL
+  allowlist (with `target.base_url` kept covered), after which the allowlist only grows; `set_scope`
+  itself checks `hosts`, `ports`, `path_prefixes`, `exclusions`, budgets, and methods, but not `urls`.
+  An operator who needs to retract an added entry must end the run and start with the corrected scope.
+  [Scope amendment](../src/partex/engine.py#L1053-L1136) ·
+  [Scope client](../src/partex/target.py#L376-L395) · [PLAN operator controls](../PLAN.md#L430-L439)
 
 ## 4. Checks and skills
 
@@ -160,9 +171,11 @@ prose above the engine’s footer. [Report validation and footer](../src/partex/
   [#263](https://github.com/mdfranz/partex/issues/263)
 - #258 proposes attaching a model opinion to a finding while preserving severity and verification
   status and keeping raw candidate secrets local. #276 adds agent proposals and operator-confirmed
-  dispositions that work independently of `-D`. #280 is the open PLAN amendment. The #258 discussion
-  also flags that its proposed key omits the question version, leaving what happens after a question
-  changes unresolved. [#258 and design discussion](https://github.com/mdfranz/partex/issues/258) ·
+  dispositions that work independently of `-D`, and suggests sharing one table with #258. #280 is the
+  open PLAN amendment. Because #258 is keyed per `(run_id, finding_id, question_id, question_version, model)`
+  with probability distributions while #276 is append-only per `(run_id, finding_id)` with `proposed` vs.
+  `confirmed` disposition state and cited `evidence_ids`/`research_ids`, their authority and row shapes
+  differ even when surfaced together on finding reads. [#258 and design discussion](https://github.com/mdfranz/partex/issues/258) ·
   [#276](https://github.com/mdfranz/partex/issues/276) · [#280](https://github.com/mdfranz/partex/issues/280)
 - #259 proposes risk labels at the human consent prompt, with asymmetric thresholds intended to
   counter automation bias. It keeps operator authority and depends on #260 for URL secret scrubbing.
@@ -191,19 +204,35 @@ prose above the engine’s footer. [Report validation and footer](../src/partex/
    consumers are tracked in the follow-up issues. The current integration exercises provider setup
    before those consumers exist. [Agent wiring](../src/partex/agent_adapter/__init__.py#L254-L272)
 3. **Post-run usage needs an enforceable rule.** The `usage.py` docstring tells future triage callers
-   to avoid writing token totals to a finalized passive run. #159 records the broader gap between
-   PLAN immutability and the storage API. The eventual post-run write policy should come with a test
-   that compares the passive export before and after annotation. [Usage note](../src/partex/agent_adapter/usage.py#L22-L29) ·
-   [Storage API](../src/partex/storage.py#L883-L909) · [#159](https://github.com/mdfranz/partex/issues/159)
+   to avoid writing token totals to a finalized passive run, while #278 proposes recording reporter
+   spend via `UsageRecordingModel(role='report')` (`runs.model_calls` and token totals are serialized in
+   `export_run_json`). #159 records the broader gap between PLAN immutability and the storage API. Because
+   `live_session` keeps a run in `created` until the session exits, `record_model_usage` and in-session
+   writes can require `state == 'created'`, while post-`checks_complete` passes record their model
+   metadata on their own rows and spans, backed by a test that compares the passive export before and
+   after annotation. [Usage note](../src/partex/agent_adapter/usage.py#L22-L30) ·
+   [Run export](../src/partex/export.py#L38-L58) ·
+   [Session lifecycle](../src/partex/engine.py#L1261-L1292) ·
+   [Storage API](../src/partex/storage.py#L883-L1077) · [#159](https://github.com/mdfranz/partex/issues/159) ·
+   [#278](https://github.com/mdfranz/partex/issues/278)
 
 ## 8. Open questions for the next pass
 
 1. **Who can add or confirm a judgment after `checks_complete`, and what may it change in the
-   exported record?** #280 should settle authority for model opinions, agent proposals, and operator
-   dispositions together with #258 and #276. The PLAN decision includes which post-run writes #159
-   permits, an export contract for finalized passive runs, question-version provenance, and schema
-   coordination with #219 and #124 under the v5 policy. [#280](https://github.com/mdfranz/partex/issues/280) ·
+   exported record?** #280 should settle three distinct authority tiers and their storage/export rules
+   together with #258, #276, and #159: (a) `partex verify` as the sole writer of `findings.status`
+   (`reported -> verified | verification_failed`); (b) #276 dispositions as append-only per
+   `(run_id, finding_id)` where an agent (`tester` or #278 reporter) can only record `proposed`
+   dispositions and only the `operator` can record or confirm an active disposition; and (c) #258
+   decision-model triage as advisory probability distributions keyed by
+   `(run_id, finding_id, question_id, question_version, model)`. On the storage and export side (#159),
+   in-session writes (`add_evidence`, `commit_findings`, `amend_scope`, `add_web_research`,
+   `upsert_coverage`, `record_model_usage`) should require `state == 'created'`, post-`checks_complete`
+   annotation and report passes should not mutate `runs` token counters or passive export bytes, and the
+   schema v5 → v6 bump should be coordinated across #258, #276, #219, and #124 under #245.
+   [#280](https://github.com/mdfranz/partex/issues/280) ·
    [#258](https://github.com/mdfranz/partex/issues/258) · [#276](https://github.com/mdfranz/partex/issues/276) ·
+   [#278](https://github.com/mdfranz/partex/issues/278) ·
    [#159](https://github.com/mdfranz/partex/issues/159) · [#245](https://github.com/mdfranz/partex/issues/245) ·
    [#219](https://github.com/mdfranz/partex/issues/219) · [#124](https://github.com/mdfranz/partex/issues/124)
 2. **What can the approval study establish?** #281 can measure label and operator-choice agreement.
