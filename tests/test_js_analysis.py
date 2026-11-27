@@ -521,6 +521,29 @@ def test_short_low_entropy_and_placeholder_values_are_not_secrets(tmp_path: Path
     assert result.secrets == ()  # the 40-char value is a pure hex SHA, not a secret
 
 
+def test_help_links_and_identity_label_maps_are_not_secrets() -> None:
+    """#274: keys named ``*_API_KEYS`` whose values are docs links, or labels equal to the key, are not credentials."""
+    js = (
+        b'const links={ANTHROPIC_API_KEYS:`https://platform.claude.com/settings/keys`,'
+        b'GOOGLE_AI_STUDIO_API_KEYS:"https://aistudio.google.com/app/apikey",'
+        b'OLLAMA_API_KEYS:"//ollama.com/settings/keys?utm=a1b2c3d4"};\n'
+        b'const scopes={write_gateway_personal_api_key:`write_gateway_personal_api_key`,'
+        b'"read-api-key":"read_api_key"};\n'
+    )
+    assert analyze_js_bytes(js).secrets == ()
+
+
+def test_url_with_embedded_credentials_is_still_a_secret() -> None:
+    """A link that carries ``user:password@`` is a credential even though it looks like a URL."""
+    js = b'const cfg={apiKey:"https://svc:s3cr3tPassw0rd@internal.example/v1"};\n'
+    assert [key for key, _line in analyze_js_bytes(js).secrets] == ['apiKey']
+
+
+def test_real_secret_under_a_secret_key_is_still_reported() -> None:
+    js = b'const cfg={apiKey:"k9Xq2LmZp7Vb4NtR8wYh3JcD"};\n'
+    assert [key for key, _line in analyze_js_bytes(js).secrets] == ['apiKey']
+
+
 # ── review fixes (PR #75) ─────────────────────────────────────────────────────
 
 
