@@ -909,6 +909,10 @@ Markdown saved with `save_report`. A report handle consists of its run ID and na
 accept the current run and, when supplied, the explicit `--from` run. Results are framed as
 untrusted data and file reads are capped at 256 KiB. Live-session audit rows contain the report
 name and run for reads, along with the outcome. Standalone chat uses a read-only store.
+`save_report` refuses a report citing an `ev_`/`fn_`/`wr_` ID that does not exist in the current
+or `--from` run (nothing is written; the audit row lists the IDs), and appends an engine-written
+run record (requests and write budget spent, finding counts by severity, authorized URLs or
+host:port, exclusions) so budget and scope figures never rest on the model's estimate (#268).
 
 **Code Mode settings.** For `partex chat <run-id>`, attach `CodeMode(tools=['list_findings', 'get_finding', 'lookup_evidence'], eager=True, speculate=['list_findings', 'get_finding', 'lookup_evidence'] if speculate else None, mount=None, os_access=None)` directly on `partex_reviewer_agent` and keep CLAI2's `run.code_mode` and `run.speculative_code_mode` off (so CLAI2's `WorkspaceCodeMode` does not mount the host working directory and its `SpeculativeExecution` allowlist does not filter out `partex`'s tools). Keep speculation off by default and evaluate it as a reviewer opt-in. Headless `agent.run()` and `agent.iter()` use the capabilities supplied to the agent. See [RUNTIME.md](RUNTIME.md).
 

@@ -12,8 +12,11 @@ Each ``http_request`` / ``run_check`` call is recorded in ``tool_calls`` without
 """
 
 import os
+import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, cast
@@ -35,7 +38,16 @@ from ..checks.js_analysis import discover_js_urls
 from ..checks.version_disclosure import ERROR_PAGE_RISK
 from ..engine import CheckFailed, CheckSelectionError, LiveSession
 from ..errors import BudgetExhausted, PartexError, ScopeViolation
-from ..models import REDACTED, SAFE_METHODS, WRITE_METHODS, ArtifactEvidence, Finding, HttpEvidence, redact
+from ..models import (
+    REDACTED,
+    SAFE_METHODS,
+    WRITE_METHODS,
+    ArtifactEvidence,
+    Finding,
+    HttpEvidence,
+    Scope,
+    redact,
+)
 from ..registry import builtin_skill_root, load_skills
 from ..scope import check_url
 from ..storage import RunStore, run_reports_dir, write_report
@@ -517,20 +529,95 @@ async def web_search(ctx: RunContext[TesterDeps], query: str) -> str:
     )
 
 
+_CITED_ID = re.compile(r'\b(?:ev|fn|wr)_[0-9a-f]{6,}\b')
+"""An ``ev_``/``fn_``/``wr_`` hex token in report text of any length, so near-misses (an extra or dropped digit)
+are caught as well as invented IDs (#268)."""
+
+
+async def _unknown_cited_ids(ctx: RunContext[TesterDeps], content: str) -> list[str]:
+    """IDs the report cites that are not evidence, findings, or research of this run or its ``--from`` run."""
+    cited = sorted(set(_CITED_ID.findall(content)))
+    if not cited:
+        return []
+    store = ctx.deps.store
+    known: set[str] = set()
+    for run_id in filter(None, (ctx.deps.run_id, ctx.deps.previous_run_id)):
+        known.update(item.id for item in await store.evidence(run_id))
+        known.update(finding.id for finding in await store.findings(run_id))
+        known.update(record.id for record in await store.web_research(run_id))
+    return [token for token in cited if token not in known]
+
+
+async def _run_record_footer(ctx: RunContext[TesterDeps]) -> str:
+    """Engine-written run state at save time, appended to every report so its figures can be checked (#268)."""
+    run = await ctx.deps.store.get_run(ctx.deps.run_id)
+    scope = ctx.deps.session.engagement.scope
+    severities = Counter(finding.severity for finding in await ctx.deps.store.findings(ctx.deps.run_id))
+    by_severity = ', '.join(
+        f'{severities[level]} {level}' for level in ('critical', 'high', 'medium', 'low', 'info') if severities[level]
+    )
+    targets = scope.urls or [f'{host}:{port}' for host in scope.hosts for port in (scope.ports or [80, 443])]
+    shown = 20
+    more = f' … and {len(targets) - shown} more' if len(targets) > shown else ''
+    lines = [
+        '',
+        '',
+        '---',
+        '',
+        '_partex run record at save time (written by the engine, not the model):_',
+        '',
+        f'- Run: `{run.id}`; saved {datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")} UTC',
+        (
+            f'- Requests: {run.requests_spent} of {scope.max_requests or "unlimited"}; '
+            f'write requests: {run.write_requests_spent} of {scope.max_write_requests}'
+        ),
+        f'- Findings: {sum(severities.values())}' + (f' ({by_severity})' if by_severity else ''),
+        f'- Authorized {"URLs" if scope.urls else "host:port"}: '
+        + ', '.join(f'`{target}`' for target in targets[:shown])
+        + more,
+    ]
+    if scope.exclusions:
+        lines.append('- Excluded paths: ' + ', '.join(f'`{path}`' for path in scope.exclusions))
+    return '\n'.join(lines) + '\n'
+
+
+def _authorized_urls(scope: Scope, shown: int = 20) -> str:
+    """The operator's authorized URL list for the session context, or '' when the scope has none (#268).
+
+    Hosts and ports alone mislead: with a URL list, a host:port pair can be in scope for one host and not another.
+    """
+    if not scope.urls:
+        return ''
+    more = f', … and {len(scope.urls) - shown} more' if len(scope.urls) > shown else ''
+    return f' Authorized URLs (only these can be requested): {", ".join(scope.urls[:shown])}{more}.'
+
+
 async def save_report(ctx: RunContext[TesterDeps], name: str, content: str) -> str:
     """Save an immutable Markdown report of this session's findings for the operator.
 
     Written under this run's report directory as ``<name>.md``. Reports are for the operator: cite evidence
-    (``ev_``) and finding (``fn_``) IDs instead of pasting bodies, and never include credentials. A name that is
-    already saved in this run is refused; pick another.
+    (``ev_``), finding (``fn_``), and research (``wr_``) IDs instead of pasting bodies, and never include
+    credentials. A name that is already saved in this run is refused; pick another.
+
+    Every cited ID is checked against this run (and the run it continues from): a report citing an ID that does
+    not exist is refused and nothing is saved, so copy IDs from tool results rather than retyping them. partex
+    appends its own run record (requests and write budget spent, finding counts, the current authorized scope),
+    so do not estimate budget or restate scope from memory; describe scope from the latest tool results.
 
     Args:
         name: 1-64 letters, digits, dots, underscores or hyphens, starting with a letter or digit (no ``.md``).
         content: The Markdown text, at most 256 KiB.
     """
-    scrubbed, redactions = _scrub_credentials(content, ctx.deps.session)
-    directory = run_reports_dir(ctx.deps.store.path, ctx.deps.run_id)
     args = {'name': name, 'size_bytes': len(content.encode())}
+    if unknown := await _unknown_cited_ids(ctx, content):
+        await _audit(ctx, 'save_report', args, {'refused': 'unknown_ids', 'ids': unknown[:50]})
+        listed = ', '.join(unknown[:20]) + (f' (and {len(unknown) - 20} more)' if len(unknown) > 20 else '')
+        raise ToolFailed(
+            f'nothing saved: the report cites IDs that do not exist in this run: {listed}. Check them with '
+            'list_evidence / list_findings / lookup_evidence, fix or remove them, and save again.'
+        )
+    scrubbed, redactions = _scrub_credentials(content + await _run_record_footer(ctx), ctx.deps.session)
+    directory = run_reports_dir(ctx.deps.store.path, ctx.deps.run_id)
     try:
         path = await anyio.to_thread.run_sync(write_report, directory, name, scrubbed)
     except FileExistsError as exc:
@@ -715,7 +802,7 @@ def build_tester_agent(
             f'Session run {session.run_id}{previous}. Target {session.engagement.target.base_url}; '
             f'scope hosts {", ".join(scope.hosts)}, ports {", ".join(map(str, scope.ports)) or "80/443"}, '
             f'paths {", ".join(scope.path_prefixes) or "/"}, excluded {", ".join(scope.exclusions) or "none"}; '
-            f'requests used {session.requests_spent} of {scope.max_requests or "unlimited"}.{seed}'
+            f'requests used {session.requests_spent} of {scope.max_requests or "unlimited"}.{_authorized_urls(scope)}{seed}'
         )
 
     return agent

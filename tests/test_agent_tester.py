@@ -28,6 +28,7 @@ from partex.agent_adapter.tester import (
     MODEL_BODY_CHARS,
     TESTER_INSTRUCTIONS,
     TESTER_TOOLS,
+    _authorized_urls,  # pyright: ignore[reportPrivateUsage]
 )
 from partex.agent_adapter.tools import REVIEWER_TOOLS
 from partex.engine import LiveSession, LiveSessionRefused, live_session
@@ -936,7 +937,7 @@ async def test_save_report_writes_a_private_audited_file(tmp_store: RunStore, tm
         (saved,) = tool_returns(result.all_messages())
         path = run_reports_dir(tmp_store.path, session.run_id) / 'summary-1.md'
         assert str(path) in str(saved.content)
-        assert path.read_text() == '# Findings\n\nSee ev_abc.'
+        assert path.read_text().startswith('# Findings\n\nSee ev_abc.\n\n---\n')
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
         assert stat.S_IMODE(path.parent.parent.stat().st_mode) == 0o700
@@ -983,7 +984,7 @@ async def test_save_report_refuses_oversize_and_overwrite(tmp_store: RunStore, t
         assert getattr(big, 'outcome', None) == 'failed' and 'limit' in str(big.content)
         assert getattr(first, 'outcome', None) != 'failed'
         assert getattr(again, 'outcome', None) == 'failed' and 'already saved' in str(again.content)
-        assert (run_reports_dir(tmp_store.path, session.run_id) / 'one.md').read_text() == 'first'
+        assert (run_reports_dir(tmp_store.path, session.run_id) / 'one.md').read_text().startswith('first\n')
         assert not (run_reports_dir(tmp_store.path, session.run_id) / 'big.md').exists()
 
 
@@ -1001,6 +1002,65 @@ async def test_save_report_scrubs_engagement_credential_values(
         assert 's3cr3t-value' not in text and REDACTED in text
         (call,) = await tmp_store.tool_calls(session.run_id)
         assert call.result['redactions'] == 1
+
+
+async def test_save_report_refuses_ids_not_in_the_run(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    """#268: a mistyped or invented ev_/fn_/wr_ ID refuses the save, so the operator never gets a broken citation."""
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        await session.request('GET', session.engagement.target.base_url)
+        real = session.captured[0].id
+        mistyped = real[:5] + '5' + real[5:]  # one extra digit, as in the run that prompted #268
+        result = await drive(
+            session,
+            tmp_store,
+            [
+                ('save_report', {'name': 'bad', 'content': f'See {mistyped} and fn_00000000deadbeef.'}),
+                ('save_report', {'name': 'good', 'content': f'See {real}.'}),
+            ],
+        )
+        bad, good = tool_returns(result.all_messages())
+        assert getattr(bad, 'outcome', None) == 'failed'
+        assert mistyped in str(bad.content) and 'fn_00000000deadbeef' in str(bad.content)
+        assert real not in str(bad.content).replace(mistyped, '')  # the valid ID is not reported as unknown
+        assert getattr(good, 'outcome', None) != 'failed'
+        directory = run_reports_dir(tmp_store.path, session.run_id)
+        assert not (directory / 'bad.md').exists() and (directory / 'good.md').exists()
+        calls = await tmp_store.tool_calls(session.run_id)
+        refused = next(call for call in calls if call.tool == 'save_report' and call.args['name'] == 'bad')
+        assert refused.result['refused'] == 'unknown_ids'
+        assert sorted(refused.result['ids']) == sorted([mistyped, 'fn_00000000deadbeef'])
+
+
+async def test_save_report_appends_the_engine_run_record(tmp_store: RunStore, tmp_path: Path, target_app: Any) -> None:
+    """#268: budget, findings and scope in the saved report come from the engine, not the model's estimate."""
+    async with live_session(engagement(tmp_path, target_app), tmp_store, authorized=True) as session:
+        await session.request('GET', session.engagement.target.base_url)
+        await session.request('GET', session.engagement.target.base_url + '/robots.txt')
+        await drive(session, tmp_store, [('save_report', {'name': 'r', 'content': 'Requests: 13 of 50 (estimate)'})])
+        text = (run_reports_dir(tmp_store.path, session.run_id) / 'r.md').read_text()
+        body, footer = text.split('\n---\n', 1)
+        assert body == 'Requests: 13 of 50 (estimate)\n'  # the model's text is kept verbatim
+        scope = session.engagement.scope
+        assert 'written by the engine, not the model' in footer
+        assert f'`{session.run_id}`' in footer
+        spent = (await tmp_store.get_run(session.run_id)).requests_spent
+        assert spent >= 2  # the two above, plus whatever the session's opening probe sent
+        assert f'- Requests: {spent} of {scope.max_requests or "unlimited"}' in footer
+        assert f'`{scope.hosts[0]}:' in footer or f'`{scope.urls[0]}`' in footer
+
+
+def test_session_context_lists_authorized_urls() -> None:
+    """#268: with a URL list, hosts and ports alone mislead the model about what is in scope."""
+    scope = Scope(
+        hosts=['a.test', 'b.test'],
+        ports=[80, 8080],
+        urls=['http://a.test:80/*', 'http://a.test:8080/*', 'http://b.test:80/*'],
+    )
+    text = _authorized_urls(scope)
+    assert 'http://a.test:8080/*' in text and 'http://b.test:80/*' in text
+    assert _authorized_urls(Scope(hosts=['a.test'])) == ''
+    many = Scope(hosts=['a.test'], urls=[f'http://a.test/p{i}' for i in range(25)])
+    assert '… and 5 more' in _authorized_urls(many)
 
 
 def test_save_report_is_a_direct_tool_not_a_code_mode_tool() -> None:
