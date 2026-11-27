@@ -477,6 +477,9 @@ async def test_run_agent_with_decision_model_and_google_safety_coexists(
         )
     )
     decision_cfg = resolve_decision_model('google-decisions:gemini-decision-1', env={'GOOGLE_API_KEY': 'AIza-dummy'})
+    # infer_model inside run_agent constructs the Google provider from the process
+    # environment, not the resolver's env= mapping — keep the test hermetic.
+    monkeypatch.setenv('GOOGLE_API_KEY', 'AIza-dummy')
     monkeypatch.setenv('PARTEX_GOOGLE_SAFETY_SETTINGS', 'off')
     monkeypatch.setattr('partex.agent_adapter.chat', lambda *_args, **_kwargs: anyio.lowlevel.checkpoint())
 
