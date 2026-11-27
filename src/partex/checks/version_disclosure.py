@@ -7,9 +7,9 @@ the error handler.
 
 Findings per ``skills/version-disclosure/SKILL.md``: a header that discloses a
 product/runtime identifier **with explicit version digits** (``info``/``low``),
-and an error body exposing stack traces or absolute paths (``medium``).  Generic
-product names without version digits are the skill's non-finding rule — they do
-not become drafts.  ``verify_recipe``/#22: the single-request replay and the
+and a ``4xx``/``5xx`` error body exposing stack traces or absolute paths (``medium``;
+``2xx`` pages never count, #267).  Generic product names without version digits are
+the skill's non-finding rule — they do not become drafts.  ``verify_recipe``/#22: the single-request replay and the
 same-class matcher live here (``skills/.../verification-criteria.md`` §3).
 """
 
@@ -33,7 +33,7 @@ from ..scope import ScopeViolation
 from . import TargetClient
 
 CHECK_ID = 'version-disclosure'
-CHECK_VERSION = '0.3'
+CHECK_VERSION = '0.4'
 CHECK_TITLE = 'Version and Error Disclosure'
 CHECK_DESCRIPTION = (
     'Probe for explicit software version banners (Server, X-Powered-By, '
@@ -66,6 +66,16 @@ STACK_MARKERS = (
     '/usr/lib/python',
     'C:\\inetpub\\',
 )
+
+
+def discloses_error_details(status_code: int, body: str | None) -> bool:
+    """Whether an error (``4xx``/``5xx``) response exposes stack traces or internal paths (skill §2).
+
+    ``2xx`` pages never count: they mention paths as documentation (the stock Apache/Ubuntu
+    "It works" index names ``/var/www/html``), which is not an error page (#267).
+    """
+    return status_code >= 400 and any(marker in (body or '') for marker in STACK_MARKERS)
+
 
 # Deterministic unknown path (PLAN §10 fixture 2): stable URLs keep evidence and
 # finding IDs comparable across replays of the same engagement.
@@ -230,8 +240,7 @@ class VersionDisclosureCheck:
     def _error_draft(self, exchange: HttpEvidence) -> FindingDraft | None:
         """The verbose-error-page draft, when the response body carries stack markers."""
         response = exchange.http.response
-        body = response.body or ''
-        if not any(marker in body for marker in STACK_MARKERS):
+        if not discloses_error_details(response.status_code, response.body):
             return None
         request = exchange.http.request
         return FindingDraft(
@@ -334,8 +343,7 @@ class VersionDisclosureCheck:
             value = get_header(replay.http.response.headers, header)
             return value is not None and bool(_VERSION_DIGITS.search(value))
         if finding.subject == 'error-page':
-            body = replay.http.response.body or ''
-            return any(marker in body for marker in STACK_MARKERS)
+            return discloses_error_details(replay.http.response.status_code, replay.http.response.body)
         return False
 
 
