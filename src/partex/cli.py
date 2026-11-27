@@ -343,7 +343,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.set_defaults(handler=_cmd_verify)
 
     chat = subparsers.add_parser(
-        'chat', parents=[with_db], help='read-only review chat over a saved run (CLAI2 terminal)'
+        'chat', parents=[with_db], help='read-only review chat over a saved run (Pax terminal)'
     )
     chat.add_argument('run_id', help='run id (run_…)')
     chat.add_argument(
@@ -367,7 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent = subparsers.add_parser(
         'agent',
         parents=[with_db],
-        help='live session: direct further probes from the CLAI2 terminal (requires --authorized)',
+        help='live session: direct further probes from the Pax terminal (requires --authorized)',
     )
     agent.add_argument('engagement', help='engagement directory or engagement.json path')
     agent.add_argument('--authorized', action='store_true', help='required: attests authorization to test')

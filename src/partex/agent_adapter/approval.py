@@ -5,7 +5,7 @@ checks and before anything is sent. The operator answers in the terminal: **appr
 full URL and body), **approve for this session** (method + scheme + host + port + exact path, any body; never
 a wildcard), or **deny** (a typed answer denies and is sent to the model as the reason).
 
-The answer comes from the operator's keyboard through CLAI2's question picker, bound by the partex ``/scope``
+The answer comes from the operator's keyboard through Pax's question picker, bound by the partex ``/scope``
 plugin, never from model output, so the model cannot approve its own call. With no terminal to ask (a headless
 or non-TTY session) nothing is bound, and every state-changing request is denied: nothing is sent.
 """
@@ -151,10 +151,10 @@ def decision_from(response: AskUserResponse) -> Decision:
 
 
 def terminal_asker(host: Any) -> Asker:
-    """Ask in CLAI2's inline terminal picker on *host* (a ``PluginHost``), printing the full action first.
+    """Ask in Pax's inline terminal picker on *host* (a ``PluginHost``), printing the full action first.
 
-    This subclasses CLAI2's ``TerminalAnswerer`` and calls its private ``_ask`` so a write approval reuses the same
-    inline picker and terminal hand-off as ``ask_user``. ``pydantic-clai2`` is locked in ``uv.lock``;
+    This subclasses Pax's ``TerminalAnswerer`` and calls its private ``_ask`` so a write approval reuses the same
+    inline picker and terminal hand-off as ``ask_user``. ``pydantic-ai-pax`` is locked in ``uv.lock``;
     ``tests/test_write_approval.py`` fails loudly if a bump changes the API this relies on.
     """
     from pydantic_ai_pax.builtin_plugins.ask_user_menu import TerminalAnswerer  # pyright: ignore[reportMissingTypeStubs]

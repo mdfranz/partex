@@ -14,12 +14,12 @@ pipeline can complete without model calls or a model-code runtime.
 
 `partex chat <run-id>` (read-only reviewer) and `partex agent <engagement>` (live session with
 operator-confirmed `/scope add`, `download_asset`, `discover_js_assets`, and `run_check`) are
-implemented over CLAI2 (`load_plugins=False` for `chat`; `ScopePlugin` for `agent`). Host
+implemented over Pax (`load_plugins=False` for `chat`; `ScopePlugin` for `agent`). Host
 sandbox capability detection (`partex sandboxes`, #84) and live-session Monty Code Mode (#83, below)
 are implemented. Attaching `CodeMode` directly to `partex_reviewer_agent` plus the speculation
 benchmark below remain open.
 
-Use Monty-backed `CodeMode` for `chat <run-id>` by attaching `CodeMode(tools=['list_findings', 'get_finding', 'lookup_evidence'], eager=True, ..., mount=None, os_access=None)` directly on `partex_reviewer_agent` while keeping CLAI2's `run.code_mode` and `run.speculative_code_mode` disabled (so CLAI2's `WorkspaceCodeMode` does not mount the host working directory). Generated Python can group findings, compare captured headers, and correlate records using `list_findings`, `get_finding`, and `lookup_evidence`. Host tools enforce the current run ID and redact their results before returning them to the snippet. Give the sandbox no filesystem mounts, credentials, shell, network access, or store handles. CLAI2's plugin loading remains disabled.
+Use Monty-backed `CodeMode` for `chat <run-id>` by attaching `CodeMode(tools=['list_findings', 'get_finding', 'lookup_evidence'], eager=True, ..., mount=None, os_access=None)` directly on `partex_reviewer_agent` while keeping Pax's `run.code_mode` and `run.speculative_code_mode` disabled (so Pax's `WorkspaceCodeMode` does not mount the host working directory). Generated Python can group findings, compare captured headers, and correlate records using `list_findings`, `get_finding`, and `lookup_evidence`. Host tools enforce the current run ID and redact their results before returning them to the snippet. Give the sandbox no filesystem mounts, credentials, shell, network access, or store handles. Pax's plugin loading remains disabled.
 
 **Live session (`partex agent`, #83).** `partex_tester_agent` carries `CodeMode(tools=[...read tools...],
 eager=True, mount=MountDir('/artifacts', <db>.artifacts/<run_id>, 'read-only'), os_access=None,
@@ -36,7 +36,7 @@ and zero function tools, deps, or filesystem/DB access. On Anthropic it sends `a
 model calls search itself and never from a server-side code-execution sandbox (which would also drop source
 citations). On OpenAI it uses the Responses API and asks for each search's source URLs
 (`openai_include_web_search_sources`). Downloads are stored per run (`<db>.artifacts/<run_id>/`) and only the
-current run's directory is mounted, so earlier runs' files (possibly from other targets) stay invisible. Wrapped calls still write their `tool_calls` audit rows. CLAI2's
+current run's directory is mounted, so earlier runs' files (possibly from other targets) stay invisible. Wrapped calls still write their `tool_calls` audit rows. Pax's
 `run.code_mode` stays off and `coder` stays unloaded. State is fresh per session.
 
 **Decision model (`--decision-model` / `-D`, #256).** Optional and off by default (`google-decisions:`,
@@ -63,7 +63,7 @@ Keep speculation opt-in. Eager Code Mode runs complete statements as they stream
 can start independent reads before execution reaches their statement. Two lookups whose IDs
 are already known are candidates. A lookup that needs an ID from an earlier result must wait.
 
-CLAI2's stock `SpeculativeExecution` allowlist hardcodes `FileSystem` and `ClaiDocs` tools (`SPECULATIVE_TOOLS`) and overrides `read_only` metadata. Attaching `CodeMode(..., speculate=['list_findings', 'get_finding', 'lookup_evidence'])` directly on `partex_reviewer_agent` restricts speculation to the reviewer's run-scoped reads without modifying CLAI2, and counts speculative calls against concurrency and tool-call limits from launch, including calls that are discarded. Cancel unused work where possible.
+Pax's stock `SpeculativeExecution` allowlist hardcodes `FileSystem`, `PaxDocs`, and the legacy `ClaiDocs` tools (`SPECULATIVE_TOOLS`) and overrides `read_only` metadata. Attaching `CodeMode(..., speculate=['list_findings', 'get_finding', 'lookup_evidence'])` directly on `partex_reviewer_agent` restricts speculation to the reviewer's run-scoped reads without modifying Pax, and counts speculative calls against concurrency and tool-call limits from launch, including calls that are discarded. Cancel unused work where possible.
 
 Compare direct calls, eager Code Mode, and eager Code Mode with speculation on the same
 offline fixtures. Record answer accuracy, time to answer, and calls started, reused, or
@@ -101,6 +101,6 @@ untrusted data. A full Python kernel under the host user's account has that user
 
 ## M0 local dependencies
 
-CLAI2 depends on `pydantic-monty` even when Code Mode is disabled. Install the metapackage, client,
+Pax depends on `pydantic-monty` even when Code Mode is disabled. Install the metapackage, client,
 and worker runtime as the locked PyPI wheels (exact-pinned together). Verify version resolution
 and worker startup in a fresh environment, as `scripts/check_greenfield.py` does.

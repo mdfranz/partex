@@ -1,7 +1,7 @@
 """Deterministic, operator-only target discovery rollup over the run store.
 
 Pure aggregation and formatting over :class:`~partex.storage.RunReader` / :class:`~partex.storage.RunStore`:
-no network, no model calls, and no ``pydantic_clai2`` imports. Every evidence record is passed through
+no network, no model calls, and no ``pydantic_ai_pax`` imports. Every evidence record is passed through
 :func:`partex.models.redact`, query/fragment parts are stripped from paths and redirect targets, and
 C0/C1 terminal control sequences are neutralized before any string is returned.
 """
@@ -776,7 +776,7 @@ def render_target_detail(rollup: DiscoveryRollup, query: str) -> str:
 
 
 def format_status_badge(total: int, up: int, findings: int) -> str:
-    """Format a pure-ASCII status-row badge (CLAI2 replaces non-ASCII in the status bar)."""
+    """Format a pure-ASCII status-row badge (Pax replaces non-ASCII in the status bar)."""
     if total == 0:
         return ''
     base = f'targets: {up}/{total} up'

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # partex.sh: open a `partex agent` session on a target: baseline + version-disclosure and passive discovery, a briefing, then
-# the CLAI2 terminal where you direct further GET/HEAD/OPTIONS probes and checks (model via the Gateway).
+# the Pax terminal where you direct further GET/HEAD/OPTIONS probes and checks (model via the Gateway).
 #
 #   ./partex.sh http://192.168.12.1/home      # asks who authorized the test
 #   ./partex.sh -a 'I own 192.168.12.1 and authorize this test, 2026-11-19' http://192.168.12.1/home

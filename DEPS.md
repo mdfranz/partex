@@ -23,16 +23,16 @@ checkout pyprojects, November 2026):
 
 | Library | Floor | Via | Used by partex for |
 |---|---|---|---|
-| `httpx` | 0.28.1 | `pydantic-clai2` (direct, transitional until its own httpx2 migration) | Fallback for `target.py` if the M0 API gate fails (§3.9, §8.1) |
+| `httpx` | 0.28.1 | `pydantic-ai-pax` (direct, transitional until its own httpx2 migration) | Fallback for `target.py` if the M0 API gate fails (§3.9, §8.1) |
 | `httpx2` | 2.7 | `pydantic-ai-slim`, `pydantic-ai-harness` (direct) | `target.py` scoped client — **decided §8.1**, M0 API gate §3.9 |
 | `anyio` | 4.7.0 | `pydantic-ai-slim` (direct, pinned for cancellation delivery) | Worker task groups, `CapacityLimiter`, `fail_after`, `to_thread` (`PLAN.md` §7.1) |
 | `pydantic` | 2.12 | `pydantic-ai-slim` | All data contracts (`PLAN.md` §5) |
-| `pyyaml` | 6.0.2 | `pydantic-clai2` (direct) | `SKILL.md` frontmatter lint (D6) and `format: openapi` `ConfigExcerpt`s, which may be YAML |
+| `pyyaml` | 6.0.2 | `pydantic-ai-pax` (direct) | `SKILL.md` frontmatter lint (D6) and `format: openapi` `ConfigExcerpt`s, which may be YAML |
 | `referencing` | 0.37.0 | `mcp` (via `pydantic-ai-slim`, declared direct in #153) | JSON Schema / OpenAPI `$ref`, `$id`, `$anchor`, and `$dynamicRef` resolution in `openapi_resolver.py` |
-| `rich` | 14 | `pydantic-clai2` (direct) | CLI summary output |
-| `prompt-toolkit` | 3.0.52 | `pydantic-clai2` (direct) | `chat` TUI (via CLAI2) |
-| `logfire[httpx]` | 4.31.0 | `pydantic-clai2` (direct) | Opt-in observability (`PLAN.md` §11.1) |
-| `pydantic-monty` family | >=1.5.0,<2 | `pydantic-ai-harness[code-mode]` | CLAI2 Code Mode; required by CLAI2 even when Code Mode is off (`RUNTIME.md`) |
+| `rich` | 14 | `pydantic-ai-pax` (direct) | CLI summary output |
+| `prompt-toolkit` | 3.0.52 | `pydantic-ai-pax` (direct) | `chat` TUI (via Pax) |
+| `logfire[httpx]` | 4.31.0 | `pydantic-ai-pax` (direct) | Opt-in observability (`PLAN.md` §11.1) |
+| `pydantic-monty` family | >=1.5.0,<2 | `pydantic-ai-harness[code-mode]` | Pax Code Mode; required by Pax even when Code Mode is off (`RUNTIME.md`) |
 | `opentelemetry-api` | 1.28.0 | `pydantic-ai-slim` | Tracing surface (already imported by the agent stack) |
 
 **Headline claim (initial baseline, amended by §8.9):** the original v1 milestones (M0–M6)
@@ -133,7 +133,7 @@ No ORM, no migration library; `PRAGMA user_version` per `PLAN.md` §7.
 ### 3.9 `target.py` pins `httpx2` (decided §8.1; M0 API gate)
 
 `pydantic-ai-slim` and `pydantic-ai-harness` depend on **`httpx2>=2.7`** and import it
-throughout, while `pydantic-clai2` pins **`httpx>=0.28.1`** only transitionally (its
+throughout, while `pydantic-ai-pax` pins **`httpx>=0.28.1`** only transitionally (its
 pyproject comments the pin as "until its own `httpx2` migration"). `target.py` therefore
 pins **`httpx2`** — one HTTP API surface to audit, on the line the stack itself maintains.
 The M0 gate stands: verify by inspection that the custom-transport API covers §4.2 (pinned
@@ -169,10 +169,10 @@ addition (§8.9, #69), `playwright`/`websockets` arrive with the scheduled harne
 `uv lock --check` and `uv sync --frozen`, and `scripts/check_greenfield.py` fails the build if
 any locked requirement is unpinned, unhashed, or from a path/VCS/URL source, or if an `artex`
 or `strix` distribution appears. Bumping the stack is an explicit, reviewed `uv.lock` change
-(`uv lock --upgrade-package pydantic-clai2`).
+(`uv lock --upgrade-package pydantic-ai-pax`).
 
 Observed at the switch (2026-11-18): `pydantic-ai-slim` 2.68.0, `pydantic-ai-harness` 0.68.0,
-`pydantic-clai2` 0.68.0, `pydantic-monty` (metapackage, client, runtime) 1.6.0, `httpx2` 2.16.2.
+`pydantic-clai2` 0.68.0 (since renamed `pydantic-ai-pax`), `pydantic-monty` (metapackage, client, runtime) 1.6.0, `httpx2` 2.16.2.
 
 ## 5. Capture and probe surfaces: three required paths
 
@@ -286,7 +286,7 @@ above stay terse.
 
 1. **§3.9 (httpx vs httpx2) — decided**: `target.py` pins **`httpx2`**. The whole agent
    stack already builds on it (`pydantic-ai-slim` imports `httpx2` throughout;
-   `pydantic-clai2` comments its legacy `httpx` pin as "until its own `httpx2` migration"),
+   `pydantic-ai-pax` comments its legacy `httpx` pin as "until its own `httpx2` migration"),
    so one HTTP API surface is audited instead of two, on the line the stack itself
    maintains. The M0 gate stands: verify the custom-transport API covers §4.2 (pinned
    resolver connect-to-IP with original `Host`/SNI/hostname cert verification,

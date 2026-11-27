@@ -1,7 +1,7 @@
-"""Agent adapter — the only package that imports ``pydantic_clai2`` (PLAN §2, §9).
+"""Agent adapter — the only package that imports ``pydantic_ai_pax`` (PLAN §2, §9).
 
 ``run_chat`` opens one run read-only, prints an opening briefing from the reviewer, then hands the
-reviewer to the CLAI2 terminal with only the operator-only ``partex_targets`` plugin loaded: no coding
+reviewer to the Pax terminal with only the operator-only ``partex_targets`` plugin loaded: no coding
 tools, no filesystem, no shell, no network beyond the model provider. ``run_agent`` does the same over a
 new live session, adding ``partex_scope`` and the tester's scoped ``http_request`` and ``run_check`` (#54).
 """
@@ -18,7 +18,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings, ThinkingLevel
 from pydantic_ai.usage import UsageLimits
 
-# Imported at module level, before any tool frames text: CLAI2 registers its own framing tags at
+# Imported at module level, before any tool frames text: Pax registers its own framing tags at
 # import time, and a tag registered after escaping has started changes how earlier text renders.
 from pydantic_ai_pax import chat  # pyright: ignore[reportMissingTypeStubs, reportUnknownVariableType]
 from pydantic_ai_pax.config import PluginSettings, Settings  # pyright: ignore[reportMissingTypeStubs]
@@ -47,16 +47,16 @@ from .tester import TesterDeps, build_tester_agent
 from .tools import ReviewDeps
 from .usage import UsageRecordingModel
 
-# Explicit CLAI2 settings, so the operator's saved CLAI2 preferences cannot change what the reviewer is:
-# model=None keeps the agent's model (CLAI2's default model would otherwise override it), and Code Mode
+# Explicit Pax settings, so the operator's saved Pax preferences cannot change what the reviewer is:
+# model=None keeps the agent's model (Pax's default model would otherwise override it), and Code Mode
 # stays off so the model calls partex's tools natively instead of through a run_code sandbox (RUNTIME.md M5).
-# The session namer is off too (#102): it is decorative, CLAI2 hard-codes its output cap at 250 tokens so a
+# The session namer is off too (#102): it is decorative, Pax hard-codes its output cap at 250 tokens so a
 # reasoning model spends it all before answering (OutputTokenLimitExceeded), and it would send engagement
 # conversation content to the model a second time.
 CHAT_SETTINGS = Settings(model=None, code_mode=False, speculative_code_mode=False, session_namer=False)
 
 DEFAULT_REQUEST_LIMIT = 200
-"""Model turns one operator prompt may take. ``chat()`` does not apply CLAI2's ``request_limit`` setting (only its CLI
+"""Model turns one operator prompt may take. ``chat()`` does not apply Pax's ``request_limit`` setting (only its CLI
 does), so without an explicit ``usage_limits`` pydantic-ai's own default of 50 silently stopped long turns mid-task."""
 
 __all__ = [
@@ -108,7 +108,7 @@ def _load_seed_bundle(path: Path) -> LoadedBundle:
 
 
 async def _pause_on(summary: str | None, console: Console) -> None:
-    """CLAI2 takes over the screen and shows only its own transcript; let the operator read the briefing
+    """Pax takes over the screen and shows only its own transcript; let the operator read the briefing
     first. It stays in the terminal's scrollback above the session."""
     if summary is not None and console.is_terminal:
         await anyio.to_thread.run_sync(lambda: console.input('[dim]Press Enter to open the chat…[/]'))
@@ -147,7 +147,7 @@ async def run_chat(
         summary = await brief(model, deps, console, model_settings=safety) if briefing else None
         await _pause_on(summary, console)
         agent = build_reviewer_agent(model, briefing=summary, skills=skills, model_settings=safety)
-        # CLAI2 stores conversations, input history, and telemetry beside its settings database.
+        # Pax stores conversations, input history, and telemetry beside its settings database.
         chat_dir = db_path.with_name(f'{db_path.name}.clai2')
         chat_dir.mkdir(mode=0o700, exist_ok=True)
         targets_control = await TargetsControl.for_reader(reader, run_id)
@@ -190,7 +190,7 @@ async def run_agent(
     thinking: ThinkingLevel | None = None,
     console: Console | None = None,
 ) -> str:
-    """Open a new live session on *engagement_path*, brief, then let the operator direct probes in CLAI2.
+    """Open a new live session on *engagement_path*, brief, then let the operator direct probes in Pax.
 
     The engine does the gates (``--authorized``, E1–E7, credentials) before any socket, the baseline
     capture, and the selected active *checks*; the session's run is finalized when the chat ends.
@@ -282,8 +282,8 @@ async def run_agent(
                 web_search_enabled=searcher is not None,
                 model_settings=tester_settings(safety, thinking),
             )
-            # The operator-only /scope command is a CLAI2 plugin (slash commands exist only as plugins). A
-            # private, empty settings store keeps the operator's saved and drop-in CLAI2 plugins out, and
+            # The operator-only /scope command is a Pax plugin (slash commands exist only as plugins). A
+            # private, empty settings store keeps the operator's saved and drop-in Pax plugins out, and
             # only the partex plugin is declared, so the session loads nothing else (#64).
             with tempfile.TemporaryDirectory(prefix='partex-clai2-') as config_dir:
                 scope_token = current_control.set(ScopeControl(session, write_gate=write_gate))

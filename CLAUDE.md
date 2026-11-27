@@ -52,7 +52,7 @@ While working:
 - Tests are hermetic: no non-loopback network, no real model calls, no real credentials.
 - Engagement credentials are env var **names**, never values; never commit secrets.
 - Only `target.py` opens sockets for engine traffic (M7 `browser.py` is the one sanctioned
-  exception); only `agent_adapter/` imports `pydantic_clai2`; the engine is the only DB writer.
+  exception); only `agent_adapter/` imports `pydantic_ai_pax`; the engine is the only DB writer.
 - Skills under `skills/` are data: never import or execute them.
 
 ## Git notes

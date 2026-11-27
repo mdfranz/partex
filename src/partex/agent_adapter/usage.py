@@ -3,7 +3,7 @@
 Per-turn metrics (tokens, cache hits, latency, prompts/completions) are recorded on trace spans (local
 JSONL log and opt-in Logfire). ``runs`` keeps aggregate totals (``model_calls``, ``input_tokens``,
 ``output_tokens``) so ``partex report`` and ``partex show`` are complete even with ``--log-file off``
-and without ``--logfire``. Wrapping the model, not the agent, catches every turn CLAI2 drives internally.
+and without ``--logfire``. Wrapping the model, not the agent, catches every turn Pax drives internally.
 """
 
 from collections.abc import AsyncGenerator

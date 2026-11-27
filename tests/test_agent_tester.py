@@ -1,6 +1,6 @@
 """``partex agent`` — live session + tester tools against the loopback fixture app (issue #54).
 
-The model is a scripted ``FunctionModel``; the CLAI2 terminal is replaced. Every request goes to the
+The model is a scripted ``FunctionModel``; the Pax terminal is replaced. Every request goes to the
 local fixture target, and scope refusals are asserted to leave its request log untouched.
 """
 
@@ -334,10 +334,10 @@ async def test_instructions_state_scope_and_budget(tmp_store: RunStore, tmp_path
     assert 'terse' in text.lower() and 'lead with the answer' in text  # brevity guidance (session review)
 
 
-# ── run_agent (CLAI2 replaced) ────────────────────────────────────────────────
+# ── run_agent (Pax replaced) ────────────────────────────────────────────────
 
 
-async def test_run_agent_opens_clai2_on_a_live_session(
+async def test_run_agent_opens_pax_on_a_live_session(
     tmp_path: Path, target_app: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import partex.agent_adapter
@@ -1161,7 +1161,7 @@ async def test_run_code_sees_only_this_runs_artifacts(tmp_store: RunStore, tmp_p
 
 
 def test_session_namer_is_off_for_chat_and_agent() -> None:
-    """CLAI2 caps the namer at 250 output tokens, which a reasoning model spends before answering (#102)."""
+    """Pax caps the namer at 250 output tokens, which a reasoning model spends before answering (#102)."""
     assert CHAT_SETTINGS.session_namer is False
 
 

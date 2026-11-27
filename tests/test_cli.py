@@ -705,7 +705,7 @@ def test_review_text_reports_invalid_bundle(
     assert err.startswith('error: ')
 
 
-# ── chat (#49) — the CLAI2 terminal is replaced; nothing interactive starts ───
+# ── chat (#49) — the Pax terminal is replaced; nothing interactive starts ───
 
 
 briefings: list[bool] = []
