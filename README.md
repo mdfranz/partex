@@ -1,6 +1,6 @@
 # partex
 
-**`partex` is a local, terminal-native, evidence-first web and API security testing workbench in Python 3.14, built on the Pydantic AI stack.**
+**`partex` is a local, terminal-native, evidence-first web and API security testing workbench in Python 3.14, built on the Pydantic AI stack with Pax TUI as the primary operator interface.**
 
 Review captured traffic offline with deterministic checks, probe authorized targets through a code-enforced scope gate, replay verification recipes, and run interactive AI investigation sessions backed by an auditable SQLite engagement record.
 
@@ -22,13 +22,14 @@ The core boundary splits the work cleanly: **a deterministic Python engine owns 
 
 | Deliberate non-goal | What `partex` does instead |
 | --- | --- |
-| **No MITM proxy** | Captures traffic only through `partex`'s own `ScopedHttpClient`, operator-exported HAR files (`partex import-har`), and the planned M7 Playwright/CDP capture harness (`browser.py`) — never by intercepting external tools or browser traffic. |
+
+| **No GUI or web UI** | Terminal-first CLI and Pax TUI (`partex chat`, `partex agent`, `./partex.sh`), scriptable and headless-capable for CI. |
 | **No multi-user server or hosted daemon** | Built for one operator on one machine with a local SQLite (WAL) database (`partex.db`). No Postgres, message broker, or container cluster required. |
-| **No GUI or web UI** | Terminal-first CLI and CLAI2 TUI (`partex chat`, `partex agent`, `./partex.sh`), scriptable and headless-capable for CI. |
+| **No MITM proxy** | Captures traffic only through `partex`'s own `ScopedHttpClient`, operator-exported HAR files (`partex import-har`), and the planned M7 Playwright/CDP capture harness (`browser.py`) — never by intercepting external tools or browser traffic. |
 | **Not completely autonomous** | Operator-in-the-loop by design: live runs require written engagement authorization (`--authorized`), strict scope/RPS/request budgets, operator confirmation via operator-only slash commands out of model reach (`/scope add`, `/scope nmap`), and interactive terminal approval for every state-changing request (`POST`/`PUT`/`PATCH`/`DELETE`, denied automatically when headless). The model can never mutate findings or scope directly. |
 | **No executable skills** | Markdown playbooks under [`skills/`](skills/) are inert data loaded on demand via `load_capability` — never imported or executed. Executable checks load solely from installed Python distributions via `partex.checks` entry points. |
 
-## How it was built
+## How and why it was built
 
 `partex` grew out of studying the ARTEX security platforms ([docs/lineage/SOURCES.md](docs/lineage/SOURCES.md)) while committing to a greenfield Python implementation with zero shared code, schema, or runtime — hardened after the November 2026 ARTEX prebuilt-image backdoor via hash-pinned `uv.lock`, a 2-day PyPI cool-off (`exclude-newer = "2 days"`, exempting only named `pydantic-*` packages in [`pyproject.toml`](pyproject.toml)), [`scripts/check_greenfield.py`](scripts/check_greenfield.py), and zero prebuilt images ([DEPS.md](DEPS.md)).
 
@@ -51,7 +52,7 @@ The [Pydantic](https://github.com/pydantic/pydantic) ecosystem provides the type
 - **Pydantic (`pydantic`):** Evidence records (`http`, `config`, `artifact`), engagements, scope rules, and findings are `BaseModel`s with `extra='forbid'`. Discriminated unions and `TypeAdapter` round-trip records through bundle import, SQLite storage, and canonical JSON export; engagement validation errors map directly onto E-rule failure codes.
 - **Pydantic AI (`pydantic-ai-slim`):** `Agent` and `RunContext` drive both the read-only reviewer (`partex chat`) and live tester (`partex agent`). `Capability` defers skill playbooks until `load_capability` is called; `pydantic_ai.framing.wrap` and `register_tag` quarantine target-controlled tool output as untrusted data; `WebSearch(local=None)` isolates optional provider-native web search in a separate zero-tool agent; and a `WrapperModel` (`UsageRecordingModel`) records per-request token spend in `llm_usage`.
 - **Pydantic AI Harness (`pydantic-ai-harness`):** Supplies `CodeMode` (connecting Monty to the agent), `DetectLoops` (nudging repetitive tester loops instead of burning request budget), and the `ask_user` request/response contracts powering interactive write approvals.
-- **CLAI2 (`pydantic-clai2`):** `chat()` runs the interactive terminal loop. Operator-only CLAI2 `Plugin`s provide `/scope`, `/targets`, `/report`, and `/secrets` outside model reach (`partex chat` loads only the read-only `/targets` plugin), `TerminalAnswerer` renders inline write-approval pickers, and terminal history stays separated in `partex.db.clai2/`.
+- **Pax (`pydantic-ai-pax`):** `chat()` runs the interactive terminal loop. Operator-only Pax `Plugin`s provide `/scope`, `/targets`, `/report`, and `/secrets` outside model reach (`partex chat` loads only the read-only `/targets` plugin), `TerminalAnswerer` renders inline write-approval pickers, and terminal history stays separated in `partex.db.clai2/`.
 - **Monty (`pydantic-monty`):** Runs model-generated Python inside `run_code` (`eager=True`, `max_tool_calls=50`, 10-second timeout, 256 MiB memory cap) with a per-run read-only `/artifacts` `MountDir` and `os_access=None` — no host filesystem, environment, clock, network, or shell. `partex sandboxes` reports the installed Monty runtime alongside host sandboxes.
 - **Logfire (`logfire`):** Local JSONL trace logs are written by default with tool-content secret scrubbing; `--logfire` opts into remote span export, and `target.py` emits manual metadata-only request spans (global `logfire.instrument_httpx()` is forbidden so engagement credentials never leak).
 
@@ -69,25 +70,6 @@ The [Pydantic](https://github.com/pydantic/pydantic) ecosystem provides the type
 | --- | --- | --- | --- | --- |
 | **Analyst / Reviewer** (`partex agent`, `partex chat`) | `--model` / `-m` (+ optional `--gateway-route` / `-r`) | Any Pydantic AI `provider:model` (`anthropic:`, `openai:`, `google:`, `google-cloud:`, `openrouter:`, …) or Pydantic AI Gateway route | Scoped live tools, Monty `run_code` sandbox, deferred skills, read-only DB views | `--thinking` / `-T`, `--request-limit` / `-L`, `PARTEX_GOOGLE_SAFETY_SETTINGS`, `DetectLoops`, `llm_usage` tracking |
 | **Web Search** (optional, off by default) | `--search-model` / `-S` | Native server-side search only: `anthropic:`, `google:`, `google-cloud:` (Vertex ADC), `openai:` (Responses API); never Gateway | Isolated one-shot `Agent` with `WebSearch(local=None)` only — zero tools, DB, target client, or filesystem | Query egress validation (no secrets/URLs/`ev_`/`fn_` IDs, 200-char max), 20 calls/session, 20 sources/query, Anthropic `direct`-only + `max_uses=3`, results persisted to `web_research` |
-
-## Quick start
-
-Run a deterministic, model-free passive review over the bundled fixture bundle (Python 3.14+ and `uv`):
-
-```sh
-uv sync --frozen
-uv run partex review fixtures/bundles/valid --all
-```
-
-Or run a model-free live probe against the bundled local test app (`fixtures/target_app/app.py`):
-
-```sh
-# Terminal 1
-uv run python fixtures/target_app/app.py
-
-# Terminal 2
-./partex.sh --no-tui http://127.0.0.1:8765/
-```
 
 See **[USAGE.md](USAGE.md)** for interactive AI sessions (`partex.sh`, OpenRouter, Pydantic AI Gateway, direct Gemini), `nmap -oX` and URL-list scoping (`-N`, `-u`), write-approval flags (`-M`, `-w`, `-W`), operator slash commands, CLI subcommands, and `PARTEX_STATE_DIR` management.
 

@@ -63,7 +63,7 @@ The `version-disclosure` check probes for evidence such as:
 - `./partex.sh list` (or `./partex.sh -l`) lists saved runs from the default database along with detected host sandboxes.
 - `uv run partex show RUN_ID --format text` prints saved evidence, findings, coverage gaps, and `llm_usage`.
 - `uv run partex reports RUN_ID` lists Markdown reports saved by the agent's `save_report` tool; `uv run partex reports RUN_ID NAME` prints one report (both accept `--db PATH` and `--json`).
-- `./partex.sh --read-only [RUN_ID]` opens a read-only CLAI2 chat session over a saved run with no network traffic (defaults to the most recent usable run if `RUN_ID` is omitted).
+- `./partex.sh --read-only [RUN_ID]` opens a read-only Pax chat session over a saved run with no network traffic (defaults to the most recent usable run if `RUN_ID` is omitted).
 - `./partex.sh --resume [RUN_ID]` continues testing: opens a new live session on the earlier run's recorded target, scope, and authorization (leaving the earlier run unchanged); `-n`, `-R`, `-k`, `-M`/`-w`/`-W`, and model flags apply as usual.
 
 ## Multi-model configuration: analyst, search, and decision models
@@ -172,7 +172,18 @@ Restrict a session to exact URLs listed in a file (one per line, `#` comments, t
 
 ### Importing `nmap -oX` scans (`-N` / `partex nmap`)
 
-Import authorized HTTP(S) targets directly from `nmap -oX` XML scan output:
+Generate the scan XML with TCP service detection (`-sV`) and XML output (`-oX`):
+
+```sh
+nmap -sV -oX scan.xml <targets>
+```
+
+(Add `-p <ports>` or `-p-` to scan non-default ports, `-sT` if unprivileged or `-sS` with privileges, and `-Pn` if targets block host-discovery probes. `-n` is fine unless you plan to pass `--use-hostnames` to `partex nmap`.)
+
+- **Why `-sV` matters:** `partex` imports open TCP ports (`protocol="tcp"`, `state="open"`) on up hosts whose `<service>` name is `http`, `https`, `http-alt`, `https-alt`, or `http-proxy`, promoting HTTP services with `tunnel="ssl"` to `https://` while skipping non-HTTP TLS services (such as `ajp13` or `xmpp`). Without `-sV`, non-standard ports are not probed for HTTP or TLS, and ports with no service name only fall back to `{80: http, 443: https}`.
+- **File requirements:** UTF-8 nmap XML (`<nmaprun>` root, ≤ 64 MiB); entity declarations and external DTDs are refused.
+
+Import the scan directly into a live session:
 
 ```sh
 ./partex.sh -N scan.xml
@@ -182,13 +193,15 @@ Import authorized HTTP(S) targets directly from `nmap -oX` XML scan output:
 - The session opens with one initial `GET` per imported target, captured as evidence and shown live on a terminal; `partex.sh` automatically raises `--max-requests` when the import needs room.
 - `<target-url>` is optional with `-N`, and `-N` can be combined with `-u` (or passed via `PARTEX_NMAP_FILE`).
 
-To inspect or edit the converted target list before starting a session, run the standalone converter:
+To inspect or edit the converted target list before starting a session (or combine a fast TCP discovery sweep with a targeted `-sV` pass), run the standalone converter:
 
 ```sh
 uv run partex nmap scan.xml [--use-hostnames] [--out targets.txt]
+# or multiple passes together:
+uv run partex nmap sweep.xml sv.xml --out targets.txt
 ```
 
-`partex nmap` accepts multiple scan files (for example, a discovery sweep plus a `-sV` pass), writes `# source:` lines recording each scan file and its SHA-256 hash, and defaults to scanned IPs (pass `--use-hostnames` to use scan PTR hostnames instead).
+`partex nmap` unions entries across multiple scan files in first-seen order, writes `# source:` lines recording each scan file and its SHA-256 hash, and defaults to scanned IPv4/IPv6 addresses (pass `--use-hostnames` to use scan PTR hostnames instead).
 
 ## Budgets, write policy, turn limits, thinking & telemetry
 
@@ -206,13 +219,13 @@ uv run partex nmap scan.xml [--use-hostnames] [--out targets.txt]
 
 ## Interactive operator commands & agent tools
 
-### Operator-only slash commands (CLAI2 plugins)
+### Operator-only slash commands (Pax plugins)
 
-Slash commands are intercepted by the CLAI2 terminal host and never exposed to the model:
+Slash commands are intercepted by the Pax terminal host and never exposed to the model:
 
 | Command | Availability | What it does |
 | --- | --- | --- |
-| `/targets [host \| --all \| --findings]` | `agent`, `chat`, standalone CLAI2 | Deterministic, secret-redacted rollup of discovered targets, paths, banners, findings, and coverage gaps across the current run or saved runs. Usable standalone in CLAI2 via `partex.agent_adapter.targets_plugin:TargetsPlugin`. |
+| `/targets [host \| --all \| --findings]` | `agent`, `chat`, standalone Pax | Deterministic, secret-redacted rollup of discovered targets, paths, banners, findings, and coverage gaps across the current run or saved runs. Usable standalone in Pax via `partex.agent_adapter.targets_plugin:TargetsPlugin`. |
 | `/scope` | `agent` | Shows the current scope and engagement limits. |
 | `/scope add <host[:port]\|url>` | `agent` | Stages a scope extension (and announces `-k` insecure TLS status if active); takes effect only after `/scope confirm`. |
 | `/scope nmap <scan.xml>` | `agent` | Stages an `nmap -oX` import batch; `/scope confirm` applies it atomically and records the scan path and SHA-256 hash. |
@@ -240,8 +253,8 @@ Run `uv run partex --help` or `uv run partex <command> --help` for full options:
 | `partex review <bundle>` | Offline, model-free | Run deterministic passive checks (`--checks` or `--all`) over an offline bundle |
 | `partex test <engagement>` | Live, model-free | Run baseline/active/passive checks against an authorized target (`--authorized` required) |
 | `partex verify <run-id> <finding-id>` | Live, model-free | Replay a finding's verification recipe to test reproducibility (`--authorized` required) |
-| `partex agent <engagement>` | Live, interactive TUI | Open a scoped CLAI2 live testing session (`--authorized` and `--model` required) |
-| `partex chat <run-id>` | Offline, interactive TUI | Open a read-only CLAI2 reviewer over a saved run (`--model` required) |
+| `partex agent <engagement>` | Live, interactive TUI | Open a scoped Pax live testing session (`--authorized` and `--model` required) |
+| `partex chat <run-id>` | Offline, interactive TUI | Open a read-only Pax reviewer over a saved run (`--model` required) |
 | `partex runs` | Offline | List runs stored in the database (`--json` supported) |
 | `partex show <run-id>` | Offline | Export or display a saved run (`--format text\|json`, `--include-secrets`, `--out`) |
 | `partex report` | Offline | Cross-run rollup of findings, model spend, and tool calls |
