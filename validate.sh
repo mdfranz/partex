@@ -10,6 +10,10 @@
 #   -t, --threshold FLOAT      confidence cutoff for skill picks and [uncertain] flags (default 0.75)
 #       --max-evidence N       max deduplicated HTTP exchanges to classify (default 10)
 #       --max-findings N       max findings to triage (default 20)
+#       --logfire              send telemetry traces to Logfire [PARTEX_LOGFIRE=1]; needs LOGFIRE_TOKEN
+#       --logfire-content      keep prompts and evidence excerpts out of the secret scrubber in traces
+#                              [PARTEX_LOGFIRE_CONTENT=1]; use on non-sensitive targets only
+#       --log-file PATH|off    write traces to a local mode-0600 JSONL file [PARTEX_LOG_FILE]
 #       --json                 output structured JSON instead of text
 #   -o, --out PATH             write full JSON report to PATH
 #   -h, --help
@@ -22,6 +26,9 @@ DB=${PARTEX_DB:-}
 THRESHOLD=0.75
 MAX_EVIDENCE=10
 MAX_FINDINGS=20
+LOGFIRE_FLAG=
+LOGFIRE_CONTENT_FLAG=
+LOG_FILE=
 JSON_FLAG=
 OUT=
 RUN_ID=
@@ -33,6 +40,9 @@ while [[ $# -gt 0 ]]; do
     -t|--threshold) THRESHOLD=${2?$1 needs a value}; shift 2 ;;
     --max-evidence) MAX_EVIDENCE=${2?$1 needs a value}; shift 2 ;;
     --max-findings) MAX_FINDINGS=${2?$1 needs a value}; shift 2 ;;
+    --logfire) LOGFIRE_FLAG=1; shift ;;
+    --logfire-content) LOGFIRE_CONTENT_FLAG=1; shift ;;
+    --log-file) LOG_FILE=${2?$1 needs a value}; shift 2 ;;
     --json) JSON_FLAG=1; shift ;;
     -o|--out) OUT=${2?$1 needs a value}; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -57,6 +67,7 @@ if [[ -z $state_dir ]]; then
 fi
 DB=${DB:-$state_dir/partex.db}
 case $DB in /*) ;; *) DB=$PWD/$DB ;; esac
+case $LOG_FILE in ''|/*|[Oo][Ff][Ff]|[Nn][Oo][Nn][Ee]|0|[Ff][Aa][Ll][Ss][Ee]) ;; *) LOG_FILE=$PWD/$LOG_FILE ;; esac
 case $OUT in ''|/*) ;; *) OUT=$PWD/$OUT ;; esac
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -66,6 +77,9 @@ ARGS=(--db "$DB" --threshold "$THRESHOLD" --max-evidence "$MAX_EVIDENCE" --max-f
 for _dm in ${DECISION_MODELS[@]+"${DECISION_MODELS[@]}"}; do
   ARGS+=(--decision-model "$_dm")
 done
+[[ -z $LOGFIRE_FLAG ]] || ARGS+=(--logfire)
+[[ -z $LOGFIRE_CONTENT_FLAG ]] || ARGS+=(--logfire-content)
+[[ -z $LOG_FILE ]] || ARGS+=(--log-file "$LOG_FILE")
 [[ -z $JSON_FLAG ]] || ARGS+=(--json)
 [[ -z $OUT ]] || ARGS+=(--out "$OUT")
 [[ -z $RUN_ID ]] || ARGS+=("$RUN_ID")

@@ -1,6 +1,7 @@
 """Hermetic tests for the decision-model role (-D), decide.py, usage, telemetry, and eval fixture (#256)."""
 
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -37,7 +38,7 @@ from partex.agent_adapter.decide import (
     scrub_text,
 )
 from partex.agent_adapter.usage import UsageRecordingModel
-from partex.models import HttpEvidence, HttpExchange, HttpRequest, HttpResponse
+from partex.models import Finding, HttpEvidence, HttpExchange, HttpRequest, HttpResponse
 from partex.models_config import resolve_decision_model
 from partex.storage import RunStore
 from partex.telemetry import configure_telemetry
@@ -552,3 +553,179 @@ def test_eval_fixture_schema_adversarial_slice_and_hermetic_eval_run() -> None:
         timeout=15,
     )
     assert proc.returncode == 0 and '--ab-unsure' in proc.stdout
+
+
+def _load_validate_module() -> Any:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location('partex_validate_run', REPO_ROOT / 'scripts' / 'validate_run.py')
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules['partex_validate_run'] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+async def _seed_validate_db(db_path: Path) -> str:
+    ev = HttpEvidence(
+        id='ev_' + '1' * 16,
+        source='capture:local',
+        http=HttpExchange(
+            request=HttpRequest(method='GET', url='http://127.0.0.1:8080/health', headers=[]),
+            response=HttpResponse(status_code=200, headers=[('Content-Type', 'application/json')], body='{"ok":true}'),
+        ),
+    )
+    finding = Finding(
+        id='fn_' + '2' * 16,
+        check_id='header-security',
+        check_version='1',
+        severity='low',
+        subject='http://127.0.0.1:8080/health',
+        title='Missing X-Content-Type-Options header',
+        description='Response does not include X-Content-Type-Options: nosniff.',
+        evidence_ids=[ev.id],
+        remediation='Set X-Content-Type-Options: nosniff.',
+        status='reported',
+    )
+    async with await RunStore.open(db_path) as store:
+        run_id = await store.create_run(
+            input_kind='bundle',
+            input_ref='bundle',
+            input_sha256='0' * 64,
+            engine_version='0.1.0',
+            selected_checks=['header-security'],
+        )
+        await store.add_evidence(run_id, ev)
+        await store.commit_findings(run_id, [finding])
+        await store.set_state(run_id, 'checks_complete')
+    return run_id
+
+
+def _fake_validate_config() -> Any:
+    def responder(_prompt: str, options_map: dict[str, list[str]]) -> dict[str, dict[str, float]]:
+        out: dict[str, dict[str, float]] = {}
+        for field_name, labels in options_map.items():
+            picked = labels[0]
+            rest = round(0.1 / max(1, len(labels) - 1), 6)
+            out[field_name] = {label: (0.9 if label == picked else rest) for label in labels}
+        return out
+
+    base = resolve_decision_model('google-decisions:gemini-decision-1', env={'GOOGLE_API_KEY': 'AIza-test'})
+    return type(base)(
+        spec=base.spec,
+        provider=base.provider,
+        model_name=base.model_name,
+        auth_mode=base.auth_mode,
+        model=FakeDecisionModel(responder=responder),
+        calibrated=True,
+    )
+
+
+def test_validate_sh_help_lists_logfire_flags() -> None:
+    proc = subprocess.run(
+        ['bash', str(REPO_ROOT / 'validate.sh'), '--help'],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert proc.returncode == 0
+    assert '--logfire' in proc.stdout
+    assert '--logfire-content' in proc.stdout
+    assert '--log-file' in proc.stdout
+
+
+def test_validate_run_logfire_opt_in_and_local_spans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import logfire
+
+    validate_mod = _load_validate_module()
+    db_path = tmp_path / 'validate.db'
+    run_id = anyio.run(lambda: _seed_validate_db(db_path))
+    fake_cfg = _fake_validate_config()
+    monkeypatch.setattr(validate_mod, 'resolve_decision_model', lambda _spec: fake_cfg)
+    monkeypatch.delenv('PARTEX_LOGFIRE', raising=False)
+    monkeypatch.delenv('PARTEX_LOGFIRE_CONTENT', raising=False)
+    monkeypatch.delenv('PARTEX_LOG_FILE', raising=False)
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+    real_configure = logfire.configure
+    real_instrument = logfire.instrument_pydantic_ai
+
+    def record_configure(**kw: Any) -> Any:
+        calls.append(('configure', kw))
+        return None
+
+    def record_instrument(**kw: Any) -> Any:
+        calls.append(('instrument_pydantic_ai', kw))
+        return None
+
+    monkeypatch.setattr(logfire, 'configure', record_configure)
+    monkeypatch.setattr(logfire, 'instrument_pydantic_ai', record_instrument)
+
+    # Default: no --logfire / --log-file -> configure_telemetry is not called.
+    rc = validate_mod.main(['--db', str(db_path), run_id])
+    assert rc == 0
+    assert calls == []
+    assert 'calls=3' in capsys.readouterr().out
+
+    # --logfire flag configures remote ('if-token-present') and instruments pydantic-ai.
+    rc = validate_mod.main(['--db', str(db_path), '--logfire', run_id])
+    assert rc == 0
+    assert [name for name, _ in calls] == ['configure', 'instrument_pydantic_ai']
+    assert calls[0][1]['send_to_logfire'] == 'if-token-present'
+    assert calls[0][1]['additional_span_processors'] == []
+
+    # PARTEX_LOGFIRE=1 env var also opts in.
+    calls.clear()
+    monkeypatch.setenv('PARTEX_LOGFIRE', '1')
+    rc = validate_mod.main(['--db', str(db_path), run_id])
+    assert rc == 0
+    assert [name for name, _ in calls] == ['configure', 'instrument_pydantic_ai']
+    assert calls[0][1]['send_to_logfire'] == 'if-token-present'
+
+    # --log-file writes partex.validate + partex.decision spans locally with send_to_logfire=False and metadata-only.
+    monkeypatch.delenv('PARTEX_LOGFIRE', raising=False)
+    monkeypatch.setattr(logfire, 'configure', real_configure)
+    monkeypatch.setattr(logfire, 'instrument_pydantic_ai', real_instrument)
+    log_path = tmp_path / 'validate-trace.jsonl'
+    rc = validate_mod.main(['--db', str(db_path), '--log-file', str(log_path), run_id])
+    assert rc == 0
+    spans = [json.loads(line) for line in log_path.read_text(encoding='utf-8').splitlines()]
+    names = {s['name'] for s in spans}
+    assert 'partex.validate' in names
+    assert 'partex.decision' in names
+    assert 'Missing X-Content-Type-Options header' not in log_path.read_text(encoding='utf-8')
+
+
+def test_decision_runner_emits_no_logfire_not_configured_warning_in_clean_process() -> None:
+    env = {k: v for k, v in os.environ.items() if k != 'LOGFIRE_IGNORE_NO_CONFIG'}
+    script = (
+        'import anyio\n'
+        'from pathlib import Path\n'
+        'import sys\n'
+        "sys.path.insert(0, str(Path('tests').resolve()))\n"
+        'from plugins.decision import FakeDecisionModel\n'
+        'from partex.agent_adapter import ChoiceSpec, DecisionRunner, frame_decision_excerpt\n'
+        'from partex.models_config import resolve_decision_model\n'
+        "cfg = resolve_decision_model('google-decisions:gemini-decision-1', env={'GOOGLE_API_KEY': 'AIza-test'})\n"
+        "fake = FakeDecisionModel(probs={'yes': 0.9, 'no': 0.1})\n"
+        'cfg = type(cfg)(spec=cfg.spec, provider=cfg.provider, model_name=cfg.model_name, '
+        'auth_mode=cfg.auth_mode, model=fake, calibrated=True)\n'
+        'runner = DecisionRunner(config=cfg, model=fake)\n'
+        "anyio.run(lambda: runner.choose(question='Does this match?', options={'yes': 'Yes', 'no': 'No'}, "
+        "context=frame_decision_excerpt('surface', 'GET /')))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, '-W', 'default', '-c', script],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert proc.returncode == 0
+    assert 'LogfireNotConfiguredWarning' not in proc.stderr

@@ -20,7 +20,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import anyio
+import logfire
 
+from partex import engine
 from partex.agent_adapter.decide import (
     ChoiceSpec,
     DecisionOutcome,
@@ -33,6 +35,14 @@ from partex.errors import PartexError
 from partex.models import ConfigEvidence, Evidence, Finding, HttpEvidence, redact
 from partex.models_config import DECISION_MODEL_ENV, DecisionModelConfig, ModelConfigError, resolve_decision_model
 from partex.storage import CoverageEntry, RunReader, RunRecord
+from partex.telemetry import (
+    LOG_FILE_ENV,
+    LOGFIRE_CONTENT_ENV,
+    LOGFIRE_ENV,
+    configure_telemetry,
+    resolve_log_path,
+    suppress_unconfigured_warning,
+)
 
 SKILL_CANDIDATES: tuple[tuple[str, str], ...] = (
     ('graphql', 'Target exposes a GraphQL endpoint (/graphql, introspection, mutations, or queries).'),
@@ -234,88 +244,108 @@ async def evaluate_run_with_model(
     max_evidence: int,
     max_findings: int,
     timeout_seconds: float,
+    include_content_in_spans: bool = False,
 ) -> dict[str, Any]:
     """Preview skill suggestions, response classification, and finding triage for *snapshot*."""
     http_items = _deduplicated_http(snapshot.evidence, max_evidence)
     findings = snapshot.findings[:max_findings]
     max_calls = max(20, len(http_items) + len(findings) + 5)
-    runner = DecisionRunner(config=config, model=config.model, timeout_seconds=timeout_seconds, max_calls=max_calls)
+    runner = DecisionRunner(
+        config=config,
+        model=config.model,
+        timeout_seconds=timeout_seconds,
+        max_calls=max_calls,
+        include_content_in_spans=include_content_in_spans,
+    )
     allow_uncalibrated = not config.calibrated
 
-    # 1. Skill suggestions (#257 preview) in one batched prefill pass.
-    key_to_skill: dict[str, str] = {}
-    skill_questions: dict[str, ChoiceSpec] = {}
-    for skill_name, desc in SKILL_CANDIDATES:
-        key = skill_name.replace('-', '_')
-        key_to_skill[key] = skill_name
-        skill_questions[key] = ChoiceSpec(
-            question=f'Does the observed target surface warrant the {skill_name} playbook?',
-            options={
-                'yes': f'Relevant: {desc}',
-                'no': f'Not supported by the captured surface ({skill_name} is not indicated).',
-            },
+    suppress_unconfigured_warning()
+    with logfire.span(
+        'partex.validate',
+        run_id=snapshot.run.id,
+        model=config.spec,
+        provider=config.provider,
+        calibrated=config.calibrated,
+        threshold=threshold,
+        evidence_count=len(http_items),
+        findings_count=len(findings),
+    ):
+        # 1. Skill suggestions (#257 preview) in one batched prefill pass.
+        key_to_skill: dict[str, str] = {}
+        skill_questions: dict[str, ChoiceSpec] = {}
+        for skill_name, desc in SKILL_CANDIDATES:
+            key = skill_name.replace('-', '_')
+            key_to_skill[key] = skill_name
+            skill_questions[key] = ChoiceSpec(
+                question=f'Does the observed target surface warrant the {skill_name} playbook?',
+                options={
+                    'yes': f'Relevant: {desc}',
+                    'no': f'Not supported by the captured surface ({skill_name} is not indicated).',
+                },
+            )
+        discovery_context = frame_decision_excerpt(
+            'discovery_summary', _build_discovery_summary(snapshot), max_chars=3000
         )
-    discovery_context = frame_decision_excerpt('discovery_summary', _build_discovery_summary(snapshot), max_chars=3000)
-    skill_raw = await runner.choose_many(
-        skill_questions,
-        context=discovery_context,
-        allow_uncalibrated=allow_uncalibrated,
-    )
-    skill_suggestions: list[dict[str, Any]] = []
-    for key, res in skill_raw.items():
-        skill_name = key_to_skill[key]
-        p_yes = res.prob('yes')
-        skill_suggestions.append(
-            {
-                'skill': skill_name,
-                'p_yes': None if p_yes is None else round(p_yes, 4),
-                **_serialize_result(res, threshold=threshold),
-            }
-        )
-    skill_suggestions.sort(
-        key=lambda row: row['p_yes'] if row['p_yes'] is not None else (1.0 if row['top_label'] == 'yes' else 0.0),
-        reverse=True,
-    )
-
-    # 2. Response classification (#261 preview).
-    response_classes: list[dict[str, Any]] = []
-    for item in http_items:
-        res = await runner.choose(
-            question='Which HTTP response category describes this captured exchange?',
-            options=RESPONSE_CLASS_OPTIONS,
-            context=frame_decision_excerpt('http_exchange', item, max_chars=2000),
+        skill_raw = await runner.choose_many(
+            skill_questions,
+            context=discovery_context,
             allow_uncalibrated=allow_uncalibrated,
         )
-        response_classes.append(
-            {
-                'evidence_id': item.id,
-                'method': item.http.request.method,
-                'url': item.http.request.url,
-                'status': item.http.response.status_code,
-                **_serialize_result(res, threshold=threshold),
-            }
+        skill_suggestions: list[dict[str, Any]] = []
+        for key, res in skill_raw.items():
+            skill_name = key_to_skill[key]
+            p_yes = res.prob('yes')
+            skill_suggestions.append(
+                {
+                    'skill': skill_name,
+                    'p_yes': None if p_yes is None else round(p_yes, 4),
+                    **_serialize_result(res, threshold=threshold),
+                }
+            )
+        skill_suggestions.sort(
+            key=lambda row: row['p_yes'] if row['p_yes'] is not None else (1.0 if row['top_label'] == 'yes' else 0.0),
+            reverse=True,
         )
 
-    # 3. Finding second-opinion triage (#258 preview).
-    evidence_by_id = {item.id: item for item in snapshot.evidence}
-    finding_triage: list[dict[str, Any]] = []
-    for finding in findings:
-        payload = _finding_context_payload(finding, evidence_by_id)
-        res = await runner.choose(
-            question='Which triage assessment applies to this finding and its captured evidence?',
-            options=TRIAGE_OPTIONS,
-            context=frame_decision_excerpt('finding_evidence', payload, max_chars=3000),
-            allow_uncalibrated=allow_uncalibrated,
-        )
-        finding_triage.append(
-            {
-                'finding_id': finding.id,
-                'check_id': finding.check_id,
-                'severity': finding.severity,
-                'title': finding.title,
-                **_serialize_result(res, threshold=threshold),
-            }
-        )
+        # 2. Response classification (#261 preview).
+        response_classes: list[dict[str, Any]] = []
+        for item in http_items:
+            res = await runner.choose(
+                question='Which HTTP response category describes this captured exchange?',
+                options=RESPONSE_CLASS_OPTIONS,
+                context=frame_decision_excerpt('http_exchange', item, max_chars=2000),
+                allow_uncalibrated=allow_uncalibrated,
+            )
+            response_classes.append(
+                {
+                    'evidence_id': item.id,
+                    'method': item.http.request.method,
+                    'url': item.http.request.url,
+                    'status': item.http.response.status_code,
+                    **_serialize_result(res, threshold=threshold),
+                }
+            )
+
+        # 3. Finding second-opinion triage (#258 preview).
+        evidence_by_id = {item.id: item for item in snapshot.evidence}
+        finding_triage: list[dict[str, Any]] = []
+        for finding in findings:
+            payload = _finding_context_payload(finding, evidence_by_id)
+            res = await runner.choose(
+                question='Which triage assessment applies to this finding and its captured evidence?',
+                options=TRIAGE_OPTIONS,
+                context=frame_decision_excerpt('finding_evidence', payload, max_chars=3000),
+                allow_uncalibrated=allow_uncalibrated,
+            )
+            finding_triage.append(
+                {
+                    'finding_id': finding.id,
+                    'check_id': finding.check_id,
+                    'severity': finding.severity,
+                    'title': finding.title,
+                    **_serialize_result(res, threshold=threshold),
+                }
+            )
 
     all_outcomes: list[DecisionOutcome] = [
         *(row['outcome'] for row in skill_suggestions),
@@ -344,6 +374,7 @@ async def validate_run(
     max_evidence: int,
     max_findings: int,
     timeout_seconds: float,
+    include_content_in_spans: bool = False,
 ) -> dict[str, Any]:
     """Load *run_id* read-only and run every configured decision model against it."""
     snapshot = await load_run_snapshot(db_path, run_id)
@@ -359,6 +390,7 @@ async def validate_run(
                 max_evidence=max_evidence,
                 max_findings=max_findings,
                 timeout_seconds=timeout_seconds,
+                include_content_in_spans=include_content_in_spans,
             )
         )
     return {
@@ -466,6 +498,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument('--max-evidence', type=int, default=10, help='max deduplicated HTTP exchanges to classify')
     parser.add_argument('--max-findings', type=int, default=20, help='max findings to triage')
     parser.add_argument('--timeout', type=float, default=15.0, help='per-call timeout in seconds (default: 15.0)')
+    parser.add_argument(
+        '--logfire', action='store_true', help=f'send telemetry traces to Logfire (or set {LOGFIRE_ENV}=1)'
+    )
+    parser.add_argument(
+        '--logfire-content',
+        action='store_true',
+        help=f'keep prompts and evidence excerpts out of the secret scrubber in traces (or set {LOGFIRE_CONTENT_ENV}=1)',
+    )
+    parser.add_argument(
+        '--log-file', default=None, help=f'write traces to a local JSONL file, or "off" (or set {LOG_FILE_ENV})'
+    )
     parser.add_argument('--json', action='store_true', help='print JSON report to stdout')
     parser.add_argument('-o', '--out', type=Path, default=None, help='write full JSON report to PATH')
     args = parser.parse_args(argv)
@@ -488,6 +531,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f'validate_run: {exc}', file=sys.stderr)
         return 1
 
+    remote = bool(args.logfire) or os.environ.get(LOGFIRE_ENV) == '1'
+    log_path = resolve_log_path('validate', args.log_file)
+    content = bool(args.logfire_content) or os.environ.get(LOGFIRE_CONTENT_ENV) == '1'
+    if remote or log_path is not None:
+        configure_telemetry(
+            log_path=log_path,
+            remote=remote,
+            service_version=engine.engine_version(),
+            content=content,
+        )
+    else:
+        suppress_unconfigured_warning()
+
     db_path = args.db if args.db is not None else resolve_db_path(None)
     try:
         report = anyio.run(
@@ -499,6 +555,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_evidence=int(args.max_evidence),
                 max_findings=int(args.max_findings),
                 timeout_seconds=float(args.timeout),
+                include_content_in_spans=content,
             )
         )
     except PartexError as exc:
