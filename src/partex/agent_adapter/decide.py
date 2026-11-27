@@ -35,6 +35,7 @@ from pydantic_ai.settings import ModelSettings
 
 from ..models import REDACTED, ArtifactEvidence, ConfigEvidence, Evidence, HttpEvidence, redact
 from ..models_config import DecisionModelConfig
+from ..telemetry import suppress_unconfigured_warning
 from .tools import UNTRUSTED_TAG
 
 DECISION_DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -408,6 +409,7 @@ class DecisionRunner:
         self.calls_used += 1
         start = time.perf_counter()
 
+        suppress_unconfigured_warning()
         with logfire.span(
             'partex.decision',
             model=self.config.spec,

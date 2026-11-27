@@ -36,11 +36,17 @@ from .registry import build_registry
 from .report import gather_report_payload, render_report_text
 from .sandboxes import detect_sandboxes, sandboxes_as_dicts
 from .storage import RunReader, RunRecord, RunStore, list_reports, read_report
-from .telemetry import LOG_FILE_ENV, announce, configure_telemetry, resolve_log_path
+from .telemetry import (
+    LOG_FILE_ENV,
+    LOGFIRE_CONTENT_ENV,
+    LOGFIRE_ENV,
+    announce,
+    configure_telemetry,
+    resolve_log_path,
+    suppress_unconfigured_warning,
+)
 
 DB_ENV = 'PARTEX_DB'
-LOGFIRE_ENV = 'PARTEX_LOGFIRE'
-LOGFIRE_CONTENT_ENV = 'PARTEX_LOGFIRE_CONTENT'
 SKILL_DIR_ARGS: dict[str, Any] = {
     'action': 'append',
     'default': [],
@@ -996,6 +1002,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if args.command in {'chat', 'agent'}:
                 announce(log_path)
+        else:
+            suppress_unconfigured_warning()
         return handler(args)
     except CheckSelectionError as exc:
         print(f'partex: {exc.rule_code}: {exc}', file=sys.stderr)

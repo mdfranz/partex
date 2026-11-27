@@ -28,6 +28,7 @@ from pydantic_ai.settings import ModelSettings
 from ..errors import PartexError
 from ..models import REDACTED
 from ..models_config import SearchModelConfig, SearchProvider
+from ..telemetry import suppress_unconfigured_warning
 from .tools import frame_untrusted
 
 SEARCH_QUERY_MAX_CHARS = 200
@@ -260,6 +261,7 @@ class WebSearcher:
         with logfire.span(
             'partex.web_search',
             provider=self.config.provider,
+        suppress_unconfigured_warning()
             mode=self.config.auth_mode,
             project=self.config.project,
         ) as span:
